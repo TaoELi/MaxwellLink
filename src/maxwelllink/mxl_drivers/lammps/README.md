@@ -1,8 +1,14 @@
 # LAMMPS driver connecting with FDTD engines via MaxwellLink
 
-To use this functionality, please copy **fix_maxwelllink.h** and **fix_maxwelllink.cpp** to the LAMMPS source code (lammps/src/MISC/) and then recompile LAMMPS.
+To use this functionality, after [installing MaxwellLink](../../../../README.md#install-from-source), please run
+```bash
+mxl_install_lammps
+```
+and then a modified LAMMPS executable file **lmp_mxl** will appear in your local $PATH.
 
-Then the recompiled LAMMPS code can connect with MaxwellLink SocketHub via the following fix (similar as **fix ipi**):
+Althernatively, for users faimilar with LAMMPS install, please copy **fix_maxwelllink.h** and **fix_maxwelllink.cpp** to the LAMMPS source code (lammps/src/MISC/) and then recompile LAMMPS.
+
+Our modified LAMMPS can connect with MaxwellLink SocketHub via the following fix (similar as **fix ipi**):
 ```bash
 fix 1 all mxl host port
 ```
