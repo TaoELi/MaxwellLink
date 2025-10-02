@@ -18,7 +18,7 @@ eV2cminv = 8065.540106923572
 sigma = 1e5
 w_step = 1e-5
 linewidth = 4.0 / sigma * au2eV
-linewidth = 5e-2
+linewidth = 1e-2
 print("linewidth is", linewidth)
 e_cutoff_ev = 30.0
 e_cutoff_au = e_cutoff_ev / au2eV
@@ -232,7 +232,7 @@ def plot_dynamics():
         xlabel=r"Frequency [eV]",
     )
 
-    clp.adjust(tight_layout=True)
+    clp.adjust(tight_layout=True, savefile="rt_vs_lr_tddft_spectrum.png")
 
 
 if __name__ == "__main__":

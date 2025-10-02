@@ -50,6 +50,7 @@ class RTTDDFTModel(DummyModel):
         basis: str = "sto-3g",
         dt_rttddft_au: float = 0.04,
         delta_kick_au: float = 0.0e-3,
+        delta_kick_direction: str = "xyz",
         memory: str = "8GB",
         num_threads: int = 1,
         checkpoint: bool = False,
@@ -71,6 +72,7 @@ class RTTDDFTModel(DummyModel):
         Default is 0.0e-3 a.u. If this value is set to a non-zero value, the driver will apply a delta-kick perturbation at t=0 to initiate the dynamics.
         With this delta-kick, and also setting the MEEP coupling to zero, one can compute the conventional RT-TDDFT linear absorption spectrum of the molecule.
         This functinonality is mainly for testing and validation purposes.
+        + **`delta_kick_direction`** (str): Direction of the initial delta-kick perturbation. Can be "x", "y", "z", "xy", "xz", "yz", or "xyz". Default is "xyz".
         + **`memory`** (str): Memory allocation for Psi4, e.g. "8GB", "500MB". Default is "8GB".
         + **`num_threads`** (int): Number of CPU threads to use in Psi4. Default is 1.
         + **`checkpoint`** (bool): Whether to dump checkpoint files during propagation to allow restarting from the last checkpoint. Default is False.
@@ -99,6 +101,22 @@ class RTTDDFTModel(DummyModel):
         self.basis = basis
         self.dt_rttddft_au = dt_rttddft_au
         self.delta_kick_au = delta_kick_au
+        if delta_kick_direction.lower() not in ["x", "y", "z", "xy", "xz", "yz", "xyz"]:
+            raise ValueError(
+                "Invalid delta_kick_direction. Must be one of 'x', 'y', 'z', 'xy', 'xz', 'yz' or 'xyz'."
+            )
+        self.delta_kick_direction = delta_kick_direction.lower()
+        self.delta_kick_vec = [0.0, 0.0, 0.0]
+        if "x" in self.delta_kick_direction:
+            self.delta_kick_vec[0] = 1.0
+        if "y" in self.delta_kick_direction:
+            self.delta_kick_vec[1] = 1.0
+        if "z" in self.delta_kick_direction:
+            self.delta_kick_vec[2] = 1.0
+        if self.delta_kick_au != 0.0:
+            print(
+                f"Initial delta-kick perturbation will be applied with strength {self.delta_kick_au} a.u. along direction(s) {self.delta_kick_direction}."
+            )
         self.memory = memory
         self.num_threads = num_threads
         self.remove_permanent_dipole = remove_permanent_dipole
@@ -420,13 +438,13 @@ class RTTDDFTModel(DummyModel):
                     # apply the initial delta-kick perturbation at t=0 to initiate the dynamics
                     if self.verbose:
                         print(
-                            f"[molecule {self.molecule_id}] Applying initial delta-kick perturbation with strength {self.delta_kick_au} a.u. along x, y, z directions."
+                            f"[molecule {self.molecule_id}] Applying initial delta-kick perturbation with strength {self.delta_kick_au} a.u. along direction(s) {self.delta_kick_direction}."
                         )
                     self.Fa += self.delta_kick_au * (
-                        self.mu_ints[0] + self.mu_ints[1] + self.mu_ints[2]
+                        self.mu_ints[0] * self.delta_kick_vec[0] + self.mu_ints[1] * self.delta_kick_vec[1] + self.mu_ints[2] * self.delta_kick_vec[2]
                     )
                     self.Fb += self.delta_kick_au * (
-                        self.mu_ints[0] + self.mu_ints[1] + self.mu_ints[2]
+                        self.mu_ints[0] * self.delta_kick_vec[0] + self.mu_ints[1] * self.delta_kick_vec[1] + self.mu_ints[2] * self.delta_kick_vec[2]
                     )
 
                 # Orthonormal-basis densities & KS matrices
