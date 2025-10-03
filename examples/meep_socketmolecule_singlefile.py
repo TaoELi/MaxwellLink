@@ -42,7 +42,7 @@ proc = mxl.launch_driver(
 
 sim.run(
     mxl.update_molecules(hub=hub, sources_non_molecule=[], molecules=[molecule1]),
-    until=200,
+    until=2000,
 )
 
 mxl.terminate_driver(proc=proc)

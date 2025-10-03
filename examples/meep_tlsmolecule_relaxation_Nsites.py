@@ -2,6 +2,7 @@ import numpy as np
 import meep as mp
 import maxwelllink as mxl
 import matplotlib.pyplot as plt
+import sys
 
 cell = mp.Vector3(8, 8, 0)
 geometry = []
@@ -12,7 +13,10 @@ resolution = 10
 # define a TLS molecule
 dipole_moment = 1e-1
 frequency = 1.0
-tls = mxl.TLSMolecule(
+n_tls = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+tls_lst = []
+for idx in range(n_tls):
+    tls = mxl.TLSMolecule(
     resolution=resolution,
     center=mp.Vector3(0, 0, 0),
     size=mp.Vector3(1, 1, 1),
@@ -21,10 +25,11 @@ tls = mxl.TLSMolecule(
     sigma=0.1,
     dimensions=2,
     orientation=mp.Ez,
-)
+    )
 
-# switch from ground state to excited-state population with 1e-4
-tls.reset_tls_population(1e-4)
+    # switch from ground state to excited-state population with 1e-4
+    tls.reset_tls_population(1e-4)
+    tls_lst.append(tls)
 
 sim = mp.Simulation(
     cell_size=cell,
@@ -35,11 +40,13 @@ sim = mp.Simulation(
 )
 
 sim.run(
-    mxl.update_molecules_no_socket(sources_non_molecule=[], molecules=[tls]), until=2000
+    mxl.update_molecules_no_socket(sources_non_molecule=[], molecules=tls_lst), until=2000
 )
 
 # if we are running this script directly, plot the results
 if __name__ == "__main__" and mp.am_master():
+
+    tls = tls_lst[0]  # check only the first TLS
 
     print("final population:", tls.additional_data_history[-1]["Pe"].real)
 

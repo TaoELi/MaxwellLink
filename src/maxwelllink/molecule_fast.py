@@ -698,9 +698,9 @@ class SocketMolecule(DummyMolecule):
         self.dimensions = dimensions
         self.sigma = sigma
         self.rescaling_factor = rescaling_factor
-        print(
-            f"SocketMolecule: using a rescaling factor of {self.rescaling_factor} for the dipole moment and polarization density."
-        )
+        #print(
+        #    f"SocketMolecule: using a rescaling factor of {self.rescaling_factor} for the dipole moment and polarization density."
+        #)
 
         # MEEP by default uses the units system of epsion_0 = mu_0 = c = 1.
         # SocketMolecule communicates with the driver code using atomic units.
@@ -739,9 +739,9 @@ class SocketMolecule(DummyMolecule):
         self.polarization_fingerprint_hash = hash(
             json.dumps(self.polarization_fingerprint)
         )
-        print(
-            f"SocketMolecule: polarization fingerprint hash = {self.polarization_fingerprint_hash}"
-        )
+        #print(
+        #    f"SocketMolecule: polarization fingerprint hash = {self.polarization_fingerprint_hash}"
+        #)
 
         self._init_sources()
 
