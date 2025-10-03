@@ -15,7 +15,7 @@ from typing import Optional, Dict, List
 from .sockets import SocketHub
 import json
 from collections import defaultdict
-
+import atexit, weakref
 
 try:
     import meep as mp
@@ -24,11 +24,32 @@ except ImportError:
         "The meep package is required for this module. Please install it: https://meep.readthedocs.io/en/latest/Installation/."
     )
 
+# We define the following two global dictionaries to hold unique state across multiple molecule instances.
 # holds the instantaneous (per–time step) amplitude that Meep will sample
 instantaneous_source_amplitudes = defaultdict(float)
-
 # one Meep Source per unique polarization fingerprint (shared by molecules)
 _fingerprint_source = {}
+
+
+# The issue is if this file is called many times within the same python interpreter session,
+# we need to ensure that the global state is reset between simulations.
+def reset_module_state():
+    """Clear shared state so a new Simulation starts from a clean slate."""
+    instantaneous_source_amplitudes.clear()
+    _fingerprint_source.clear()
+
+
+# one-time registration guard for atexit
+__MXL__ATEXIT_REGISTERED = {"flag": False}
+
+
+def _register_sim_cleanup(sim):
+    """Ensure we reset globals when this Simulation ends (GC) and at interpreter exit."""
+    if not __MXL__ATEXIT_REGISTERED["flag"]:
+        atexit.register(reset_module_state)
+        __MXL__ATEXIT_REGISTERED["flag"] = True
+    # When `sim` is garbage-collected, run the reset, too.
+    weakref.finalize(sim, reset_module_state)
 
 
 def make_custom_time_src(key):
@@ -567,6 +588,8 @@ def update_molecules_no_socket(sources_non_molecule=None, molecules=None):
                 {id(src): src for m in molecules for src in m.sources}.values()
             )
             sim.change_sources(list(sources_non_molecule) + unique_sources)
+            # register cleanup to reset global state when sim ends or at exit
+            _register_sim_cleanup(sim)
             started["flag"] = True
 
         # 1) (optional) precompute field integrals by fingerprint
@@ -907,6 +930,8 @@ def update_molecules_no_mpi(
             ok = hub.wait_until_bound(init_payloads, require_init=True, timeout=None)
             if not ok:
                 raise RuntimeError("wait_until_bound timed out")
+            # register cleanup to reset global state when sim ends or at exit
+            _register_sim_cleanup(sim)
             started["flag"] = True
 
             # Install sources ONCE: union of non-molecule sources + unique shared sources
@@ -1089,6 +1114,8 @@ def update_molecules(
                 {id(src): src for m in molecules for src in m.sources}.values()
             )
             sim.change_sources(list(sources_non_molecule) + unique_sources)
+            # register cleanup to reset global state when sim ends or at exit
+            _register_sim_cleanup(sim)
             started["flag"] = True
 
         # ============= 2) MID-RUN GUARD (BLOCK UNTIL EVERYONE IS STILL BOUND) =============
