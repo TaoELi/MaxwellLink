@@ -51,7 +51,7 @@ for i in range(n_mol):
 
 sim.run(
     mxl.update_molecules(hub=hub, sources_non_molecule=[], molecules=mol_lst),
-    until=2000,
+    until=500/n_mol,
 )
 
 '''
