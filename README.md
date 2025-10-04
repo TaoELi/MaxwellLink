@@ -33,24 +33,26 @@ conda create -n $CONDA_ENV -c conda-forge pymeep="*=mpi_mpich_*"
 git clone git@github.com:TaoELi/MaxwellLink.git
 cd MaxwellLink/
 pip install .
-
-# [optional] install Psi4 quantum chemistry code for RT-TDDFT driver
-conda install conda-forge::psi4
-
-# [optional] install modified LAMMPS code (with fix mxl support) for classical MD driver
-mxl_install_lammps
-# If the above command fails, please try the bash script below instead
-# bash ./src/maxwelllink/mxl_drivers/lammps/mxl_install_lammps.sh
 ```
 
-### Uninstall 
+### Install optional molecular drivers
+To fully utilize **MaxwellLink**, we can install one or a few of the following packages.
 ```bash
-pip uninstall maxwelllink
+# 1. RT-TDDFT driver using Psi4 quantum chemistry code 
+conda install conda-forge::psi4
+
+# 2. classical MD driver using modified LAMMPS (with fix mxl)
+mxl_install_lammps
 ```
 
 ### Test
 ```bash
 pytest -v
+```
+
+### Uninstall 
+```bash
+pip uninstall maxwelllink
 ```
 
 ## How to use MaxwellLink 
