@@ -22,7 +22,7 @@ def _pick_free_port() -> int:
 
 def _resolve_driver_path() -> list[str]:
     """
-    Return an argv list to run mxl_driver.py.
+    Return an argv list to run mxl_driver.
 
     Prefers the script located in the same directory as this test file.
     Falls back to a script on PATH.
@@ -30,17 +30,17 @@ def _resolve_driver_path() -> list[str]:
     """
     # 1) local file next to this test
     here = Path(__file__).resolve().parent
-    local = here / "mxl_driver.py"
+    local = here / "mxl_driver"
     if local.exists():
         return [sys.executable, "-u", str(local)]
 
     # 2) installed console script on PATH
-    which = shutil.which("mxl_driver.py")
+    which = shutil.which("mxl_driver")
     if which:
         # Use directly; assume it has correct shebang/venv
         return [which]
 
-    pytest.skip("mxl_driver.py not found (neither next to the test nor on PATH).")
+    pytest.skip("mxl_driver not found (neither next to the test nor on PATH).")
 
 
 @pytest.mark.slow

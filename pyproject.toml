@@ -20,6 +20,8 @@ dependencies = [
 # `mxl_driver.py` and other scripts available on PATH
 [project.scripts]
 "mxl_driver.py" = "maxwelllink.mxl_drivers.python.mxl_driver:mxl_driver_main"
+# a simplified version of mxl_driver.py 
+"mxl_driver" = "maxwelllink.mxl_drivers.python.mxl_driver:mxl_driver_main"
 "mxl_install_lammps" = "maxwelllink.mxl_drivers.lammps.install:mxl_lammps_main"
 
 [tool.setuptools]

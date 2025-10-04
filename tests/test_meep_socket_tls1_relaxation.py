@@ -30,17 +30,17 @@ def _resolve_driver_path() -> list[str]:
     """
     # 1) local file next to this test
     here = Path(__file__).resolve().parent
-    local = here / "mxl_driver.py"
+    local = here / "mxl_driver"
     if local.exists():
         return [sys.executable, "-u", str(local)]
 
     # 2) installed console script on PATH
-    which = shutil.which("mxl_driver.py")
+    which = shutil.which("mxl_driver")
     if which:
         # Use directly; assume it has correct shebang/venv
         return [which]
 
-    pytest.skip("mxl_driver.py not found (neither next to the test nor on PATH).")
+    pytest.skip("mxl_driver not found (neither next to the test nor on PATH).")
 
 
 @pytest.mark.slow
