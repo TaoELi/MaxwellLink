@@ -100,6 +100,8 @@ sim = mp.Simulation(cell_size=cell,
 sim.run(mxl.update_molecules(hub, [molecule1], sources_non_molecule), until=10)
 ```
 
+### Supported molecular drivers
+
 After running the above python code, **we need to lunch the driver code in a separate terminal for connecting with FDTD**. At this moment, both the **Python** and **C++** drivers are available for usage. 
 
 To use the Python driver, please check 
