@@ -6,8 +6,8 @@ mp = pytest.importorskip("meep", reason="MEEP/pymeep is required for this test")
 import maxwelllink as mxl
 
 
-@pytest.mark.slow
-def test_1tls_relaxation_matches_analytical(plotting=False):
+@pytest.mark.core
+def test_2d_1tls_relaxation_matches_analytical(plotting=False):
     """
     Numerically integrate TLS population relaxation and compare
     against the analytical golden-rule rate in 2D.
@@ -37,7 +37,7 @@ def test_1tls_relaxation_matches_analytical(plotting=False):
     )
 
     # small initial excited-state population
-    tls.reset_tls_population(1e-4)
+    tls.reset_tls_population(0.9)
 
     sim = mp.Simulation(
         cell_size=cell,
@@ -60,7 +60,10 @@ def test_1tls_relaxation_matches_analytical(plotting=False):
 
         # analytical golden-rule rate in 2D
         gamma = dipole_moment**2 * (frequency) ** 2 / 2.0
-        population_analytical = population[0] * np.exp(-time * gamma)
+        # this form is correct only near ground state
+        population_analytical = population[0] * np.exp(-time * gamma) 
+        # this form is correct for all times [see https://journals.aps.org/pra/pdf/10.1103/PhysRevA.97.032105 Eq. A13]
+        population_analytical = np.exp(-time * gamma) / (np.exp(-time * gamma) + (1.0 - population[0]) / population[0])
 
         std_dev = np.std(population - population_analytical) / population[0]
         max_abs_diff = (
@@ -83,4 +86,4 @@ def test_1tls_relaxation_matches_analytical(plotting=False):
 
 
 if __name__ == "__main__":
-    test_1tls_relaxation_matches_analytical(plotting=True)
+    test_2d_1tls_relaxation_matches_analytical(plotting=True)

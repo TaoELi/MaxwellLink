@@ -5,11 +5,11 @@ mp = pytest.importorskip("meep", reason="MEEP/pymeep is required for this test")
 mxl = pytest.importorskip("maxwelllink", reason="maxwelllink is required for this test")
 
 
-@pytest.mark.slow
-def test_ntls_relaxation_matches_analytical(plotting=False):
+@pytest.mark.core
+def test_2d_ntls_relaxation_matches_analytical(plotting=False):
     """
     Numerically integrate TLS population relaxation and compare
-    against the analytical golden-rule rate in 2D.
+    against the analytical golden-rule rate in 2D in the superradiance limit.
 
     Pass criteria (normalized to initial pop):
         std_dev < 3e-3 and max_abs_diff < 8e-3
@@ -64,6 +64,8 @@ def test_ntls_relaxation_matches_analytical(plotting=False):
         # analytical golden-rule rate in 2D
         gamma = dipole_moment**2 * (frequency) ** 2 / 2.0 * n_tls
         population_analytical = population[0] * np.exp(-time * gamma)
+        # this form is correct for all times [see https://journals.aps.org/pra/pdf/10.1103/PhysRevA.97.032105 Eq. A13]
+        population_analytical = np.exp(-time * gamma) / (np.exp(-time * gamma) + (1.0 - population[0]) / population[0])
 
         std_dev = np.std(population - population_analytical) / population[0]
         max_abs_diff = (
@@ -86,4 +88,4 @@ def test_ntls_relaxation_matches_analytical(plotting=False):
 
 
 if __name__ == "__main__":
-    test_ntls_relaxation_matches_analytical(plotting=True)
+    test_2d_ntls_relaxation_matches_analytical(plotting=True)

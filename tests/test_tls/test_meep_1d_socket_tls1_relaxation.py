@@ -22,7 +22,7 @@ def _pick_free_port() -> int:
 
 def _resolve_driver_path() -> list[str]:
     """
-    Return an argv list to run mxl_driver.py.
+    Return an argv list to run mxl_driver.
 
     Prefers the script located in the same directory as this test file.
     Falls back to a script on PATH.
@@ -43,14 +43,14 @@ def _resolve_driver_path() -> list[str]:
     pytest.skip("mxl_driver not found (neither next to the test nor on PATH).")
 
 
-@pytest.mark.slow
-def test_1tls_relaxation_matches_analytical_via_socket(plotting=False):
+@pytest.mark.core
+def test_1d_1tls_relaxation_matches_analytical_via_socket(plotting=False):
     """
     End-to-end (socket) TLS relaxation test.
 
-    Starts the external mxl_driver.py (TLS model), runs a Meep simulation that
+    Starts the external mxl_driver (TLS model), runs a Meep simulation that
     couples to the driver via MaxwellLink sockets, collects the population trace,
-    and checks it against the 2D golden-rule rate.
+    and checks it against the 1D golden-rule rate.
 
     Pass criteria (normalized to initial pop):
         std_dev < 3e-3 and max_abs_diff < 8e-3
@@ -66,7 +66,7 @@ def test_1tls_relaxation_matches_analytical_via_socket(plotting=False):
     proc = None
     try:
         # --- common simulation setup ---
-        cell = mp.Vector3(8, 8, 0)
+        cell = mp.Vector3(8, 0, 0)
         geometry = []
         sources_non_molecule = []
         pml_layers = [mp.PML(3.0)]
@@ -82,9 +82,9 @@ def test_1tls_relaxation_matches_analytical_via_socket(plotting=False):
             molecule_id=0,
             resolution=resolution,
             center=mp.Vector3(0, 0, 0),
-            size=mp.Vector3(1, 1, 1),
+            size=mp.Vector3(1, 0, 0),
             sigma=0.1,
-            dimensions=2,
+            dimensions=1,
             time_units_fs=0.1,
         )
 
@@ -99,7 +99,7 @@ def test_1tls_relaxation_matches_analytical_via_socket(plotting=False):
         if mp.am_master():
             driver_argv = _resolve_driver_path() + shlex.split(
                 f"--model tls --port {port} "
-                '--param "omega=0.242, mu12=187, orientation=2, pe_initial=1e-4" '
+                '--param "omega=0.242, mu12=187, orientation=2, pe_initial=0.1" '
             )
             # Use a fresh, non-blocking subprocess; inherit env/stdio for easy debugging
             proc = subprocess.Popen(driver_argv)
@@ -131,11 +131,13 @@ def test_1tls_relaxation_matches_analytical_via_socket(plotting=False):
             time_fs = time_au * 0.02418884254
             time_meep_units = time_fs / 0.1
 
-            # Analytical golden-rule rate in 2D
+            # Analytical golden-rule rate in 1D
             print("dipole moment", dipole_moment)
-            gamma = dipole_moment**2 * (frequency) ** 2 / 2.0
+            gamma = dipole_moment**2 * frequency
             print("gamma", gamma)
             population_analytical = population[0] * np.exp(-time_meep_units * gamma)
+            # this form is correct for all times [see https://journals.aps.org/pra/pdf/10.1103/PhysRevA.97.032105 Eq. A13]
+            population_analytical = np.exp(-time_meep_units * gamma) / (np.exp(-time_meep_units * gamma) + (1.0 - population[0]) / population[0])
 
             std_dev = np.std(population - population_analytical) / population[0]
             max_abs_diff = (
@@ -172,4 +174,4 @@ def test_1tls_relaxation_matches_analytical_via_socket(plotting=False):
 
 
 if __name__ == "__main__":
-    test_1tls_relaxation_matches_analytical_via_socket(plotting=True)
+    test_1d_1tls_relaxation_matches_analytical_via_socket(plotting=True)

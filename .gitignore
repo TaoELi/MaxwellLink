@@ -213,6 +213,7 @@ log.lammps
 # Psi4
 psi4*.dat
 timer.dat
+psi*.clean
 
 # raw tests
 tests/raw_tests/

@@ -43,12 +43,12 @@ def _resolve_driver_path() -> list[str]:
     pytest.skip("mxl_driver not found (neither next to the test nor on PATH).")
 
 
-@pytest.mark.slow
-def test_2tls_relaxation_matches_analytical_via_socket(plotting=False):
+@pytest.mark.core
+def test_2d_2tls_relaxation_matches_analytical_via_socket(plotting=False):
     """
-    End-to-end (socket) TLS relaxation test.
+    End-to-end (socket) TLS relaxation test in the superradiance limit.
 
-    Starts the external mxl_driver.py (TLS model), runs a Meep simulation that
+    Starts the external mxl_driver (2 TLS models), runs a Meep simulation that
     couples to the driver via MaxwellLink sockets, collects the population trace,
     and checks it against the 2D golden-rule rate.
 
@@ -151,6 +151,8 @@ def test_2tls_relaxation_matches_analytical_via_socket(plotting=False):
             gamma = dipole_moment**2 * (frequency) ** 2 / 2.0 * 2
             print("gamma", gamma)
             population_analytical = population[0] * np.exp(-time_meep_units * gamma)
+            # this form is correct for all times [see https://journals.aps.org/pra/pdf/10.1103/PhysRevA.97.032105 Eq. A13]
+            population_analytical = np.exp(-time_meep_units * gamma) / (np.exp(-time_meep_units * gamma) + (1.0 - population[0]) / population[0])
 
             std_dev = np.std(population - population_analytical) / population[0]
             max_abs_diff = (
@@ -198,4 +200,4 @@ def test_2tls_relaxation_matches_analytical_via_socket(plotting=False):
 
 
 if __name__ == "__main__":
-    test_2tls_relaxation_matches_analytical_via_socket(plotting=True)
+    test_2d_2tls_relaxation_matches_analytical_via_socket(plotting=True)

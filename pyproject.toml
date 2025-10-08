@@ -22,6 +22,7 @@ dependencies = [
 "mxl_driver.py" = "maxwelllink.mxl_drivers.python.mxl_driver:mxl_driver_main"
 # a simplified version of mxl_driver.py 
 "mxl_driver" = "maxwelllink.mxl_drivers.python.mxl_driver:mxl_driver_main"
+# a simple installation script for modified LAMMPS with MaxwellLink support
 "mxl_install_lammps" = "maxwelllink.mxl_drivers.lammps.install:mxl_lammps_main"
 
 [tool.setuptools]
@@ -76,7 +77,9 @@ per-file-ignores = [
 
 [tool.pytest.ini_options]
 markers = [
+  "core: marks tests as core (deselect with '-m \"not core\"')",
   "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "optional: marks tests as optional (deselect with '-m \"not optional\"')",
 ]
 filterwarnings = [
   # SWIG/pymeep emits these during import; ignore just those messages
