@@ -206,9 +206,9 @@ class RTEhrenfestModel(RTTDDFTModel):
         self._step_in_cycle = 0
         self._V_inst = self.Vk.copy()
 
-        self.traj_R = []
-        self.traj_V = []
-        self.traj_F = []
+        self.traj_R = [self.Rk.copy()]
+        self.traj_V = [self.Vk.copy()]
+        self.traj_F = [self.Fk.copy()]
 
     # ------------ standalone functions for debugging and testing --------------
     def _molecule_positions_bohr(self):
@@ -1049,6 +1049,14 @@ class RTEhrenfestModel(RTTDDFTModel):
             # clear step counter
             self._step_in_cycle = 0
             self._V_inst = self.Vk
+
+            if self.verbose:
+                print("[RT-Ehrenfest] one nuclear step done.")
+                print("[RT-Ehrenfest] updated molecular geometry:")
+                print(self.Rk)
+
+            # store positions
+            self.traj_R.append(self.Rk.copy())
         else:
             self._step_in_cycle = i
 
@@ -1140,6 +1148,13 @@ class RTEhrenfestModel(RTTDDFTModel):
             self.Fk = Fk
             self._V_inst = self.Vk
 
+            if self.verbose:
+                print("[RT-Ehrenfest] one nuclear step done.")
+                print("[RT-Ehrenfest] updated molecular geometry:")
+                print(self.Rk)
+            
+            self.traj_R.append(self.Rk.copy())
+
     def propagate(self, effective_efield_vec):
         """
         Propagate the quantum molecular dynamics given the effective electric field vector. This
@@ -1198,3 +1213,5 @@ if __name__ == "__main__":
     # model._propagate_rttddft_ehrenfest(n_nuc_steps=2, efield_vec=np.array([0.0, 0.0, 1e-2]), force_type="ehrenfest")
     for i in range(20):
         model.propagate(effective_efield_vec=np.array([0.0, 0.0, 1e-2]))
+    # save molecular geometries
+    np.savez(f"ohba_geom_{i}.npz", geometry=model.traj_R)
