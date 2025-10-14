@@ -68,7 +68,8 @@ class RTEhrenfestModel(RTTDDFTModel):
         friction_gamma_au: float = 0.0,
         temperature_K: float = None,
         rng_seed: int = 1234,
-        homo_to_lumo: bool = False
+        homo_to_lumo: bool = False,
+        partial_charges: list = None
     ):
         """
         Initialize the necessary parameters for the RT-TDDFT quantum dynamics model.
@@ -94,7 +95,15 @@ class RTEhrenfestModel(RTTDDFTModel):
         + **`dft_grid_name`** (str): Name of the DFT grid to use in Psi4, e.g. "SG0", "SG1", "SG2", "SG3". Default is "" (Psi4 default). Using "SG0" can speed up calculations.
         + **`dft_radial_points`** (int): Number of radial points in the DFT grid. Default is -1 (Psi4 default).
         + **`dft_spherical_points`** (int): Number of spherical points in the DFT grid. Default is -1 (Psi4 default).
-        + **`density_fitting`** (bool): Whether to use density fitting (DF) to accelerate the DFT calculations. Default is False.
+        + **`force_type`** (str): Type of forces to compute for the nuclei. Can be "bo" for Born-Oppenheimer forces or "ehrenfest" for Ehrenfest forces. Default is "ehrenfest".
+        + **`n_fock_per_nuc`** (int): Number of Fock builds (electronic updates) per nuclear update. Default is 10.
+        + **`n_elec_per_fock`** (int): Number of RT-TDDFT steps per Fock build (electronic update). Default is 10.
+        + **`mass_amu`** (array-like): Array of atomic masses in atomic mass units (amu) for each atom in the molecule. Default is None, which uses the standard atomic masses from Psi4.
+        + **`friction_gamma_au`** (float): Friction coefficient in atomic units (a.u.) for Langevin dynamics. Default is 0.0 a.u. Setting this to a positive value enables Langevin dynamics.
+        + **`temperature_K`** (float): Temperature in Kelvin (K) for Langevin dynamics. Default is None. Setting this to a positive value enables Langevin dynamics.
+        + **`rng_seed`** (int): Random number generator seed for Langevin dynamics. Default is 1234.
+        + **`homo_to_lumo`** (bool): Whether to prepare the initial state by promoting an electron from the HOMO to the LUMO. Default is False.
+        + **`partial_charges`** (array-like): Array of partial charges for each atom in the molecule, required for BOMD simulations. Default is None.
         """
         super().__init__(
             engine=engine,
@@ -127,6 +136,9 @@ class RTEhrenfestModel(RTTDDFTModel):
         self.rng_seed = int(rng_seed)
 
         self.homo_to_lumo = homo_to_lumo
+        self.partial_charges = partial_charges
+
+    # -------------- heavy-load initialization (at INIT) --------------
 
     def initialize(self, dt_new, molecule_id):
         super().initialize(dt_new, molecule_id)
@@ -210,12 +222,26 @@ class RTEhrenfestModel(RTTDDFTModel):
             
         self.Fk = self.compute_forces(efield_vec=None)
 
+        if self.partial_charges is not None:
+            self.partial_charges = np.array(self.partial_charges, dtype=float)
+        else:
+            self.partial_charges = np.zeros(self.mol.natom(), dtype=float)
+
         self._step_in_cycle = 0
         self._V_inst = self.Vk.copy()
 
         self.traj_R = [self.Rk.copy()]
         self.traj_V = [self.Vk.copy()]
         self.traj_F = [self.Fk.copy()]
+
+        self.energies_eh = []
+        self.dipoles_eh = []
+
+        # consider whether to restart from a checkpoint. We do this here because this function
+        # is called in the driver during the INIT stage of the socket communication.
+        if self.restart and self.checkpoint:
+            self._reset_from_checkpoint(self.molecule_id)
+            self.restarted = True
 
     # ------------ standalone functions for debugging and testing --------------
     def _molecule_positions_bohr(self):
@@ -290,12 +316,9 @@ class RTEhrenfestModel(RTTDDFTModel):
         self._refresh_psi4_internals_after_geom_change()  # updates S, X, U, H, ERI, Vpot,...
 
         # 3. map P_O -> new AO densities with the new X = S^{-1/2}
-        print("[debugging] to do _density_from_orth")
         self._density_from_orth(DaO, DbO)
-        print("[debugging] _density_from_orth done")
 
         # 4. rebuild KS/Fock at the new geometry with the mapped densities
-        print("[debugging] to do _build_KS_psi4")
         V_ext = None
         if effective_efield_vec is not None:
             V_ext = (
@@ -306,109 +329,47 @@ class RTEhrenfestModel(RTTDDFTModel):
         self.Fa, self.Fb = self._build_KS_psi4(
             self.Da, self.Db, self.is_restricted, V_ext=V_ext
         )
-        print("[debugging] _build_KS_psi4 done")
-
-    def _refresh_psi4_internals_after_geom_change_old(self):
-        """
-        After moving nuclei, rebuild integrals, and XC machinery. We use a quick SCF
-        to get a valid Wavefunction / basis / grid, but we will not use this SCF density.
-        """
-        # Recompute a ground-state SCF just to refresh wfn, basis, grids, V_potential, etc.
-        _Eref, wfn = psi4.energy(
-            f"{self.functional}", molecule=self.mol, return_wfn=True
-        )
-        self.wfn = wfn
-        mints = psi4.core.MintsHelper(wfn.basisset())
-
-        # One- and two-electron AO integrals (new geometry)
-        self.S = np.asarray(wfn.S())
-        self.H = np.asarray(wfn.H())
-        self.I_ao = np.asarray(mints.ao_eri())  # (pq|rs)
-
-        # Dipole integrals (AO)
-        self.mu_ints = [np.asarray(m) for m in mints.ao_dipole()]
-        if self.remove_permanent_dipole:
-            # Re-apply the permanent-dipole removal in the *new* geometry
-            mu_x0 = np.einsum("pq,pq->", self.mu_ints[0], self.Da + self.Db).real
-            mu_y0 = np.einsum("pq,pq->", self.mu_ints[1], self.Da + self.Db).real
-            mu_z0 = np.einsum("pq,pq->", self.mu_ints[2], self.Da + self.Db).real
-            Iden = np.eye(self.mu_ints[0].shape[0])
-            trD = np.trace(self.Da + self.Db)
-            self.mu_ints = [
-                self.mu_ints[0] - mu_x0 * Iden / trD,
-                self.mu_ints[1] - mu_y0 * Iden / trD,
-                self.mu_ints[2] - mu_z0 * Iden / trD,
-            ]
-
-        # Metric transforms for your orthogonalization pathway
-        self.X = mat_pow(self.S, -0.5)
-        self.U = mat_pow(self.S, 0.5)
-
-        # XC potential machinery (reuse Psi4 V_potential)
-        self.Vpot = wfn.V_potential()
-        self.alpha_hfx = wfn.functional().x_alpha()
-        if self.alpha_hfx < 1.0:
-            self.Vpot.initialize()
-            try:
-                self.Vpot.build_collocation_cache(self.Vpot.nblocks())
-            except Exception:
-                pass
-
-        # Nuclear repulsion for reporting/analysis
-        self.Enuc = self.mol.nuclear_repulsion_energy()
 
     def _rebuild_vpot_fast(self):
         """
-        Build a fresh V_potential (VBase) tied to the *current* geometry and basis,
+        Build a fresh V_potential (VBase) tied to the current geometry and basis,
         without running SCF. Also refresh self.alpha_hfx for hybrids.
         """
-        basis = self.wfn.basisset()  # basis object follows mol's updated positions
-        # 1) Get or build the SuperFunctional that matches self.functional
+        basis = self.wfn.basisset()
+        # 1. Get or build the SuperFunctional that matches self.functional
         sf = None
         try:
             # If the current wfn has a functional, reuse its definition (safer for custom options)
             sf = self.wfn.functional()
-            print(
-                f"[debugging] _rebuild_vpot_fast: Reusing existing functional from wfn: {sf.name()}"
-            )
+
         except Exception:
             # Fall back to building from the functional string
             try:
                 # Newer Psi4:
                 from psi4.driver.dft import build_superfunctional
-
                 sf = build_superfunctional(self.functional, True)
-                print(
-                    f"[debugging] _rebuild_vpot_fast: Built functional from string: {sf.name()}"
-                )
+
             except Exception:
                 # Older Psi4 fallback:
                 sf = psi4.core.SuperFunctional.build_from_string(self.functional, True)
-                print(
-                    f"[debugging] _rebuild_vpot_fast: Built functional from string (old Psi4): {sf.name()}"
-                )
 
         # We need potential (and often gradient) values; request up to first derivative
         try:
             sf.set_max_deriv(1)
-            print("[debugging] _rebuild_vpot_fast: Set functional max_deriv=1")
         except Exception:
             pass
         try:
             sf.initialize()
-            print("[debugging] _rebuild_vpot_fast: Initialized functional")
         except Exception:
             pass
 
-        # 2) Build a *new* VBase tied to current basis & functional
+        # 2. Build a new VBase tied to current basis & functional
         # Tag: "RV" for RKS, "UV" for UKS (Psi4 convention)
         ks_tag = "RV" if self.is_restricted else "UV"
         self.Vpot = psi4.core.VBase.build(basis, sf, ks_tag)
         self.Vpot.initialize()
         try:
-            # This primes collocation caches for all blocks and avoids per-call overheads
             self.Vpot.build_collocation_cache(self.Vpot.nblocks())
-            print("[debugging] _rebuild_vpot_fast: Built collocation cache for Vpot")
         except Exception:
             pass
 
@@ -431,7 +392,7 @@ class RTEhrenfestModel(RTTDDFTModel):
         basis = self.wfn.basisset()
         mints = psi4.core.MintsHelper(basis)
 
-        # (2) AO integrals at new geometry
+        # AO integrals at new geometry
         S = np.asarray(mints.ao_overlap())
         T = np.asarray(mints.ao_kinetic())
         V = np.asarray(mints.ao_potential())
@@ -451,7 +412,7 @@ class RTEhrenfestModel(RTTDDFTModel):
                 mu_ints[2] - mu_z0 * Iden / trD,
             ]
 
-        # (4) Update metric transforms
+        # Update metric transforms
         self.S = S
         self.H = H
         self.I_ao = I_ao
@@ -459,7 +420,7 @@ class RTEhrenfestModel(RTTDDFTModel):
         self.X = mat_pow(self.S, -0.5)
         self.U = mat_pow(self.S, 0.5)
 
-        # (5) Fresh XC quadrature/grid *without* SCF (critical for B3LYP etc.)
+        # Fresh XC quadrature/grid without SCF (critical for B3LYP)
         if self.alpha_hfx < 1.0:
             try:
                 self._rebuild_vpot_fast()
@@ -468,7 +429,7 @@ class RTEhrenfestModel(RTTDDFTModel):
                     print(
                         f"[warning] V_potential fast rebuild failed: {e!r}. Falling back to a micro-SCF reinit."
                     )
-                # --- Safe fallback: a *very cheap* one-iteration SCF just to re-seed the Wavefunction ---
+                # --- Safe fallback: a very cheap one-iteration SCF just to re-seed the Wavefunction ---
                 #   This creates a brand-new Wavefunction and V_potential consistent with the new geometry.
                 self.opts["e_convergence"] = 1e-1
                 self.opts["d_convergence"] = 1e-1
@@ -490,7 +451,7 @@ class RTEhrenfestModel(RTTDDFTModel):
                     if not hasattr(self, "alpha_hfx"):
                         self.alpha_hfx = 0.0
 
-        # (6) Update nuclear repulsion (reporting / forces)
+        # Update nuclear repulsion (reporting / forces)
         self.Enuc = self.mol.nuclear_repulsion_energy()
 
     def _compute_bo_forces_bohr(self, efield_vec=None):
@@ -500,11 +461,26 @@ class RTEhrenfestModel(RTTDDFTModel):
         (not Ehrenfest forces from the RT density). In this implementation, efield_vec does not
         affect the forces, and this function is provided for debugging only.
 
+        + **`efield_vec`** (ndarray): Optional external electric field vector (3,) in a.u.
+
         Returns
         -------
         forces : (nat, 3) ndarray in Hartree/Bohr
         """
         G = np.asarray(psi4.gradient(f"{self.functional}", molecule=self.mol))
+        
+        # ---- Direct gradient from partial charge (-Z_A * E(t)) ----
+        if efield_vec is None:
+            efield_vec = np.zeros(3, dtype=float)
+        else:
+            efield_vec = np.asarray(efield_vec, dtype=float)
+        nat = self.mol.natom()
+        if self.partial_charges is None:
+            self.partial_charges = np.zeros(nat, dtype=float)
+        g_field_nuc = -np.outer(self.partial_charges, efield_vec).reshape(nat, 3)
+
+        G += g_field_nuc
+
         F = -G
         if self.verbose:
             print("BO forces (Eh/Bohr):\n", F)
@@ -519,6 +495,7 @@ class RTEhrenfestModel(RTTDDFTModel):
 
         + **`include_xc_grad`** (bool): Whether to include the exchange-correlation gradient
           contribution using the real-component of the RT density. True by default.
+        + **`efield_vec`** (ndarray): Optional external electric field vector (3,) in a.u.
 
         Returns
         -------
@@ -688,16 +665,6 @@ class RTEhrenfestModel(RTTDDFTModel):
         """
         Promote one alpha electron from HOMO to LUMO (beta unchanged) and
         switch the propagator to unrestricted (UKS). Rebuild Fa/Fb at t=0.
-
-        Use:
-            self._init_psi4()   # already done inside initialize()
-            self.prepare_alpha_homo_to_lumo_excited_state()
-            # then call propagate(...)
-
-        Notes:
-        - Assumes a closed-shell ground-state SCF was just performed (nα == nβ).
-        - Leaves self.E0 as the SCF ground-state energy; Etot - E0 will then be positive.
-        - You may want to set self.delta_kick_au = 0.0 for a pure promoted-state start.
         """
         wfn = self.wfn
 
@@ -768,8 +735,8 @@ class RTEhrenfestModel(RTTDDFTModel):
 
         if self.verbose:
             print(
-                "[init-excited] Prepared alpha (HOMO->LUMO) excited determinant; "
-                "switched to UKS propagation and rebuilt Fa/Fb."
+                "[init] Preparing alpha (HOMO->LUMO) excited determinant; "
+                "switching to unrestricted KS propagation and rebuilding Fa/Fb."
             )
 
     def _propagate_rttddft_ehrenfest(
@@ -948,25 +915,13 @@ class RTEhrenfestModel(RTTDDFTModel):
                 times=np.asarray(self.times),
             )
 
-    def calc_amp_vector(self):
-        """
-        Update the source amplitude vector after propagating this molecule for one time step.
-        amp = d/dt[\rho(t) * mu_e] + d/dt[sum_A Z_A * R_A(t)]
-
-        Returns:
-        - A numpy array representing the amplitude vector in the form [Ax, Ay, Az].
-        """
-        # nuclear contribution to dipole moment time derivative
-        nat = self.mol.natom()
-        Z = np.array([self.mol.Z(a) for a in range(nat)], dtype=float)
-        amp_n = (Z[:, None] * self._V_inst).sum(axis=0)
-
-        # electronic contribution to dipole moment time derivative
-        amp_e = super().calc_amp_vector()
-        amp_total = amp_e + amp_n
-        return amp_total
-
     def _propagate_electronic_regime(self, effective_efield_vec):
+        """
+        One full electronic step in the Ehrenfest integrator (Li–Tully–Schlegel–Frisch). Nuclear dynamics are propagated
+        after several calls of this function.
+        
+        + **`effective_efield_vec`** (ndarray): Constant external electric field vector (3,) in atomic units.
+        """
         Vk = self.Vk
         Rk = self.Rk
         Fk = self.Fk
@@ -1068,6 +1023,11 @@ class RTEhrenfestModel(RTTDDFTModel):
             self._step_in_cycle = i
 
     def _propagate_nuclear_regime(self, effective_efield_vec):
+        """
+        One full nuclear step in the Ehrenfest integrator (Li–Tully–Schlegel–Frisch).
+        
+        + **`effective_efield_vec`** (ndarray): Constant external electric field vector (3,) in atomic units.
+        """
         Vk = self.Vk
         Rk = self.Rk
         Fk = self.Fk
@@ -1161,6 +1121,8 @@ class RTEhrenfestModel(RTTDDFTModel):
                 print(self.Rk)
             
             self.traj_R.append(self.Rk.copy())
+    
+    # -------------- one FDTD step under E-field --------------
 
     def propagate(self, effective_efield_vec):
         """
@@ -1173,17 +1135,14 @@ class RTEhrenfestModel(RTTDDFTModel):
         - MMUT-like RT propagation for electrons with dt_e = dt_Ne / m
         - FDTD time step, i.e., the time step for calling this function
 
-        It is better that this function can be used to handle IR- and UV-vis light at the same time.
+        This function can be used to handle IR- and UV-vis light at the same time.
 
         To make our life easier, we assume that the FDTD time step is the same as either
           1. the nuclear time step dt_N.
-          2. or the Nuclear-position–coupled midpoint Fock time step dt_Ne.
+          2. or the Nuclear-position–coupled midpoint Fock time step dt_Ne or dt_rttddft.
         The first case is easy to implement (all we need to do is to use self._propagate_rttddft_ehrenfest for one nuclear step).
         The second case is a bit tricky, as we need to count how many FDTD calls we have done since the last nuclear step, and
         then determine if we need to do a nuclear step or not.
-
-        Additionally, some operations in self._propagate_rttddft_ehrenfest may need to be
-        moved to the self.initialize function, such as the initialization of the random number generator.
 
         + **`effective_efield_vec`**: Effective electric field vector in the form [Ex, Ey, Ez].
         """
@@ -1192,7 +1151,141 @@ class RTEhrenfestModel(RTTDDFTModel):
             self._propagate_electronic_regime(effective_efield_vec)
         elif self.em_coupling_regime == "nuclear":
             self._propagate_nuclear_regime(effective_efield_vec)
+        
+        # compute total energy (kinetic + electronic + nuclear repulsion)
+        E_tot = self.energies[-1] if len(self.energies) > 0 else 0.0
+        E_tot += 0.5 * np.sum(self.mass_au[:, None] * (self.Vk**2))
+        self.energies_eh.append(E_tot)
+        dip_e = self.dipoles[-1] if len(self.dipoles) > 0 else np.zeros(3)
+        Z = np.array([self.mol.Z(a) for a in range(self.mol.natom())], dtype=float)
+        dip_n = (Z[:, None] * self.Rk).sum(axis=0)
+        dip = dip_e + dip_n
+        self.dipoles_eh.append(dip)
 
+
+    def calc_amp_vector(self):
+        """
+        Update the source amplitude vector after propagating this molecule for one time step.
+        amp = d/dt[\rho(t) * mu_e] + d/dt[sum_A Z_A * R_A(t)]
+
+        Returns:
+        - A numpy array representing the amplitude vector in the form [Ax, Ay, Az].
+        """
+        # nuclear contribution to dipole moment time derivative
+        nat = self.mol.natom()
+        Z = np.array([self.mol.Z(a) for a in range(nat)], dtype=float)
+        amp_n = (Z[:, None] * self._V_inst).sum(axis=0)
+
+        # electronic contribution to dipole moment time derivative
+        amp_e = super().calc_amp_vector()
+        amp_total = amp_e + amp_n
+        return amp_total
+    
+    # ------------ optional operation / checkpoint --------------
+
+    def append_additional_data(self):
+        """
+        Append additional data to be sent back to MaxwellLink, which can be retrieved by the user
+        via: maxwelllink.SocketMolecule.additional_data_history.
+
+        Returns:
+        - A dictionary containing additional data.
+        """
+        data = {}
+        data["time_au"] = self.t
+        data["energy_au"] = self.energies_eh[-1] if len(self.energies_eh) > 0 else 0.0
+        data["mu_x_au"] = self.dipoles_eh[-1][0] if len(self.dipoles_eh) > 0 else 0.0
+        data["mu_y_au"] = self.dipoles_eh[-1][1] if len(self.dipoles_eh) > 0 else 0.0
+        data["mu_z_au"] = self.dipoles_eh[-1][2] if len(self.dipoles_eh) > 0 else 0.0
+        return data
+
+    def _dump_to_checkpoint(self):
+        """
+        Dump the internal state of the model to a checkpoint.
+
+        This function saves the current density matrices (Da, Db), Fock matrices (Fa, Fb),
+        current time (t), and step count (count) to a NumPy .npy file.
+        The checkpoint file is named "rttddft_checkpoint_id_<molid>.npy".
+        """
+        # try to save self.Da, self.Db, self.Fa, self.Fb in a single npy file
+        np.save(
+            self.checkpoint_filename,
+            {
+                "Da": self.Da,
+                "Db": self.Db,
+                "Fa": self.Fa,
+                "Fb": self.Fb,
+                "time": self.t,
+                "count": self.count,
+                "Vk": self.Vk,
+                "Rk": self.Rk,
+                "Fk": self.Fk,
+                "_V_inst": self._V_inst,
+                "_step_in_cycle": self._step_in_cycle
+            },
+        )
+
+    def _reset_from_checkpoint(self):
+        """
+        Reset the internal state of the model from a checkpoint.
+        """
+        if not os.path.exists(self.checkpoint_filename):
+            # No checkpoint file found means this driver has not been paused or terminated abnormally
+            # so we just keep the current state
+            print(
+                "[checkpoint] No checkpoint file found for molecule ID %d, starting fresh."
+                % self.molecule_id
+            )
+        else:
+            checkpoint_data = np.load(
+                self.checkpoint_filename, allow_pickle=True
+            ).item()
+            self.Da = np.asarray(checkpoint_data["Da"], dtype=np.complex128)
+            self.Db = np.asarray(checkpoint_data["Db"], dtype=np.complex128)
+            self.Fa = np.asarray(checkpoint_data["Fa"], dtype=np.complex128)
+            self.Fb = np.asarray(checkpoint_data["Fb"], dtype=np.complex128)
+            self.t = float(checkpoint_data["time"])
+            self.count = int(checkpoint_data["count"])
+            self.Vk = np.asarray(checkpoint_data["Vk"], dtype=float)
+            self.Rk = np.asarray(checkpoint_data["Rk"], dtype=float)
+            self.Fk = np.asarray(checkpoint_data["Fk"], dtype=float)
+            self._V_inst = np.asarray(checkpoint_data["_V_inst"], dtype=float)
+            self._step_in_cycle = int(checkpoint_data["_step_in_cycle"])
+
+    def _snapshot(self):
+        """
+        Return a snapshot of the internal state for propagation. Deep copy the arrays to avoid mutation issues.
+        """
+        snapshot = {
+            "time": self.t,
+            "count": self.count,
+            "Da": self.Da.copy(),
+            "Db": self.Db.copy(),
+            "Fa": self.Fa.copy(),
+            "Fb": self.Fb.copy(),
+            "Vk": self.Vk.copy(),
+            "Rk": self.Rk.copy(),
+            "Fk": self.Fk.copy(),
+            "_V_inst": self._V_inst.copy(),
+            "_step_in_cycle": self._step_in_cycle
+        }
+        return snapshot
+
+    def _restore(self, snapshot):
+        """
+        Restore the internal state from a snapshot.
+        """
+        self.t = snapshot["time"]
+        self.count = snapshot["count"]
+        self.Da = snapshot["Da"]
+        self.Db = snapshot["Db"]
+        self.Fa = snapshot["Fa"]
+        self.Fb = snapshot["Fb"]
+        self.Vk = snapshot["Vk"]
+        self.Rk = snapshot["Rk"]
+        self.Fk = snapshot["Fk"]
+        self._V_inst = snapshot["_V_inst"],
+        self._step_in_cycle = snapshot["_step_in_cycle"]
 
 if __name__ == "__main__":
     """
