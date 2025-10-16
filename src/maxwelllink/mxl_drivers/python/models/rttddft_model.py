@@ -71,11 +71,11 @@ class RTTDDFTModel(DummyModel):
         + **`functional`** (str): Any Psi4 functional label, e.g. "PBE", "B3LYP", "SCAN", "PBE0". Default is "SCF" (Hartree-Fock).
         + **`basis`** (str): Any basis set label recognized by Psi4, e.g. "sto-3g", "6-31g", "cc-pVDZ". Default is "sto-3g".
         + **`dt_rttddft_au`** (float): Time step for real-time TDDFT propagation in atomic units (a.u.). Default is 0.04 a.u.
-        If the MEEP time step is an integer multiple of this, the driver will sub-step internally. This sub-stepping can avoid propagating EM fields
+        If the FDTD time step is an integer multiple of this, the driver will sub-step internally. This sub-stepping can avoid propagating EM fields
         too frequently when the molecule requires a small time step.
         + **`delta_kick_au`** (float): Strength of the initial delta-kick perturbation along the x, y, and z direction in atomic units (a.u.).
         Default is 0.0e-3 a.u. If this value is set to a non-zero value, the driver will apply a delta-kick perturbation at t=0 to initiate the dynamics.
-        With this delta-kick, and also setting the MEEP coupling to zero, one can compute the conventional RT-TDDFT linear absorption spectrum of the molecule.
+        With this delta-kick, and also setting the FDTD coupling to zero, one can compute the conventional RT-TDDFT linear absorption spectrum of the molecule.
         + **`delta_kick_direction`** (str): Direction of the initial delta-kick perturbation. Can be "x", "y", "z", "xy", "xz", "yz", or "xyz". Default is "xyz".
         + **`memory`** (str): Memory allocation for Psi4, e.g. "8GB", "500MB". Default is "8GB".
         + **`num_threads`** (int): Number of CPU threads to use in Psi4. Default is 1.
@@ -167,15 +167,15 @@ class RTTDDFTModel(DummyModel):
         self.molecule_id = int(molecule_id)
         self.checkpoint_filename = "rttddft_checkpoint_id_%d.npy" % self.molecule_id
 
-        # examine the relation between the MEEP dt and the RT-TDDFT dt
+        # examine the relation between the FDTD dt and the RT-TDDFT dt
         assert self.dt >= self.dt_rttddft_au, (
-            "The MEEP time step (dt=%.4f a.u.) must be greater than or equal to the RT-TDDFT time step (dt_rttddft_au=%.4f a.u.)."
+            "The FDTD time step (dt=%.4f a.u.) must be greater than or equal to the RT-TDDFT time step (dt_rttddft_au=%.4f a.u.)."
             % (self.dt, self.dt_rttddft_au)
         )
         self.ratio_timestep = int(self.dt / self.dt_rttddft_au)
         if self.verbose:
             print(
-                "[molecule %d] The MEEP time step (dt=%.4f a.u.) is (approximately) %d times the RT-TDDFT time step (dt_rttddft_au=%.4f a.u.). The driver will sub-step internally."
+                "[molecule %d] The FDTD time step (dt=%.4f a.u.) is (approximately) %d times the RT-TDDFT time step (dt_rttddft_au=%.4f a.u.). The driver will sub-step internally."
                 % (self.molecule_id, self.dt, self.ratio_timestep, self.dt_rttddft_au)
             )
         self.dt_rttddft_au = (
@@ -933,8 +933,8 @@ class RTTDDFTModel(DummyModel):
         To use this function, the self.delta_kick_au parameter in self.__init__()
         should be set to a non-zero value to apply an initial delta-kick perturbation at t=0.
 
-        + **`nsteps`** (int): Number of MEEP steps to propagate. Default is 100.
-        + **`effective_efield_vec`**: Effective electric field vector received from MEEP in the form [Ex, Ey, Ez]. Default is [0.0, 0.0, 0.0].
+        + **`nsteps`** (int): Number of FDTD steps to propagate. Default is 100.
+        + **`effective_efield_vec`**: Effective electric field vector received from FDTD in the form [Ex, Ey, Ez]. Default is [0.0, 0.0, 0.0].
         """
         for idx in range(nsteps):
             self.propagate(effective_efield_vec)
