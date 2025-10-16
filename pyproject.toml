@@ -43,13 +43,13 @@ dev = [
 ]
 docs = [
   "sphinx>=7.2",
-  "furo>=2024.1.29",                 # clean theme
-  "sphinx-autodoc-typehints>=2.1",   # render type hints nicely
-  "sphinxcontrib-napoleon>=0.7",     # Google/NumPy style docstrings
-  "myst-parser>=3.0",                # Markdown support
-  "sphinx-copybutton>=0.5",          # copy code buttons
-  "sphinx-design>=0.6",              # simple cards/grids
-  "nbsphinx>=0.9",                   # if you want notebooks in docs (optional)
+  "furo>=2024.1.29",                
+  "sphinx-autodoc-typehints>=2.1",  
+  "sphinxcontrib-napoleon>=0.7",    
+  "myst-parser>=3.0",               
+  "sphinx-copybutton>=0.5",         
+  "sphinx-design>=0.6",             
+  "nbsphinx>=0.9",                  
 ]
 
 [tool.black]
@@ -76,11 +76,10 @@ exclude = '''
 [tool.flake8]
 max-line-length = 88
 extend-ignore = [
-  "E203",  # black compatibility around slices
-  "W503",  # black-compatible line breaks before binary operator
+  "E203",  
+  "W503",  
 ]
 per-file-ignores = [
-  # Allow re-export or star imports in package __init__.py files
   "__init__.py:F401,F403,F405",
   "src/**/__init__.py:F401,F403,F405",
 ]
@@ -92,7 +91,6 @@ markers = [
   "optional: marks tests as optional (deselect with '-m \"not optional\"')",
 ]
 filterwarnings = [
-  # SWIG/pymeep emits these during import; ignore just those messages
   "ignore:.*SwigPy(Packed|Object).*no __module__ attribute:DeprecationWarning",
   "ignore:.*swigvarlink.*no __module__ attribute:DeprecationWarning",
 ]

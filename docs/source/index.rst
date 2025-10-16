@@ -6,4 +6,5 @@ Welcome to MaxwellLink’s documentation!
    :caption: Contents:
 
    usage
+   examples/hello_world
 

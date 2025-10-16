@@ -3,7 +3,7 @@ import os, sys
 from pathlib import Path
 from importlib.metadata import version as pkg_version, PackageNotFoundError
 
-# --- Make the package importable (src-layout) ---
+# --- Make the package importable ---
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -20,13 +20,26 @@ except PackageNotFoundError:
 extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
-    "sphinx.ext.napoleon",      # Google/NumPy docstrings
+    "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx.ext.todo",
     "sphinx.ext.viewcode",
-    "myst_parser",              # optional: Markdown support
-    # "sphinx.ext.linkcode",    # optional: link to GitHub source (add a resolver)
+    "myst_parser",           
+    "sphinx.ext.mathjax",
+    "nbsphinx",
 ]
+
+mathjax3_config = {
+    "tex": {
+        "inlineMath": [["$", "$"], ["\\(", "\\)"]],
+        "displayMath": [["$$", "$$"], ["\\[", "\\]"]],
+    }
+}
+
+# Follow the links to examples/ in the root directory
+followlinks = True
+nbsphinx_execute = "never" 
+
 
 # Build autosummary pages for modules/classes/functions automatically
 autosummary_generate = True
@@ -38,13 +51,13 @@ autodoc_default_options = {
     "inherited-members": True,
     "show-inheritance": True,
 }
-autodoc_typehints = "description"      # keep signatures clean; put types in body
-autodoc_class_signature = "separated"  # ClassName(args...) shown below title
+autodoc_typehints = "description"  
+autodoc_class_signature = "separated"
 autodoc_preserve_defaults = True
 
-# If your imports are heavy/optional, mock them so docs build without having them installed
+# For heavy dependencies that are not needed for docs building
 autodoc_mock_imports = [
-    "meep", "qutip", "ase", "psi4" # <- adjust to whatever your code imports optionally
+    "meep", "qutip", "ase", "psi4"
 ]
 
 # Napoleon (Google/NumPy docstrings)
@@ -61,6 +74,3 @@ html_theme = "furo"
 templates_path = ["_templates"]
 exclude_patterns = ["_build"]
 html_static_path = ["_static"]
-
-# Make warnings fail in CI (optional, good hygiene)
-# nitpicky = True
