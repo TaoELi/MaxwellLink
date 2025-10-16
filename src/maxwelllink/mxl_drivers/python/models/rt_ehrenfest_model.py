@@ -409,6 +409,9 @@ class RTEhrenfestModel(RTTDDFTModel):
         _refresh_opts["d_convergence"] = 1e-1
         _refresh_opts["maxiter"] = 3
         _refresh_opts["fail_on_maxiter"] = False
+        # if a homo->lumo occurs, we need the correct ref to refresh XC
+        ref = "rks" if self.is_restricted else "uks"
+        _refresh_opts["reference"] = ref
         psi4.set_options(_refresh_opts)
 
         # we use a cheap SCF call to refresh the Wavefunction object
