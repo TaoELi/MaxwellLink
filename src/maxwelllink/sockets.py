@@ -1,13 +1,18 @@
 """
-Socket layer for MaxwellLink drivers and servers in a single file.
-The socket protocol of MaxwellLink is based on i-PI's socket protocol (https://ipi-code.org/).
+Socket layer for MaxwellLink drivers and servers.
 
-Public API:
-- SocketHub: multi-client server/poller for handling many driver connections with the FDTD engine
-- Protocol constants: STATUS, READY, HAVEDATA, NEEDINIT, INIT, ...
-- EM aliases: FIELDDATA, GETSOURCE, SOURCEREADY  (map 1:1 to POSDATA/GETFORCE/FORCEREADY)
-- Low-level helpers: send_msg, recv_msg, send_array/recv_array, etc.
-- Exceptions: SocketClosed
+This module implements a lightweight socket protocol inspired by i-PI
+(https://ipi-code.org/) and provides:
+
+- **SocketHub**: a multi-client server/poller for coordinating many driver
+  connections with an FDTD engine.
+- **Protocol constants**: ``STATUS``, ``READY``, ``HAVEDATA``, ``NEEDINIT``,
+  ``INIT``, ...
+- **EM aliases**: ``FIELDDATA``, ``GETSOURCE``, ``SOURCEREADY`` (1:1 mapping to
+  ``POSDATA``/``GETFORCE``/``FORCEREADY``).
+- **Low-level helpers**: ``send_msg``, ``recv_msg``, ``send_array``/``recv_array``,
+  etc.
+- **Exceptions**: ``SocketClosed``.
 """
 
 from __future__ import annotations
@@ -44,21 +49,75 @@ DT_INT = np.int32
 
 
 class SocketClosed(OSError):
+    """
+    Exception raised when the peer closes the socket unexpectedly.
+    """
+
     pass
 
 
 def _pad12(msg: bytes) -> bytes:
+    """
+    Pad a message to the fixed 12-byte ASCII header width.
+
+    Parameters
+    ----------
+    msg : bytes
+        Message tag to send.
+
+    Returns
+    -------
+    bytes
+        Space-padded header of exactly 12 bytes.
+
+    Raises
+    ------
+    ValueError
+        If ``msg`` exceeds the 12-byte header length.
+    """
+
     if len(msg) > HEADER_LEN:
         raise ValueError("Header too long")
     return msg.ljust(HEADER_LEN, b" ")
 
 
 def send_msg(sock: socket.socket, msg: bytes) -> None:
-    """Send a 12-byte ASCII header (space-padded)."""
+    """
+    Send a 12-byte ASCII header (space-padded).
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    msg : bytes
+        Message tag to send (e.g., ``b"STATUS"``).
+    """
+
     sock.sendall(_pad12(msg))
 
 
 def _recvall(sock: socket.socket, n: int) -> bytes:
+    """
+    Read exactly ``n`` bytes from a socket.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    n : int
+        Number of bytes to read.
+
+    Returns
+    -------
+    bytes
+        The data read.
+
+    Raises
+    ------
+    SocketClosed
+        If the peer closes the connection before all bytes are received.
+    """
+
     """Read exactly n bytes or raise SocketClosed."""
     buf = bytearray()
     while len(buf) < n:
@@ -70,17 +129,67 @@ def _recvall(sock: socket.socket, n: int) -> bytes:
 
 
 def recv_msg(sock: socket.socket) -> bytes:
+    """
+    Receive a 12-byte ASCII header.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+
+    Returns
+    -------
+    bytes
+        The received header without trailing spaces.
+    """
+
     """Receive 12-byte ASCII header."""
     hdr = _recvall(sock, HEADER_LEN)
     return hdr.rstrip()
 
 
 def send_array(sock: socket.socket, arr, dtype) -> None:
+    """
+    Send a NumPy array over a socket using a contiguous C-order memory view.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    arr : array-like
+        Array data to send.
+    dtype : numpy.dtype
+        Data type to cast and send as (e.g., ``np.float64``).
+    """
+
     a = np.asarray(arr, dtype=dtype, order="C")
     sock.sendall(memoryview(a).cast("B"))
 
 
 def recv_array(sock: socket.socket, shape, dtype):
+    """
+    Receive a NumPy array of a given shape and dtype from a socket.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    shape : tuple of int
+        Expected array shape.
+    dtype : numpy.dtype
+        Expected dtype (e.g., ``np.float64``).
+
+    Returns
+    -------
+    numpy.ndarray
+        The received array with the specified shape and dtype.
+
+    Raises
+    ------
+    SocketClosed
+        If the peer closes the connection during the transfer.
+    """
+
     out = np.empty(shape, dtype=dtype, order="C")
     mv = memoryview(out).cast("B")
     need = mv.nbytes
@@ -94,10 +203,40 @@ def recv_array(sock: socket.socket, shape, dtype):
 
 
 def send_int(sock: socket.socket, x: int) -> None:
+    """
+    Send a 32-bit little-endian integer.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    x : int
+        Integer value to send.
+    """
+
     sock.sendall(_INT32.pack(int(x)))
 
 
 def recv_int(sock: socket.socket) -> int:
+    """
+    Receive a 32-bit little-endian integer.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+
+    Returns
+    -------
+    int
+        The received integer.
+
+    Raises
+    ------
+    SocketClosed
+        If the peer closes the connection during the transfer.
+    """
+
     buf = bytearray(_INT32.size)
     mv = memoryview(buf)
     got = 0
@@ -110,12 +249,37 @@ def recv_int(sock: socket.socket) -> int:
 
 
 def send_bytes(sock: socket.socket, b: bytes) -> None:
+    """
+    Send a length-prefixed byte string.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    b : bytes
+        Byte string to send. The length is sent first as a 32-bit integer.
+    """
+
     send_int(sock, len(b))
     if len(b):
         sock.sendall(b)
 
 
 def recv_bytes(sock: socket.socket) -> bytes:
+    """
+    Receive a length-prefixed byte string.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+
+    Returns
+    -------
+    bytes
+        The received byte string (may be empty).
+    """
+
     n = recv_int(sock)
     return _recvall(sock, n) if n else b""
 
@@ -126,7 +290,25 @@ def recv_bytes(sock: socket.socket) -> bytes:
 def send_posdata(
     sock: socket.socket, cell_3x3_bohr, invcell_3x3_per_bohr, positions_Nx3_bohr
 ):
-    """POSDATA/FIELDDATA: cell, invcell, natoms, positions (all float64)."""
+    """
+    Send a POSDATA/FIELDDATA block: cell, inverse cell, natoms, positions.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    cell_3x3_bohr : array-like, shape (3, 3)
+        Lattice vectors (Bohr).
+    invcell_3x3_per_bohr : array-like, shape (3, 3)
+        Inverse lattice (1/Bohr).
+    positions_Nx3_bohr : array-like, shape (N, 3)
+        Atomic positions (Bohr).
+
+    Notes
+    -----
+    For EM use, this is also used to carry field vectors via the positions payload.
+    """
+
     assert np.asarray(cell_3x3_bohr).shape == (3, 3)
     assert np.asarray(invcell_3x3_per_bohr).shape == (3, 3)
     pos = np.asarray(positions_Nx3_bohr, dtype=DT_FLOAT)
@@ -139,7 +321,24 @@ def send_posdata(
 
 
 def recv_posdata(sock: socket.socket):
-    """Read POSDATA/FIELDDATA block."""
+    """
+    Read a POSDATA/FIELDDATA block.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+
+    Returns
+    -------
+    tuple
+        ``(cell, icell, xyz)`` where:
+
+        - ``cell`` : ``(3, 3)`` ndarray (row-major), simulation cell.
+        - ``icell`` : ``(3, 3)`` ndarray (row-major), inverse cell.
+        - ``xyz`` : ``(nat, 3)`` ndarray of positions (or effective field payload).
+    """
+
     cell = recv_array(sock, (3, 3), DT_FLOAT).T.copy()
     icell = recv_array(sock, (3, 3), DT_FLOAT).T.copy()
     nat = recv_int(sock)
@@ -154,7 +353,23 @@ def send_force_ready(
     virial_3x3_ha,
     more: bytes = b"",
 ):
-    """FORCEREADY/SOURCEREADY: energy (1), natoms (1), forces (Nx3), virial (3x3), extras (len + bytes)."""
+    """
+    Send a FORCEREADY/SOURCEREADY message with energy, forces, virial, and extras.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    energy_ha : float
+        Total energy (Hartree).
+    forces_Nx3_ha_per_bohr : array-like, shape (N, 3)
+        Forces (Hartree/Bohr).
+    virial_3x3_ha : array-like, shape (3, 3)
+        Virial tensor (Hartree).
+    more : bytes, optional
+        Extra payload (length-prefixed), e.g., JSON metadata.
+    """
+
     send_msg(sock, FORCEREADY)
     send_array(sock, np.array([energy_ha], dtype=DT_FLOAT), DT_FLOAT)
     forces = np.asarray(forces_Nx3_ha_per_bohr, dtype=DT_FLOAT)
@@ -166,7 +381,22 @@ def send_force_ready(
 
 
 def recv_getforce(sock: socket.socket):
-    """On server side after sending GETFORCE/GETSOURCE and receiving FORCEREADY/SOURCEREADY."""
+    """
+    Receive a FORCEREADY/SOURCEREADY payload after a GETFORCE/GETSOURCE request.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+
+    Returns
+    -------
+    tuple
+        ``(energy, forces, virial, extra)`` where ``energy`` is a float, ``forces``
+        is an ``(N, 3)`` ndarray, ``virial`` is a ``(3, 3)`` ndarray, and
+        ``extra`` is raw bytes.
+    """
+
     e = float(recv_array(sock, (1,), DT_FLOAT)[0])
     nat = recv_int(sock)
     frcs = recv_array(sock, (nat, 3), DT_FLOAT)
@@ -181,7 +411,24 @@ def recv_getforce(sock: socket.socket):
 def pack_em_fieldata(
     sock: socket.socket, t_au: float, dt_au: float, efield_au_vec3, meta: dict
 ):
-    """Send 'FIELDDATA' as POSDATA with natoms=1 and positions=[Ex,Ey,Ez]."""
+    """
+    Send EM field data encoded as POSDATA with ``natoms=1`` and
+    ``positions = [E_x, E_y, E_z]``.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    t_au : float
+        Current time (a.u.). (Informational; not transmitted in POSDATA.)
+    dt_au : float
+        Time step (a.u.). (Informational; not transmitted in POSDATA.)
+    efield_au_vec3 : array-like, shape (3,)
+        Electric field vector ``[E_x, E_y, E_z]`` in a.u.
+    meta : dict
+        Optional metadata carried alongside in higher-level protocols.
+    """
+
     I = np.eye(3, dtype=DT_FLOAT)
     exyz = np.asarray(efield_au_vec3, dtype=DT_FLOAT).reshape(1, 3)
     send_posdata(sock, I, I, exyz)
@@ -189,7 +436,17 @@ def pack_em_fieldata(
 
 
 def pack_init(sock: socket.socket, init_dict: dict):
-    """Send INIT with JSON payload (molecule_id:int, JSON bytes)."""
+    """
+    Send an INIT handshake containing a JSON payload.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    init_dict : dict
+        Initialization dictionary (e.g., includes ``"molecule_id"``).
+    """
+
     send_msg(sock, INIT)
     molid = int(init_dict.get("molecule_id", 0))
     send_int(sock, molid)
@@ -199,6 +456,29 @@ def pack_init(sock: socket.socket, init_dict: dict):
 
 @dataclass
 class ClientState:
+    """
+    Dataclass storing per-client state for the socket hub.
+
+    Attributes
+    ----------
+    sock : socket.socket
+        Connected client socket.
+    address : str
+        Peer address string.
+    molecule_id : int
+        Bound molecule identifier (``-1`` if unbound).
+    last_amp : numpy.ndarray or None
+        Last source amplitude vector ``(3,)``.
+    pending_send : bool
+        Whether a field has been dispatched but not yet committed.
+    initialized : bool
+        Whether INIT has been completed.
+    alive : bool
+        Connection liveness flag.
+    extras : dict
+        Arbitrary metadata associated with the client.
+    """
+
     sock: socket.socket
     address: str
     molecule_id: int
@@ -210,9 +490,15 @@ class ClientState:
 
 
 def get_available_host_port() -> int:
-    """Helper function to ask the OS for a local host and free TCP port.
-    Returns (host, port) tuple.
     """
+    Ask the OS for an available localhost TCP port.
+
+    Returns
+    -------
+    tuple
+        ``(host, port)`` pair, e.g., ``("127.0.0.1", 34567)``.
+    """
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return "127.0.0.1", s.getsockname()[1]
@@ -220,6 +506,15 @@ def get_available_host_port() -> int:
 
 # helper function to determine whether this processor is the MPI master using mpi4py
 def am_master():
+    """
+    Return True if this process is the MPI master rank (rank 0), otherwise False.
+
+    Notes
+    -----
+    Attempts to import ``mpi4py`` and query ``COMM_WORLD``. If unavailable,
+    returns ``True`` by treating the single process as rank 0.
+    """
+
     try:
         from mpi4py import MPI as _MPI
 
@@ -233,6 +528,20 @@ def am_master():
 
 # helper function to broadcast a value from master to all MPI ranks
 def mpi_bcast_from_master(value):
+    """
+    Broadcast a Python value from the master rank to all ranks via MPI.
+
+    Parameters
+    ----------
+    value : any
+        The value to broadcast.
+
+    Returns
+    -------
+    any
+        The broadcast value (unchanged when MPI is unavailable).
+    """
+
     try:
         from mpi4py import MPI as _MPI
 
@@ -247,12 +556,14 @@ def mpi_bcast_from_master(value):
 
 class SocketHub:
     """
-    A socket server that handles multiple driver connections with the FDTD engine.
+    Socket server coordinating multiple driver connections with an FDTD engine.
 
-    The major functionality of this class is to:
+    This server:
 
-    - Accept many driver connections with the FDTD engine, including sending and receiving data.
-    - Manage the lifecycle of driver connections, including initialization, polling, reconnection, and cleanup.
+    - Accepts and tracks many driver connections.
+    - Handles initialization handshakes, field dispatch, and result collection.
+    - Provides a barrier-style step to send fields and receive source amplitudes
+      from all registered molecules.
     """
 
     def __init__(
@@ -264,18 +575,23 @@ class SocketHub:
         latency: float = 0.01,
     ):
         """
-        + **`host`** (str): Host address to bind the server. Default is None.
-        + **`port`** (int): Port number to bind the server. Default is 31415.
-        + **`unixsocket`** (str): Path to a Unix socket file. Default is None (no Unix socket).
-        Using a Unix socket is recommended for **local connections** for the improved performance.
-        If unixsocket is given a str, it will be created under /tmp/socketmxl_<str>. When using a
-        Unix socket, the host and port arguments are ignored and should not be provided.
-        + **`timeout`** (float): Timeout for socket operations in seconds. Default is 60.0 (s). This timeout controls
-        when SocketHub will consider a driver connection to be dead and clean it up. If the computational time for
-        each driver step is expected to be long, a larger timeout may be desirable.
-        + **`latency`** (float): Latency for socket operations in seconds. Default is 0.01.
-        For **local connections**, a lower latency, such as **1e-4**, may be desirable.
+        Initialize the socket hub.
+
+        Parameters
+        ----------
+        host : str or None, default: None
+            Host address for AF_INET sockets. Ignored when using a UNIX socket.
+        port : int or None, default: 31415
+            TCP port for AF_INET sockets. Ignored for UNIX sockets.
+        unixsocket : str or None, default: None
+            Path (or name under ``/tmp/socketmxl_*``) for a UNIX domain socket. When
+            provided, ``host`` and ``port`` are ignored.
+        timeout : float, default: 60.0
+            Socket timeout (seconds) for client operations.
+        latency : float, default: 0.01
+            Polling sleep (seconds) between hub sweeps; can be very small for local runs.
         """
+
         self.unixsocket_path = None
         if am_master():
             if unixsocket:
@@ -349,8 +665,9 @@ class SocketHub:
 
     def _accept_loop(self):
         """
-        Accept loop thread: accept new connections and add to self.clients with temp id.
+        Accept-loop thread: accept new connections and register temporary clients.
         """
+
         while not self._stop:
             try:
                 csock, addr = self.serversock.accept()
@@ -376,22 +693,38 @@ class SocketHub:
 
     def _maybe_init_client(self, st: ClientState, init_payload: dict):
         """
-        Handle NEEDINIT by sending INIT with JSON (contains molecule_id & unit scales).
+        Send INIT to a client with the given payload and mark it initialized.
 
-        + **`st`** (ClientState): The client state to initialize.
-        + **`init_payload`** (dict): The initialization payload to send.
+        Parameters
+        ----------
+        st : ClientState
+            Client state to initialize.
+        init_payload : dict
+            Initialization payload (e.g., contains ``"molecule_id"``).
         """
+
         pack_init(st.sock, init_payload)
         st.initialized = True
 
     def _dispatch_field(self, st: ClientState, efield_au: np.ndarray, meta: dict):
         """
-        Send FIELDDATA (POSDATA) with the given E-field vector in a.u.
+        Dispatch an EM field vector to a client via FIELDDATA/POSDATA.
 
-        + **`st`** (ClientState): The client state to send the field to.
-        + **`efield_au`** (np.ndarray): The electric field vector in atomic units (a.u.).
-        + **`meta`** (dict): Additional metadata to attach to this send.
+        Parameters
+        ----------
+        st : ClientState
+            Target client state.
+        efield_au : numpy.ndarray
+            Electric field vector ``(3,)`` in a.u.
+        meta : dict
+            Optional metadata to attach to this send.
+
+        Raises
+        ------
+        SocketClosed or OSError
+            If the client disconnects during send.
         """
+
         try:
             send_msg(st.sock, FIELDDATA)
             I = np.eye(3, dtype=DT_FLOAT)
@@ -413,14 +746,25 @@ class SocketHub:
 
     def _query_result(self, st: ClientState) -> Tuple[np.ndarray, bytes]:
         """
-        Send GETSOURCE (GETFORCE) and read SOURCEREADY (FORCEREADY).
+        Request a client's source amplitude and read the READY payload.
 
-        + **`st`** (ClientState): The client state to query.
+        Parameters
+        ----------
+        st : ClientState
+            Client state to query.
 
-        Returns: (amplitude_vec3, extra_bytes)
-        - amplitude_vec3: The source amplitude vector in the form [dmu_x/dt, dmu_y/dt, dmu_z/dt].
-        - extra_bytes: Additional bytes sent by the driver.
+        Returns
+        -------
+        tuple
+            ``(amp_vec3, extra_bytes)`` where ``amp_vec3`` is a ``(3,)`` ndarray and
+            ``extra_bytes`` carries auxiliary data.
+
+        Raises
+        ------
+        SocketClosed or OSError
+            If the client disconnects during the exchange.
         """
+
         try:
             send_msg(st.sock, GETSOURCE)
             msg = recv_msg(st.sock)
@@ -444,13 +788,25 @@ class SocketHub:
         self, st: ClientState, molid: int, init_payload: dict, st_key
     ):
         """
-        Bind client to molecule id if free; otherwise leave client unbound.
+        Bind a client to a molecule ID if available and perform INIT.
 
-        + **`st`** (ClientState): The client state to bind.
-        + **`molid`** (int): The molecule id to bind to.
-        + **`init_payload`** (dict): The initialization payload to send if binding.
-        + **`st_key`** (int): The temporary key of the client in self.clients.
+        Parameters
+        ----------
+        st : ClientState
+            Client to bind.
+        molid : int
+            Molecule ID to bind to.
+        init_payload : dict
+            INIT payload to send.
+        st_key : int
+            Temporary key under which the client is stored.
+
+        Returns
+        -------
+        bool
+            ``True`` if binding succeeded, otherwise ``False``.
         """
+
         if self.bound.get(molid) is None:
             self._maybe_init_client(st, init_payload)
             st.molecule_id = molid
@@ -470,35 +826,50 @@ class SocketHub:
         return False
 
     def _log(self, *a):
-        """Log message helper"""
+        """
+        Log a message with the ``[SocketHub]`` prefix.
+        """
+
         print("[SocketHub]", *a)
 
     def _pause(self):
-        """Pause the socket hub."""
+        """
+        Pause the hub (used when a driver disconnects mid-barrier).
+        """
+
         self.paused = True
 
     def _resume(self):
-        """Resume the socket hub."""
+        """
+        Resume the hub after a pause.
+        """
+
         self.paused = False
 
     def _reset_inflight_for(self, molid: int):
         """
-        If a barrier is frozen, force re-dispatch for this molid on reconnect.
+        Force re-dispatch for ``molid`` in a frozen barrier after reconnect.
 
-        + **`molid`** (int): The molecule id to reset in the inflight barrier.
+        Parameters
+        ----------
+        molid : int
+            Molecule ID to reset in the current barrier state.
         """
+
         if self._inflight and (molid in self._inflight["wants"]):
             self._inflight["sent"][molid] = False
             self._inflight["ready"][molid] = False
 
     def _find_free_molecule_id(self) -> int:
         """
-        Find an available molecule ID that is not already registered.
+        Find and return an available molecule ID not already registered.
 
-        Returns:
-        -----------
-        - molecule_id (int): The assigned unique molecule ID.
+        Returns
+        -------
+        int
+            A unique molecule ID.
         """
+
         while True:
             molecule_id = self._molecule_id_counter
             self._molecule_id_counter += 1
@@ -509,10 +880,19 @@ class SocketHub:
 
     def register_molecule(self, molecule_id: int) -> None:
         """
-        Reserve a slot for this molecule id (client may connect later).
+        Reserve a slot for a given molecule ID (client may connect later).
 
-        + **`molecule_id`** (int): The ID of the molecule.
+        Parameters
+        ----------
+        molecule_id : int
+            Molecule ID to register.
+
+        Raises
+        ------
+        ValueError
+            If the molecule ID is already registered.
         """
+
         with self._lock:
             # If already registered, raising a ValueError
             if molecule_id in self.expected:
@@ -523,14 +903,14 @@ class SocketHub:
 
     def register_molecule_return_id(self) -> int:
         """
-        Reserve a slot for the client if the molecule_id is not provided.
+        Reserve a slot for a molecule and return an auto-assigned ID.
 
-        We will assign a unique molecule_id automatically and return it.
-
-        Returns:
-        -----------
-        - molecule_id (int): The assigned unique molecule ID.
+        Returns
+        -------
+        int
+            The assigned unique molecule ID.
         """
+
         with self._lock:
             # Find an available molecule_id
             molecule_id = self._find_free_molecule_id()
@@ -541,18 +921,30 @@ class SocketHub:
         self, requests: Dict[int, dict], timeout: Optional[float] = None
     ) -> Dict[int, np.ndarray]:
         """
-        Perform a barrier step: dispatch fields and collect source amplitudes. This method is the
-        core of the SocketHub's functionality, coordinating the communication between the FDTD engine and
-        multiple molecular drivers.
+        Barrier step: dispatch fields and collect source amplitudes from all clients.
 
-        + **`requests`** (dict): A dictionary mapping molecule IDs to their respective field requests.
-          Each request should contain:
-            - "efield_au": A tuple or list of three floats representing the electric field vector in atomic units (a.u.).
-            - "meta": (Optional) A dictionary of additional metadata to attach to this send.
-            - "init": (Optional) A dictionary containing initialization parameters for the molecule.
-        + **`timeout`** (float, optional): Maximum time to wait for the barrier step to complete.
-        If None, uses the default timeout set during initialization.
+        Coordinates sending fields, waiting for results, and jointly committing the
+        results once every requested molecule is ready. A frozen barrier is reused if
+        a disconnect occurs mid-step.
+
+        Parameters
+        ----------
+        requests : dict[int, dict]
+            Mapping from molecule ID to request dict with keys:
+            - ``"efield_au"`` : array-like ``(3,)`` field vector in a.u.
+            - ``"meta"`` : dict, optional metadata per send.
+            - ``"init"`` : dict, optional INIT payload for first bind.
+        timeout : float, optional
+            Maximum time (seconds) to wait for the barrier to complete. Defaults to the
+            hub's ``timeout`` setting.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping ``molid -> {"amp": ndarray(3,), "extra": bytes}``. Returns ``{}``
+            when paused, on abort, or if the barrier is incomplete.
         """
+
         if self.paused:
             return {}
 
@@ -787,11 +1179,21 @@ class SocketHub:
 
     def all_bound(self, molecule_ids, require_init=True):
         """
-        Check if all given molecule_ids are bound (and optionally initialized).
+        Check if all given molecule IDs are bound (and optionally initialized).
 
-        + **`molecule_ids`** (iterable): An iterable of molecule IDs to check.
-        + **`require_init`** (bool): If True, also require that the clients are initialized. Default is True.
+        Parameters
+        ----------
+        molecule_ids : iterable of int
+            Molecule IDs to check.
+        require_init : bool, default: True
+            Also require that clients completed INIT.
+
+        Returns
+        -------
+        bool
+            ``True`` if all are bound (and initialized if requested), else ``False``.
         """
+
         with self._lock:
             for mid in molecule_ids:
                 st = self.bound.get(int(mid))
@@ -803,13 +1205,23 @@ class SocketHub:
 
     def wait_until_bound(self, init_payloads: dict, require_init=True, timeout=None):
         """
-        BLOCK until all molecule_ids in init_payloads are bound.
+        Block until all requested molecule IDs are bound (and optionally initialized).
 
-        + **`init_payloads`** (dict): A dictionary mapping molecule IDs to their respective initialization payloads.
-          Each payload should be a dictionary containing initialization parameters for the molecule.
-        + **`require_init`** (bool): If True, also require that the clients are initialized. Default is True.
-        + **`timeout`** (float, optional): Maximum time to wait for all clients to bind. If None, uses the default timeout set during initialization.
+        Parameters
+        ----------
+        init_payloads : dict[int, dict]
+            Mapping from molecule ID to INIT payload to use on bind.
+        require_init : bool, default: True
+            Also require that clients completed INIT.
+        timeout : float or None, optional
+            Maximum time to wait (seconds). Uses hub default if ``None``.
+
+        Returns
+        -------
+        bool
+            ``True`` if all requested IDs became bound within the time limit, else ``False``.
         """
+
         wanted = {int(k) for k in init_payloads.keys()}
         deadline = time.time() + (timeout if timeout is not None else self.timeout)
 
@@ -867,11 +1279,16 @@ class SocketHub:
 
     def graceful_shutdown(self, reason: Optional[str] = None, wait: float = 2.0):
         """
-        Politely ask all connected drivers to exit, and wait briefly for BYE.
+        Politely ask all connected drivers to exit and wait briefly for ``BYE``.
 
-        + **`reason`** (str): Optional reason for shutdown to log. Default is None.
-        + **`wait`** (float): Time in seconds to wait for drivers to respond. Default is 2.0 (s).
+        Parameters
+        ----------
+        reason : str or None, optional
+            Optional reason to log for shutdown.
+        wait : float, default: 2.0
+            Seconds to wait for clean replies.
         """
+
         with self._lock:
             for st in list(self.clients.values()):
                 if not st or not st.alive:
@@ -923,8 +1340,11 @@ class SocketHub:
 
     def stop(self):
         """
-        Stop accept loop, tell clients to exit, then close everything.
+        Stop accepting new connections, request clients to exit, and close sockets.
+
+        Also removes the UNIX socket path if one was created.
         """
+
         # First, stop accepting new connections
         self._stop = True
         try:

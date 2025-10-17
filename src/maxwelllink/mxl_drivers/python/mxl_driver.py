@@ -26,6 +26,15 @@ the source amplitude vector for a quantum dynamics model.
 
 # helper function to determine whether this processor is the MPI master using mpi4py
 def am_master():
+    """
+    Return True if this process is the MPI master rank (rank 0), otherwise False.
+
+    Notes
+    -----
+    Attempts to import ``mpi4py`` and query ``COMM_WORLD``. If ``mpi4py`` is not
+    available, returns ``True`` by treating the single process as rank 0.
+    """
+
     try:
         from mpi4py import MPI as _MPI
 
@@ -69,18 +78,67 @@ class SocketClosed(OSError):
 
 
 def _pad12(msg: bytes) -> bytes:
+    """
+    Left-pad or right-pad a message to a fixed 12-byte ASCII header.
+
+    Parameters
+    ----------
+    msg : bytes
+        Message bytes to send in the fixed-width header.
+
+    Returns
+    -------
+    bytes
+        The message padded with spaces to 12 bytes.
+
+    Raises
+    ------
+    ValueError
+        If the message is longer than the 12-byte header.
+    """
+
     if len(msg) > HEADER_LEN:
         raise ValueError("Header too long")
     return msg.ljust(HEADER_LEN, b" ")
 
 
 def send_msg(sock: socket.socket, msg: bytes) -> None:
-    """Send a 12-byte ASCII header (space-padded)."""
+    """
+    Send a 12-byte ASCII header (space-padded).
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    msg : bytes
+        Message tag to send (e.g., ``b"STATUS"``).
+    """
+
     sock.sendall(_pad12(msg))
 
 
 def _recvall(sock: socket.socket, n: int) -> bytes:
-    """Read exactly n bytes or raise SocketClosed."""
+    """
+    Read exactly ``n`` bytes from a socket.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    n : int
+        Number of bytes to read.
+
+    Returns
+    -------
+    bytes
+        The data read.
+
+    Raises
+    ------
+    SocketClosed
+        If the peer closes the connection before all bytes are received.
+    """
+
     buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
@@ -91,17 +149,66 @@ def _recvall(sock: socket.socket, n: int) -> bytes:
 
 
 def recv_msg(sock: socket.socket) -> bytes:
-    """Receive 12-byte ASCII header."""
+    """
+    Receive a 12-byte ASCII header and strip trailing spaces.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+
+    Returns
+    -------
+    bytes
+        The received header (without trailing spaces).
+    """
+
     hdr = _recvall(sock, HEADER_LEN)
     return hdr.rstrip()
 
 
 def send_array(sock: socket.socket, arr, dtype) -> None:
+    """
+    Send a NumPy array over a socket using a contiguous C-order memory view.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    arr : array-like
+        Array data to send.
+    dtype : numpy.dtype
+        Data type to cast and send as (e.g., ``np.float64``).
+    """
+
     a = np.asarray(arr, dtype=dtype, order="C")
     sock.sendall(memoryview(a).cast("B"))
 
 
 def recv_array(sock: socket.socket, shape, dtype):
+    """
+    Receive a NumPy array of a given shape and dtype from a socket.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    shape : tuple of int
+        Expected array shape.
+    dtype : numpy.dtype
+        Expected dtype (e.g., ``np.float64``).
+
+    Returns
+    -------
+    numpy.ndarray
+        The received array with the given shape and dtype.
+
+    Raises
+    ------
+    SocketClosed
+        If the peer closes the connection during the transfer.
+    """
+
     out = np.empty(shape, dtype=dtype, order="C")
     mv = memoryview(out).cast("B")
     need = mv.nbytes
@@ -115,10 +222,40 @@ def recv_array(sock: socket.socket, shape, dtype):
 
 
 def send_int(sock: socket.socket, x: int) -> None:
+    """
+    Send a 32-bit little-endian integer.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    x : int
+        Integer value to send.
+    """
+
     sock.sendall(_INT32.pack(int(x)))
 
 
 def recv_int(sock: socket.socket) -> int:
+    """
+    Receive a 32-bit little-endian integer.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+
+    Returns
+    -------
+    int
+        The received integer.
+
+    Raises
+    ------
+    SocketClosed
+        If the peer closes the connection during the transfer.
+    """
+
     buf = bytearray(_INT32.size)
     mv = memoryview(buf)
     got = 0
@@ -131,18 +268,54 @@ def recv_int(sock: socket.socket) -> int:
 
 
 def send_bytes(sock: socket.socket, b: bytes) -> None:
+    """
+    Send a length-prefixed byte string.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    b : bytes
+        Byte string to send. The length is sent first as a 32-bit integer.
+    """
+
     send_int(sock, len(b))
     if len(b):
         sock.sendall(b)
 
 
 def recv_bytes(sock: socket.socket) -> bytes:
+    """
+    Receive a length-prefixed byte string.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+
+    Returns
+    -------
+    bytes
+        The received byte string (may be empty).
+    """
+
     n = recv_int(sock)
     return _recvall(sock, n) if n else b""
 
 
 def recv_posdata(sock: socket.socket):
-    """Read POSDATA/FIELDDATA block."""
+    """
+    Read a POSDATA / FIELDDATA block from the socket.
+
+    Returns
+    -------
+    tuple
+        ``(cell, icell, xyz)`` where:
+        - ``cell`` : ``(3, 3)`` ndarray (row-major), simulation cell.
+        - ``icell`` : ``(3, 3)`` ndarray (row-major), inverse cell.
+        - ``xyz`` : ``(nat, 3)`` ndarray of positions (or effective field payload).
+    """
+
     cell = recv_array(sock, (3, 3), DT_FLOAT).T.copy()
     icell = recv_array(sock, (3, 3), DT_FLOAT).T.copy()
     nat = recv_int(sock)
@@ -157,7 +330,23 @@ def send_force_ready(
     virial_3x3_ha,
     more: bytes = b"",
 ):
-    """FORCEREADY/SOURCEREADY: energy (1), natoms (1), forces (Nx3), virial (3x3), extras (len + bytes)."""
+    """
+    Send a FORCEREADY/SOURCEREADY message with energy, forces, virial, and extras.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Connected socket.
+    energy_ha : float
+        Total energy (Hartree).
+    forces_Nx3_ha_per_bohr : array-like
+        Forces as an ``(N, 3)`` array (Hartree/Bohr).
+    virial_3x3_ha : array-like
+        Virial tensor as a ``(3, 3)`` array (Hartree).
+    more : bytes, optional
+        Extra payload as bytes (length-prefixed), e.g., JSON metadata.
+    """
+
     send_msg(sock, FORCEREADY)
     send_array(sock, np.array([energy_ha], dtype=DT_FLOAT), DT_FLOAT)
     forces = np.asarray(forces_Nx3_ha_per_bohr, dtype=DT_FLOAT)
@@ -173,7 +362,20 @@ def send_force_ready(
 
 
 def read_value(s):
-    """Attempt to parse a string to int or float; fallback to string."""
+    """
+    Attempt to parse a string as ``int`` or ``float``; fall back to string/boolean.
+
+    Parameters
+    ----------
+    s : str
+        Input token.
+
+    Returns
+    -------
+    int or float or bool or str
+        Parsed value.
+    """
+
     s = s.strip()
     for cast in (int, float):
         try:
@@ -189,14 +391,20 @@ def read_value(s):
 
 def read_args_kwargs(input_str):
     """
-    Parses a string into positional arguments and keyword arguments.
+    Parse a comma-separated string into positional and keyword arguments.
 
-    Args:
-        input_str (str): The input string containing comma-separated values and key-value pairs.
+    Parameters
+    ----------
+    input_str : str
+        Comma-separated tokens. Positional values are bare; keyword values use
+        ``key=value``. Booleans accept ``true``/``false`` (case-insensitive).
 
-    Returns:
-        tuple: A tuple containing a list of positional arguments and a dictionary of keyword arguments.
+    Returns
+    -------
+    tuple
+        ``(args, kwargs)`` where ``args`` is a list and ``kwargs`` is a dict.
     """
+
     args = []
     kwargs = {}
     tokens = input_str.split(",")
@@ -219,8 +427,29 @@ def run_driver(
     sockets_prefix="/tmp/socketmxl_",
 ):
     """
-    Run the driver to communicate with the MaxwellLink simulation via sockets.
+    Run the socket driver loop to communicate with MaxwellLink.
+
+    Parameters
+    ----------
+    unix : bool, default: False
+        Use a UNIX domain socket if ``True``; otherwise use TCP/IP.
+    address : str, default: "localhost"
+        Hostname (TCP/IP) or UNIX socket name (when ``unix=True``).
+    port : int, default: 31415
+        TCP/IP port (ignored for UNIX sockets).
+    timeout : float, default: 600.0
+        Socket timeout in seconds.
+    driver : DummyModel, default: DummyModel()
+        Quantum dynamics model implementing the driver interface.
+    sockets_prefix : str, default: "/tmp/socketmxl_"
+        Prefix for UNIX domain socket paths (ignored for TCP/IP).
+
+    Notes
+    -----
+    Implements a simple message protocol with headers such as ``STATUS``,
+    ``INIT``, ``POSDATA``/``FIELDDATA``, ``GETFORCE``/``GETSOURCE``, and ``STOP``.
     """
+
     if unix:
         sock = socket.socket(socket.AF_UNIX)
         sock.connect(sockets_prefix + address)
@@ -319,6 +548,15 @@ def run_driver(
 
 
 def mxl_driver_main():
+    """
+    Parse CLI arguments and start the MaxwellLink socket driver.
+
+    Notes
+    -----
+    Constructs the selected model via ``__drivers__`` using the ``--model`` and
+    ``--param`` options, then calls ``run_driver(...)``.
+    """
+
     parser = argparse.ArgumentParser(description=description)
 
     parser.add_argument(
@@ -406,6 +644,15 @@ def mxl_driver_main():
 
 
 def _clean_env_for_subprocess():
+    """
+    Return a copy of the environment with MPI-related variables removed.
+
+    Returns
+    -------
+    dict
+        Sanitized environment dictionary suitable for launching child processes.
+    """
+
     env = os.environ.copy()
     # Nuke anything that makes a child think it's an MPI rank
     prefixes = (
@@ -438,9 +685,21 @@ def launch_driver(
     sleep_time=0.5,
 ):
     """
-    Helper function to launch the driver in a local background process.
-    Returns the subprocess.Popen object for the launched process.
+    Launch the driver as a background subprocess for local testing.
+
+    Parameters
+    ----------
+    command : str, default: '--model tls --port 31415 --param "omega=0.242, mu12=187, orientation=2, pe_initial=1e-4" --verbose'
+        Command-line arguments passed to ``mxl_driver.py``.
+    sleep_time : float, default: 0.5
+        Time to sleep (seconds) after launch to allow initialization.
+
+    Returns
+    -------
+    subprocess.Popen or None
+        The process handle on the master rank, otherwise ``None``.
     """
+
     if am_master():
         print(f"Launching driver with command: mxl_driver.py {command}")
         # launch the external driver (client)
@@ -455,8 +714,16 @@ def launch_driver(
 
 def terminate_driver(proc, timeout=2.0):
     """
-    Helper function to terminate the driver process launched by launch_driver.
+    Terminate a driver process launched by ``launch_driver``.
+
+    Parameters
+    ----------
+    proc : subprocess.Popen or None
+        Process handle to terminate.
+    timeout : float, default: 2.0
+        Seconds to wait for graceful shutdown before escalating.
     """
+
     if proc is not None and am_master():
         # Give it a moment to shut down naturally after the sim closes the socket
         try:

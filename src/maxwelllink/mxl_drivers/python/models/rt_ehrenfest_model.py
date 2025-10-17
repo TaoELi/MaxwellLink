@@ -20,12 +20,15 @@ np.set_printoptions(precision=12, suppress=True)
 
 class RTEhrenfestModel(RTTDDFTModel):
     """
-    A real-time time-dependent density functional theory Ehrenfest (RT-TDDFT-Ehrenfest) quantum dynamics model using the Psi4 quantum chemistry package.
-    This class implements a RT-TDDFT-Ehrenfest model for quantum dynamics, which can be integrated with the MaxwellLink framework.
+    A real-time time-dependent density functional theory Ehrenfest (RT-TDDFT-Ehrenfest)
+    quantum dynamics model using the Psi4 quantum chemistry package.
 
-    Example
-    -------
-    Create from an XYZ file and then set the molecule id with restricted SCF:
+    This class implements an RT-TDDFT-Ehrenfest model for quantum dynamics,
+    which can be integrated with the MaxwellLink framework.
+
+    Examples
+    --------
+    Create from an XYZ file and then set the molecule ID with restricted SCF:
 
     >>> model = RTEhrenfestModel(
     ...     engine="psi4",
@@ -77,36 +80,67 @@ class RTEhrenfestModel(RTTDDFTModel):
         fix_nuclei_indices: list = None,
     ):
         """
-        Initialize the necessary parameters for the RT-TDDFT quantum dynamics model.
+        Initialize the necessary parameters for the RT-TDDFT-Ehrenfest quantum dynamics model.
 
-        + **`engine`** (str): The computational engine to use (e.g., "psi4"). Default is "psi4". Currently, only "psi4" is supported.
-        + **`molecule_xyz`** (str): Path to the XYZ file containing the molecular structure. The second line of the XYZ file may contain the charge and multiplicity.
-        + **`functional`** (str): Any Psi4 functional label, e.g. "PBE", "B3LYP", "SCAN", "PBE0". Default is "SCF" (Hartree-Fock).
-        + **`basis`** (str): Any basis set label recognized by Psi4, e.g. "sto-3g", "6-31g", "cc-pVDZ". Default is "sto-3g".
-        + **`dt_rttddft_au`** (float): Time step for real-time TDDFT propagation in atomic units (a.u.). Default is 0.04 a.u. If the MEEP time step is an integer multiple of this, the driver will sub-step internally. This sub-stepping can avoid propagating EM fields too frequently when the molecule requires a small time step.
-        + **`delta_kick_au`** (float): Strength of the initial delta-kick perturbation along the x, y, and z direction in atomic units (a.u.). Default is 0.0e-3 a.u. If this value is set to a non-zero value, the driver will apply a delta-kick perturbation at t=0 to initiate the dynamics. With this delta-kick, and also setting the MEEP coupling to zero, one can compute the conventional RT-TDDFT linear absorption spectrum of the molecule.
-        + **`delta_kick_direction`** (str): Direction of the initial delta-kick perturbation. Can be "x", "y", "z", "xy", "xz", "yz", or "xyz". Default is "xyz".
-        + **`memory`** (str): Memory allocation for Psi4, e.g. "8GB", "500MB". Default is "8GB".
-        + **`num_threads`** (int): Number of CPU threads to use in Psi4. Default is 1.
-        + **`checkpoint`** (bool): Whether to dump checkpoint files during propagation to allow restarting from the last checkpoint. Default is False.
-        + **`restart`** (bool): Whether to restart the propagation from the last checkpoint. Default is False. Setting this to True requires that checkpoint files exist. When restarting, the driver will ignore the initial delta-kick perturbation even if it is set to a non-zero value.
-        + **`verbose`** (bool): Whether to print verbose output. Default is False.
-        + **`remove_permanent_dipole`** (bool): Whether to remove the effect of permanent dipole moments in the light-matter coupling term. Default is False.
-        + **`dft_grid_name`** (str): Name of the DFT grid to use in Psi4, e.g. "SG0", "SG1". Default is "SG1". Using "SG0" can speed up calculations but is less accurate.
-        + **`dft_radial_points`** (int): Number of radial points in the DFT grid. Default is -1 (Psi4 default).
-        + **`dft_spherical_points`** (int): Number of spherical points in the DFT grid. Default is -1 (Psi4 default).
-        + **`electron_propagation`** (str): Method for electron propagation. Can be "pc" for predictor-corrector or "etrs" for enforced time-reversal symmetry. Default is "pc".
-        + **`threshold_pc`** (float): Convergence threshold for the predictor-corrector scheme. Default is 1e-8. Must be used with `electron_propagation="pc"`.
-        + **`force_type`** (str): Type of forces to compute for the nuclei. Can be "bo" for Born-Oppenheimer forces or "ehrenfest" for Ehrenfest forces. Default is "ehrenfest".
-        + **`n_fock_per_nuc`** (int): Number of Fock builds (electronic updates) per nuclear update. Default is 10.
-        + **`n_elec_per_fock`** (int): Number of RT-TDDFT steps per Fock build (electronic update). Default is 10.
-        + **`mass_amu`** (array-like): Array of atomic masses in atomic mass units (amu) for each atom in the molecule. Default is None, which uses the standard atomic masses from Psi4.
-        + **`friction_gamma_au`** (float): Friction coefficient in atomic units (a.u.) for Langevin dynamics. Default is 0.0 a.u. Setting this to a positive value enables Langevin dynamics.
-        + **`temperature_K`** (float): Temperature in Kelvin (K) for Langevin dynamics. Default is None. Setting this to a positive value enables Langevin dynamics.
-        + **`rng_seed`** (int): Random number generator seed for Langevin dynamics. Default is 1234.
-        + **`homo_to_lumo`** (bool): Whether to prepare the initial state by promoting an electron from the HOMO to the LUMO. Default is False.
-        + **`partial_charges`** (array-like): Array of partial charges for each atom in the molecule, required for BOMD simulations. Default is None.
-        + **`fix_nuclei_indices`** (list): List of indices of nuclei to fix during propagation. Default is None (no nuclei fixed).
+        Parameters
+        ----------
+        engine : str, default: "psi4"
+            The computational engine to use (e.g., ``"psi4"``). Currently, only ``"psi4"`` is supported.
+        molecule_xyz : str
+            Path to the XYZ file containing the molecular structure. The second line of the XYZ file
+            may contain the charge and multiplicity.
+        functional : str, default: "SCF"
+            Psi4 functional label, e.g., ``"PBE"``, ``"B3LYP"``, ``"SCAN"``, ``"PBE0"``.
+        basis : str, default: "sto-3g"
+            Basis set label recognized by Psi4, e.g., ``"sto-3g"``, ``"6-31g"``, ``"cc-pVDZ"``.
+        dt_rttddft_au : float, default: 0.04
+            Time step for real-time TDDFT propagation in atomic units (a.u.).
+        delta_kick_au : float, default: 0.0e-3
+            Strength of the initial delta-kick perturbation in atomic units.
+        delta_kick_direction : str, default: "xyz"
+            Direction of the delta-kick perturbation (e.g., ``"x"``, ``"xy"``, or ``"xyz"``).
+        memory : str, default: "8GB"
+            Memory allocation for Psi4.
+        num_threads : int, default: 1
+            Number of CPU threads used by Psi4.
+        checkpoint : bool, default: False
+            Whether to dump checkpoint files during propagation.
+        restart : bool, default: False
+            Whether to restart propagation from a checkpoint.
+        verbose : bool, default: False
+            Whether to print verbose output.
+        remove_permanent_dipole : bool, default: False
+            Remove the permanent dipole contribution from the light–matter coupling term.
+        dft_grid_name : str, default: "SG0"
+            Name of the DFT grid (e.g., ``"SG0"`` or ``"SG1"``).
+        dft_radial_points : int, default: -1
+            Number of radial grid points (Psi4 default if negative).
+        dft_spherical_points : int, default: -1
+            Number of angular grid points (Psi4 default if negative).
+        electron_propagation : str, default: "etrs"
+            Electron propagation scheme. Options: ``"etrs"`` or ``"pc"``.
+        threshold_pc : float, default: 1e-6
+            Convergence threshold for predictor–corrector propagation.
+        force_type : str, default: "ehrenfest"
+            Type of forces used for nuclei: ``"bo"`` (Born–Oppenheimer) or ``"ehrenfest"``.
+        n_fock_per_nuc : int, default: 10
+            Number of Fock builds per nuclear update.
+        n_elec_per_fock : int, default: 10
+            Number of electronic RT-TDDFT steps per Fock build.
+        mass_amu : array-like, optional
+            Atomic masses (amu) for each atom; if ``None``, Psi4 defaults are used.
+        friction_gamma_au : float, default: 0.0
+            Friction coefficient for Langevin dynamics (a.u.).
+        temperature_K : float, optional
+            Temperature for Langevin thermostat (K).
+        rng_seed : int, default: 1234
+            Random seed for Langevin dynamics.
+        homo_to_lumo : bool, default: False
+            Promote one alpha electron from HOMO→LUMO at initialization.
+        partial_charges : list, optional
+            Per-atom partial charges for additional external-field forces.
+        fix_nuclei_indices : list, optional
+            Indices of fixed nuclei during propagation.
         """
 
         super().__init__(
@@ -148,6 +182,16 @@ class RTEhrenfestModel(RTTDDFTModel):
     # -------------- heavy-load initialization (at INIT) --------------
 
     def initialize(self, dt_new, molecule_id):
+        """
+        Set the time step and molecule ID for this quantum dynamics model.
+
+        Parameters
+        ----------
+        dt_new : float
+            The new time step in atomic units (a.u.).
+        molecule_id : int
+            The ID of the molecule.
+        """
         super().initialize(dt_new, molecule_id)
         # now self.dt_rttddft_au is set as an integer divisor of dt_new
         # we need to determine whether dt_new matches the fock step or the nuc step, otherwise we warn
@@ -259,25 +303,33 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _set_molecule_positions_bohr(self, R):
         """
-        Set psi4.Molecule geometry from (nat,3) Bohr array and update Psi4.
+        Set Psi4 molecule geometry from new Cartesian positions in Bohr and update Psi4.
 
-        + **`R`** (ndarray): New Cartesian positions (nat, 3) in Bohr.
+        Parameters
+        ----------
+        R : numpy.ndarray
+            New Cartesian positions with shape ``(nat, 3)`` in Bohr.
         """
+
         geom = psi4.core.Matrix.from_array(R)
         self.mol.set_geometry(geom)
         self.mol.update_geometry()
 
     def _density_to_orth(self, Da, Db):
         """
-        Return spin densities in the orthonormal AO basis: P_O = S^{1/2} P' S^{1/2}.
+        Return spin densities in the orthonormal AO basis.
+
+        Transformation:
+        :math:`P_O = S^{1/2} P S^{1/2}`
 
         Returns
         -------
-        DaO : (nbf,nbf) ndarray
-            Alpha density in orthonormal AO basis.
-        DbO : (nbf,nbf) ndarray
-            Beta density in orthonormal AO basis.
+        DaO : numpy.ndarray
+            Alpha density in the orthonormal AO basis.
+        DbO : numpy.ndarray
+            Beta density in the orthonormal AO basis.
         """
+
         DaO = self.U @ Da @ self.U.T
         if self.is_restricted:
             DbO = DaO.copy()
@@ -287,18 +339,26 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _fock_to_orth(self, Fa, Fb):
         """
-        Return spin Fock matrices in the orthonormal AO basis: F_O = S^{1/2} F S^{1/2}.
+        Return spin Fock matrices in the orthonormal AO basis.
 
-        + **`Fa`** (ndarray): Alpha Fock in AO basis.
-        + **`Fb`** (ndarray): Beta Fock in AO basis.
+        Transformation:
+        :math:`F_O = S^{-1/2} F S^{-1/2}`
+
+        Parameters
+        ----------
+        Fa : numpy.ndarray
+            Alpha Fock matrix in AO basis.
+        Fb : numpy.ndarray
+            Beta Fock matrix in AO basis.
 
         Returns
         -------
-        FaO : (nbf,nbf) ndarray
-            Alpha Fock in orthonormal AO basis.
-        FbO : (nbf,nbf) ndarray
-            Beta Fock in orthonormal AO basis.
+        FaO : numpy.ndarray
+            Alpha Fock matrix in orthonormal AO basis.
+        FbO : numpy.ndarray
+            Beta Fock matrix in orthonormal AO basis.
         """
+
         FaO = self.X.T @ Fa @ self.X
         if self.is_restricted:
             FbO = FaO.copy()
@@ -308,18 +368,24 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _density_from_orth(self, DaO, DbO):
         """
-        Set AO densities from orthonormal densities using current X = S^{-1/2}.
+        Reconstruct AO densities from orthonormal densities using
+        :math:`X = S^{-1/2}`.
 
-        + **`DaO`** (ndarray): Alpha density in orthonormal AO basis.
-        + **`DbO`** (ndarray): Beta density in orthonormal AO basis.
+        Parameters
+        ----------
+        DaO : numpy.ndarray
+            Alpha density in the orthonormal AO basis.
+        DbO : numpy.ndarray
+            Beta density in the orthonormal AO basis.
 
         Returns
         -------
-        Da : (nbf,nbf) ndarray
+        Da : numpy.ndarray
             Alpha density in AO basis.
-        Db : (nbf,nbf) ndarray
+        Db : numpy.ndarray
             Beta density in AO basis.
         """
+
         Da = self.X @ DaO @ self.X.T
         if self.is_restricted:
             Db = Da.copy()
@@ -329,18 +395,24 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _fock_from_orth(self, FaO, FbO):
         """
-        Set AO Fock matrices from orthonormal Fock using current X = S^{-1/2}.
+        Reconstruct AO Fock matrices from orthonormal Fock matrices using
+        :math:`U = S^{1/2}`.
 
-        + **`FaO`** (ndarray): Alpha Fock in orthonormal AO basis.
-        + **`FbO`** (ndarray): Beta Fock in orthonormal AO basis.
+        Parameters
+        ----------
+        FaO : numpy.ndarray
+            Alpha Fock matrix in the orthonormal AO basis.
+        FbO : numpy.ndarray
+            Beta Fock matrix in the orthonormal AO basis.
 
         Returns
         -------
-        Fa : (nbf,nbf) ndarray
-            Alpha Fock in AO basis.
-        Fb : (nbf,nbf) ndarray
-            Beta Fock in AO basis.
+        Fa : numpy.ndarray
+            Alpha Fock matrix in AO basis.
+        Fb : numpy.ndarray
+            Beta Fock matrix in AO basis.
         """
+
         Fa = self.U @ FaO @ self.U.T
         if self.is_restricted:
             Fb = Fa.copy()
@@ -350,11 +422,17 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _rebuild_at_geometry_preserving_PO(self, R_new, effective_efield_vec=None):
         """
-        Move the molecule to R_new, refresh all Psi4 objects (S, H, ERI, Vpot, ...),
-        and keep the orthonormal density P_O invariant across the basis change.
+        Move the molecule to new positions, refresh Psi4 internals,
+        and preserve orthonormal density :math:`P_O` across the basis change.
 
-        + **`R_new`** (ndarray): New Cartesian positions (nat, 3) in Bohr.
+        Parameters
+        ----------
+        R_new : numpy.ndarray
+            New Cartesian positions ``(nat, 3)`` in Bohr.
+        effective_efield_vec : numpy.ndarray, optional
+            Electric field vector ``[E_x, E_y, E_z]`` in a.u.
         """
+
         timer_start = time.time()
 
         # 1. capture P_O in the old basis
@@ -394,13 +472,14 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _refresh_psi4_internals_after_geom_change(self):
         """
-        Refresh all Psi4 internal objects (S, H, ERI, Vpot, ...) after a geometry change.
+        Refresh Psi4 internal matrices and integrals after a geometry change.
 
-        Currently, this function performs a cheap SCF calculation (3 iterations with loose
-        convergence) to refresh the Wavefunction object at the new geometry. This is necessary
-        to update the XC potential object V_potential() and the DFT grid, which cannot be
-        manually refreshed.
+        Notes
+        -----
+        Performs a short SCF (3 iterations, loose convergence) to refresh the
+        wavefunction and DFT grid without recomputing a full SCF cycle.
         """
+
         if not hasattr(self, "wfn") or self.wfn is None:
             raise RuntimeError(
                 "Wavefunction container (self.wfn) is not set. Call initialize() first."
@@ -462,17 +541,21 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _compute_bo_forces_bohr(self, efield_vec=None):
         """
-        Compute Born–Oppenheimer forces F_A = - dE/dR_A (Hartree/Bohr) at the current geometry
-        using Psi4's analytic gradient for SCF ground state
-        (not Ehrenfest forces from the RT density). In this implementation, efield_vec does not
-        affect the forces, and this function is provided for debugging only.
+        Compute Born–Oppenheimer forces
+        :math:`F_A = -\\partial E / \\partial R_A` (Hartree/Bohr)
+        at the current geometry using Psi4’s analytic SCF gradient.
 
-        + **`efield_vec`** (ndarray): Optional external electric field vector (3,) in a.u.
+        Parameters
+        ----------
+        efield_vec : numpy.ndarray, optional
+            External electric field vector ``(3,)`` in a.u.
 
         Returns
         -------
-        forces : (nat, 3) ndarray in Hartree/Bohr
+        numpy.ndarray
+            Force array ``(nat, 3)`` in Hartree/Bohr.
         """
+
         timer_start = time.time()
 
         # to override the psi4 scf options, which might be changed by the geometry refresh function
@@ -509,17 +592,23 @@ class RTEhrenfestModel(RTTDDFTModel):
         self, include_xc_grad: bool = True, efield_vec=None
     ):
         """
-        Ehrenfest nuclear forces F_A = - dE/dR_A (Hartree/Bohr) at the current geometry,
-        using the instantaneous AO densities self.Da, self.Db and AO Focks self.Fa, self.Fb.
+        Compute Ehrenfest forces
+        :math:`F_A = -\\partial E / \\partial R_A`
+        from current RT-TDDFT densities and Fock matrices.
 
-        + **`include_xc_grad`** (bool): Whether to include the exchange-correlation gradient
-          contribution using the real-component of the RT density. True by default.
-        + **`efield_vec`** (ndarray): Optional external electric field vector (3,) in a.u.
+        Parameters
+        ----------
+        include_xc_grad : bool, default: True
+            Include exchange–correlation gradient contributions.
+        efield_vec : numpy.ndarray, optional
+            External electric field vector ``(3,)`` in a.u.
 
         Returns
         -------
-        forces : (nat, 3) ndarray in Hartree/Bohr
+        numpy.ndarray
+            Force array ``(nat, 3)`` in Hartree/Bohr.
         """
+
         timer_start = time.time()
 
         nat = self.mol.natom()
@@ -750,9 +839,10 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _prepare_alpha_homo_to_lumo_excited_state(self):
         """
-        Promote one alpha electron from HOMO to LUMO (beta unchanged) and
-        switch the propagator to unrestricted (UKS). Rebuild Fa/Fb at t=0.
+        Promote one alpha electron from HOMO→LUMO (beta unchanged) and switch
+        to unrestricted propagation. Rebuild Fock matrices at ``t = 0``.
         """
+
         wfn = self.wfn
 
         # --- sanity: closed-shell start ---
@@ -841,25 +931,39 @@ class RTEhrenfestModel(RTTDDFTModel):
         force_type: str = "ehrenfest",
     ):
         """
-        Three-time-scale Ehrenfest integrator (Li–Tully–Schlegel–Frisch):
-          - velocity Verlet for nuclei with dt_N
-          - nuclear-position–coupled midpoint Fock with dt_Ne = dt_N / n
-          - MMUT-like RT propagation for electrons with dt_e = dt_Ne / m
+        Three-time-scale Ehrenfest integrator
+        (Li–Tully–Schlegel–Frisch scheme).
 
-        + **`n_nuc_steps`** (int): Number of nuclear steps to propagate.
-        + **`efield_vec`** (ndarray): Constant external electric field vector (3,) in atomic units (default: zero field).
-        + **`nuc_dt_au`** (float): Nuclear time step Δt_N in atomic units (default: 0.4 au).
-        + **`n_fock_per_nuc`** (int): Number of Fock steps per nuclear step (default: 2).
-        + **`elec_substeps_per_fock`** (int): Number of electronic RT substeps per Fock step (default: None, which chooses
-          the largest integer such that dt_e <= self.dt_rttddft_au).
-        + **`mass_amu`** (ndarray): Atomic masses in amu (nat,) (default: None, which uses Psi4 masses).
-        + **`friction_gamma_au`** (float): Langevin friction coefficient gamma in atomic units (default: 0.0, no friction).
-        + **`temperature_K`** (float): Langevin bath temperature in Kelvin (default: None, no thermostat).
-        + **`rng_seed`** (int): Random number generator seed for Langevin thermostat (default: 1234).
-        + **`save_trajectory`** (bool): Whether to save the trajectory to a file (default: True).
-        + **`force_type`** (str): Type of forces to use: "bo" for Born–Oppenheimer forces from SCF gradient,
-          "ehrenfest" for Ehrenfest forces from the RT density (default: "ehrenfest").
+        Performs velocity Verlet for nuclei (Δt_N),
+        midpoint-coupled Fock updates (Δt_Ne = Δt_N / n),
+        and MMUT-like real-time electronic propagation (Δt_e = Δt_Ne / m).
+
+        Parameters
+        ----------
+        n_nuc_steps : int
+            Number of nuclear steps.
+        efield_vec : numpy.ndarray, default: zeros(3)
+            Constant electric field in a.u.
+        nuc_dt_au : float, default: 0.4
+            Nuclear time step (a.u.).
+        n_fock_per_nuc : int, default: 2
+            Fock builds per nuclear step.
+        elec_substeps_per_fock : int, optional
+            RT-TDDFT substeps per Fock update.
+        mass_amu : numpy.ndarray, optional
+            Atomic masses in amu.
+        friction_gamma_au : float, default: 0.0
+            Friction coefficient for Langevin dynamics.
+        temperature_K : float, optional
+            Bath temperature in Kelvin for Langevin dynamics.
+        rng_seed : int, default: 1234
+            Random seed for the thermostat.
+        save_trajectory : bool, default: True
+            Whether to save trajectory data to disk.
+        force_type : str, default: "ehrenfest"
+            Type of force used: ``"bo"`` or ``"ehrenfest"``.
         """
+
         rng = np.random.default_rng(int(rng_seed))
 
         # --- sizes and masses ---
@@ -972,11 +1076,14 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _propagate_electronic_regime(self, effective_efield_vec):
         """
-        One full electronic step in the Ehrenfest integrator (Li–Tully–Schlegel–Frisch). Nuclear dynamics are propagated
-        after several calls of this function.
+        One full electronic step in the Ehrenfest integrator.
 
-        + **`effective_efield_vec`** (ndarray): Constant external electric field vector (3,) in atomic units.
+        Parameters
+        ----------
+        effective_efield_vec : numpy.ndarray
+            Constant electric field vector ``(3,)`` in a.u.
         """
+
         Vk = self.Vk
         Rk = self.Rk
         Fk = self.Fk
@@ -1062,10 +1169,14 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _propagate_nuclear_regime(self, effective_efield_vec):
         """
-        One full nuclear step in the Ehrenfest integrator (Li–Tully–Schlegel–Frisch).
+        One full nuclear step in the Ehrenfest integrator.
 
-        + **`effective_efield_vec`** (ndarray): Constant external electric field vector (3,) in atomic units.
+        Parameters
+        ----------
+        effective_efield_vec : numpy.ndarray
+            Constant electric field vector ``(3,)`` in a.u.
         """
+
         Vk = self.Vk
         Rk = self.Rk
         Fk = self.Fk
@@ -1138,10 +1249,14 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _append_xyz_to_file(self, filename="rt_ehrenfest_traj.xyz"):
         """
-        Append the current molecular geometry to an XYZ file.
+        Append the current molecular geometry to an XYZ trajectory file.
 
-        + **`filename`** (str): The name of the XYZ file to append to (default: "rt_ehrenfest_traj.xyz").
+        Parameters
+        ----------
+        filename : str, default: "rt_ehrenfest_traj.xyz"
+            Path to the output XYZ file.
         """
+
         # remove existing file if this is the first time appending
         if self._count_append_xyz_to_file == 0 and os.path.exists(filename):
             os.remove(filename)
@@ -1160,26 +1275,21 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def propagate(self, effective_efield_vec):
         """
-        Propagate the quantum molecular dynamics given the effective electric field vector. This
-        propagation involves the coupled evolution of electronic and nuclear degrees of freedom.
+        Propagate coupled electronic–nuclear Ehrenfest dynamics under an external field.
 
-        Four time steps are involved in this propagation:
-        - Velocity Verlet for nuclei with dt_N
-        - Nuclear-position–coupled midpoint Fock with dt_Ne = dt_N / n
-        - MMUT-like RT propagation for electrons with dt_e = dt_Ne / m
-        - FDTD time step, i.e., the time step for calling this function
+        The integrator involves four nested time scales:
 
-        This function can be used to handle IR- and UV-vis light at the same time.
+        1. Velocity Verlet for nuclei (Δt_N)
+        2. Midpoint Fock updates (Δt_Ne = Δt_N / n)
+        3. MMUT-like electronic propagation (Δt_e = Δt_Ne / m)
+        4. External FDTD driver coupling (Δt_FDTD)
 
-        To make our life easier, we assume that the FDTD time step is the same as either
-          1. the nuclear time step dt_N.
-          2. or the Nuclear-position–coupled midpoint Fock time step dt_Ne or dt_rttddft.
-        The first case is easy to implement (all we need to do is to use self._propagate_rttddft_ehrenfest for one nuclear step).
-        The second case is a bit tricky, as we need to count how many FDTD calls we have done since the last nuclear step, and
-        then determine if we need to do a nuclear step or not.
-
-        + **`effective_efield_vec`**: Effective electric field vector in the form [Ex, Ey, Ez].
+        Parameters
+        ----------
+        effective_efield_vec : numpy.ndarray
+            Effective electric field vector ``[E_x, E_y, E_z]`` in a.u.
         """
+
         # enforce RT-TDDFT is run for once per super().propagate() call
         if self.em_coupling_regime == "electronic":
             self._propagate_electronic_regime(effective_efield_vec)
@@ -1194,13 +1304,18 @@ class RTEhrenfestModel(RTTDDFTModel):
         self.dipoles_eh.append(dip)
 
     def calc_amp_vector(self):
-        """
-        Update the source amplitude vector after propagating this molecule for one time step.
-        amp = d/dt[\rho(t) * mu_e] + d/dt[sum_A Z_A * R_A(t)]
+        r"""
+        Update the total amplitude vector after one full propagation step.
 
-        Returns:
-        - A numpy array representing the amplitude vector in the form [Ax, Ay, Az].
+        The total derivative is
+        :math:`\frac{d}{dt}[\rho(t)\mu_e] + \frac{d}{dt}\Big[\sum_A Z_A R_A(t)\Big]`.
+
+        Returns
+        -------
+        numpy.ndarray
+            Amplitude vector ``[A_x, A_y, A_z]`` in a.u.
         """
+
         # nuclear contribution to dipole moment time derivative
         nat = self.mol.natom()
         Z = np.array([self.mol.Z(a) for a in range(nat)], dtype=float)
@@ -1215,12 +1330,14 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def append_additional_data(self):
         """
-        Append additional data to be sent back to MaxwellLink, which can be retrieved by the user
-        via: maxwelllink.SocketMolecule.additional_data_history.
+        Append additional data to be returned to MaxwellLink.
 
-        Returns:
-        - A dictionary containing additional data.
+        Returns
+        -------
+        dict
+            Contains current time, total energy, and dipole components.
         """
+
         data = {}
         data["time_au"] = self.t
         data["energy_au"] = self.energies_eh[-1] if len(self.energies_eh) > 0 else 0.0
@@ -1231,12 +1348,12 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _dump_to_checkpoint(self):
         """
-        Dump the internal state of the model to a checkpoint.
+        Dump the full Ehrenfest model state to a checkpoint file.
 
-        This function saves the current density matrices (Da, Db), Fock matrices (Fa, Fb),
-        current time (t), and step count (count) to a NumPy .npy file.
-        The checkpoint file is named "rttddft_checkpoint_id_<molid>.npy".
+        Saves density matrices, Fock matrices, nuclear positions, velocities,
+        and auxiliary variables in ``rttddft_checkpoint_id_<molid>.npy``.
         """
+
         # try to save self.Da, self.Db, self.Fa, self.Fb in a single npy file
         np.save(
             self.checkpoint_filename,
@@ -1284,8 +1401,15 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _snapshot(self):
         """
-        Return a snapshot of the internal state for propagation. Deep copy the arrays to avoid mutation issues.
+        Return a deep-copied snapshot of the current model state.
+
+        Returns
+        -------
+        dict
+            Dictionary containing densities, Focks, velocities, positions,
+            and auxiliary integration variables.
         """
+
         snapshot = {
             "time": self.t,
             "count": self.count,
@@ -1303,8 +1427,14 @@ class RTEhrenfestModel(RTTDDFTModel):
 
     def _restore(self, snapshot):
         """
-        Restore the internal state from a snapshot.
+        Restore the model state from a snapshot dictionary.
+
+        Parameters
+        ----------
+        snapshot : dict
+            Snapshot dictionary returned by ``_snapshot()``.
         """
+
         self.t = snapshot["time"]
         self.count = snapshot["count"]
         self.Da = snapshot["Da"]
@@ -1321,6 +1451,7 @@ class RTEhrenfestModel(RTTDDFTModel):
 if __name__ == "__main__":
     """
     Run the doctests to validate the RTTDDFTModel class.
+
     >>> python rt_ehrenfest_model.py -v
     """
     # import doctest

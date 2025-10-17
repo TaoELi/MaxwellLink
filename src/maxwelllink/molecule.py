@@ -1,12 +1,13 @@
-# molecule_abstract.py
 """
-EM-agnostic molecular classes for coupling quantum molecular dynamics with EM solvers.
+A molecule class capable of operating in both socket and non-socket modes.
 
-This module intentionally avoids importing any specific EM solver (e.g., MEEP).
-Backends (e.g., em_solver/meep.py) provide the EM-specific pieces:
-  * building/updating sources for injection
-  * computing regularized E-field integrals
-  * step functions for the solver main loop
+In socket mode, the molecule communicates with an external process (e.g., a
+quantum driver) via a socket connection through ``SocketHub``.
+In non-socket mode, it directly instantiates a molecular dynamics driver defined
+in ``__drivers__`` (e.g., ``tlsmodel``, ``qutipmodel``).
+
+EM-specific source creation and field-integral computations are provided by
+backend modules.
 """
 
 from __future__ import annotations
@@ -20,26 +21,33 @@ from .units import FS_TO_AU
 from .mxl_drivers.python.models import __drivers__
 
 
-# ---------------------------------------------------------------------
-# Minimal Vector3 so we don't depend on mp.Vector3 in the abstract layer
-# ---------------------------------------------------------------------
 @dataclass
 class Vector3:
+    """
+    Minimal 3D vector container used to avoid depending on ``mp.Vector3`` in the
+    abstract layer.
+
+    Attributes
+    ----------
+    x : float, default: 0.0
+        X component.
+    y : float, default: 0.0
+        Y component.
+    z : float, default: 0.0
+        Z component.
+    """
+
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
 
 
-# ---------------------------------------------------------------------
-# A novel molecule class which can support socket and non-socket modes
-# This is a future extension and is not yet integrated with the rest of the codebase.
-# ---------------------------------------------------------------------
-
-
 class Molecule:
     """
     A molecule class which can support both socket and non-socket modes.
-    EM-specific source creation and field-integral computation are provided by backends.
+
+    EM-specific source creation and field-integral computation are provided by
+    EM backends.
     """
 
     def __init__(
@@ -55,6 +63,42 @@ class Molecule:
         driver_kwargs: Optional[Dict] = None,
         rescaling_factor: float = 1.0,
     ):
+        """
+        Parameters
+        ----------
+        hub : SocketHub or None, optional
+            Socket hub for socket mode. If provided, ``driver`` must be ``None``.
+        driver : str or None, optional
+            Driver name for non-socket mode. If provided, ``hub`` must be ``None``.
+        center : Vector3 or None, optional
+            Molecule center position.
+        size : Vector3 or None, optional
+            Molecule size (extent).
+        dimensions : int or None, optional
+            Simulation dimensionality; one of ``1``, ``2``, or ``3``.
+        sigma : float or None, optional
+            Spatial polarization kernel width.
+        resolution : int or None, optional
+            Optional real-space resolution for building FDTD sources.
+        init_payload : dict or None, optional
+            Optional initialization payload for socket communication with molecular drivers.
+        driver_kwargs : dict or None, optional
+            Keyword arguments passed to the selected driver in non-socket mode.
+        rescaling_factor : float, default: 1.0
+            Rescaling factor for polarization.
+
+        Raises
+        ------
+        ValueError
+            If both ``hub`` and ``driver`` are provided, or neither is provided, or
+            if ``dimensions`` is not in ``{1, 2, 3}``, or if an unsupported driver is
+            requested in non-socket mode.
+        ImportError
+            If the requested driver cannot be imported.
+        Exception
+            If driver setup fails for other reasons (the driver docstring is printed).
+        """
+
         self.hub = hub
         self.driver = driver
         self.center = center
@@ -135,18 +179,67 @@ class Molecule:
                 raise err
 
     def _refresh_time_units(self, time_units_fs):
+        """
+        Refresh the external time-unit scale (in femtoseconds) used to convert EM time
+        steps to atomic units and propagate it into the initialization payload.
+
+        Parameters
+        ----------
+        time_units_fs : float
+            Time unit in femtoseconds used by the EM solver.
+
+        Notes
+        -----
+        Sets ``self.dt_au = self.dt * time_units_fs * FS_TO_AU`` and updates
+        ``init_payload['dt_au']`` accordingly.
+        """
+
         self.time_units_fs = time_units_fs
         self.dt_au = self.dt * time_units_fs * FS_TO_AU
         # also refresh in init_payload for drivers
         self.init_payload["dt_au"] = self.dt_au
 
     def _refresh_time_step(self, dt_em):
+        """
+        Refresh the EM time step (dimensionless, in EM code units) and the derived
+        atomic-unit time step, then propagate it into the initialization payload.
+
+        Parameters
+        ----------
+        dt_em : float
+            EM solver time step.
+
+        Notes
+        -----
+        Sets ``self.dt = dt_em`` and
+        ``self.dt_au = self.dt * self.time_units_fs * FS_TO_AU``, and updates
+        ``init_payload['dt_au']`` accordingly.
+        """
+
         self.dt = dt_em
         self.dt_au = self.dt * self.time_units_fs * FS_TO_AU
         # also refresh in init_payload for drivers
         self.init_payload["dt_au"] = self.dt_au
 
     def initialize_driver(self, dt_au, molecule_id):
+        """
+        Initialize the non-socket driver with the given time step (a.u.) and molecule ID.
+
+        Parameters
+        ----------
+        dt_au : float
+            Time step in atomic units passed to the driver.
+        molecule_id : int
+            Molecule identifier.
+
+        Raises
+        ------
+        NotImplementedError
+            If called in socket mode (not implemented yet).
+        RuntimeError
+            If the molecule is not properly initialized in socket or non-socket mode.
+        """
+
         if self.mode == "socket":
             raise NotImplementedError(
                 "Socket mode driver initialization is not implemented yet."
@@ -162,6 +255,22 @@ class Molecule:
             )
 
     def propagate(self, efield_vec3):
+        """
+        Propagate the molecule by one step under the given effective electric field.
+
+        Parameters
+        ----------
+        efield_vec3 : array-like of float, shape (3,)
+            Effective electric field vector ``[E_x, E_y, E_z]``.
+
+        Raises
+        ------
+        NotImplementedError
+            If called in socket mode (not implemented yet).
+        RuntimeError
+            If the molecule is not properly initialized in socket or non-socket mode.
+        """
+
         if self.mode == "socket":
             raise NotImplementedError("Socket mode propagation is not implemented yet.")
         elif self.mode == "non-socket":
@@ -173,6 +282,23 @@ class Molecule:
             )
 
     def calc_amp_vector(self):
+        """
+        Compute and return the source amplitude vector for the current step.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (3,)
+            Amplitude vector, typically
+            :math:`[\\mathrm{d}\\mu_x/\\mathrm{d}t,\\ \\mathrm{d}\\mu_y/\\mathrm{d}t,\\ \\mathrm{d}\\mu_z/\\mathrm{d}t]`.
+
+        Raises
+        ------
+        NotImplementedError
+            If called in socket mode (not implemented yet).
+        RuntimeError
+            If the molecule is not properly initialized in socket or non-socket mode.
+        """
+
         if self.mode == "socket":
             raise NotImplementedError(
                 "Socket mode amplitude calculation is not implemented yet."

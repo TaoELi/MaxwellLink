@@ -1,7 +1,3 @@
-"""
-Lazy-loading package for MaxwellLink to avoid importing heavy dependencies, such as FDTD libraries
-"""
-
 from importlib.metadata import version, PackageNotFoundError
 
 try:
@@ -9,7 +5,6 @@ try:
 except PackageNotFoundError:
     __version__ = "0.0.0"
 
-# Declare names for linters/docs, but don't import:
 __all__ = [
     "TLSMolecule",
     "SocketMolecule",
@@ -35,6 +30,24 @@ __all__ = [
 
 # Lazy attribute loader: import submodules *only when accessed*.
 def __getattr__(name):
+    """
+    Lazy attribute loader that imports and returns model classes on demand.
+
+    Parameters
+    ----------
+    name : str
+        The attribute name requested (e.g., ``"Molecule"``, ``"SocketHub"``).
+
+    Returns
+    -------
+    type
+        The requested class object.
+
+    Raises
+    ------
+    AttributeError
+        If the requested attribute is not a known model class.
+    """
     # Legacy code path (molecule_fast) kept for reference; prefer molecule_abstract + em_solvers/meep now.
     if name in {
         "TLSMolecule",

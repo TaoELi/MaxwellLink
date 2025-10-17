@@ -17,10 +17,26 @@ except ImportError as e:
 
 def _load_spec_module(path: str):
     """
-    Import a user-supplied Python file that defines `build_model(**kwargs)`.
+    Import a user-supplied Python file that defines ``build_model(**kwargs)``.
 
-    + **`path`** (str): Path to the Python file.
+    Parameters
+    ----------
+    path : str
+        Path to the Python file.
+
+    Returns
+    -------
+    module
+        The imported Python module containing ``build_model(**kwargs)``.
+
+    Raises
+    ------
+    ImportError
+        If the module cannot be loaded from the given path.
+    AttributeError
+        If the loaded module does not define ``build_model(**kwargs)``.
     """
+
     path = os.path.abspath(path)
     spec = importlib.util.spec_from_file_location("mxl_qutip_user_spec", path)
     if spec is None or spec.loader is None:
@@ -37,11 +53,20 @@ def _load_spec_module(path: str):
 
 def _parse_kwargs_string(s: str) -> Dict:
     """
-    Parse a compact 'k1=v1,k2=v2' into dict with numbers/bools auto-cast.
-    (Used for preset params and for passing kwargs to user spec.)
+    Parse a compact ``'k1=v1,k2=v2'`` string into a dictionary with numbers/bools
+    auto-cast. Used for preset parameters and for passing kwargs to a user spec.
 
-    + **`s`** (str): Input string.
+    Parameters
+    ----------
+    s : str
+        Input string.
+
+    Returns
+    -------
+    dict
+        Parsed key-value pairs with best-effort type casting.
     """
+
     if not s:
         return {}
 
@@ -80,12 +105,23 @@ def _parse_kwargs_string(s: str) -> Dict:
 
 def _calc_mu_vector_expectation(rho, mu_ops):
     """
-    Return <mu_x>, <mu_y>, <mu_z> as a length-3 numpy array.
+    Return :math:`\\langle\\mu_x\\rangle`, :math:`\\langle\\mu_y\\rangle`,
+    :math:`\\langle\\mu_z\\rangle` as a length-3 NumPy array.
 
-    + **`rho`** (qutip.Qobj): Density matrix of the system.
-    + **`mu_ops`** (dict): Dictionary with keys 'x', 'y', 'z' and values as qutip.Qobj or None,
-    storing dipole operators.
+    Parameters
+    ----------
+    rho : qutip.Qobj
+        Density matrix of the system.
+    mu_ops : dict
+        Dictionary with keys ``'x'``, ``'y'``, ``'z'`` and values as ``qutip.Qobj`` or
+        ``None``, storing dipole operators.
+
+    Returns
+    -------
+    numpy.ndarray of float, shape (3,)
+        The expectation values of the dipole components.
     """
+
     vec = np.zeros(3, dtype=float)
     for i, key in enumerate(("x", "y", "z")):
         op = mu_ops.get(key, None)
@@ -103,20 +139,37 @@ def _build_model_tls(
     gamma_dephase=0.0,
 ):
     r"""
-    Simple 2-level model preset like TLSModel, but using QuTiP objects.
-    H0 = |e><e| * omega
-    mu = mu12 * (|g><e| + |e><g|) along chosen axis
-    Lindblad: relaxation ($\sigma_{-}$) at rate gamma_relax, pure dephasing at gamma_dephase.
+    Simple 2-level model preset like ``TLSModel``, but using QuTiP objects.
 
-    This function provides a reference implementation for the `build_model(**kwargs)` function.
+    Equations
+    ---------
+    - :math:`H_0 = \\lvert e \\rangle \\langle e \\rvert \\, \\omega`
+    - :math:`\\boldsymbol{\\mu} = \\mu_{12}\\big(\\lvert g \\rangle \\langle e \\rvert + \\lvert e \\rangle \\langle g \\rvert\\big)` along the chosen axis
+    - Lindblad: relaxation (:math:`\\sigma_-`) at rate ``gamma_relax``, pure dephasing at ``gamma_dephase``.
 
-    + **`omega`** (float): Transition frequency in atomic units (a.u.). Default is 0.242 a.u.
-    + **`mu12`** (float): Dipole moment in atomic units (a.u.). Default is 187 a.u.
-    + **`orientation`** (int): Orientation of the dipole moment, can be 0 (x), 1 (y), or 2 (z). Default is 2 (z).
-    + **`pe_initial`** (float): Initial population in the excited state. Default is 0.0.
-    + **`gamma_relax`** (float): Relaxation rate (a.u.). Default is 0.0.
-    + **`gamma_dephase`** (float): Pure dephasing rate (a.u.). Default is 0.0.
+    This function provides a reference implementation for the ``build_model(**kwargs)`` function.
+
+    Parameters
+    ----------
+    omega : float, default: 0.242
+        Transition frequency in atomic units (a.u.).
+    mu12 : float, default: 187
+        Dipole moment in atomic units (a.u.).
+    orientation : int, default: 2
+        Orientation of the dipole moment; can be ``0`` (x), ``1`` (y), or ``2`` (z).
+    pe_initial : float, default: 0.0
+        Initial population in the excited state.
+    gamma_relax : float, default: 0.0
+        Relaxation rate (a.u.).
+    gamma_dephase : float, default: 0.0
+        Pure dephasing rate (a.u.).
+
+    Returns
+    -------
+    dict
+        A dictionary with keys ``H0``, ``mu_ops``, ``c_ops``, and ``rho0``.
     """
+
     # basis
     g = qt.basis(2, 0)
     e = qt.basis(2, 1)
@@ -315,9 +368,14 @@ class QuTiPModel(DummyModel):
         """
         Initialize the model with the new time step and molecule ID.
 
-        + **`dt_new`** (float): The new time step in atomic units (a.u.).
-        + **`molecule_id`** (int): The ID of the molecule.
+        Parameters
+        ----------
+        dt_new : float
+            The new time step in atomic units (a.u.).
+        molecule_id : int
+            The ID of the molecule.
         """
+
         self.dt = float(dt_new)
         self.molecule_id = int(molecule_id)
 
@@ -414,10 +472,17 @@ class QuTiPModel(DummyModel):
 
     def _effective_unitary_step(self, E_vec):
         r"""
-        Fast path for closed-system evolution without collapse operators. $H_{eff} = H_0 - E \dot \mu$
+        Fast path for closed-system evolution without collapse operators.
 
-        + **`E_vec`** (array-like): Electric field vector [Ex, Ey, Ez] at current time step.
+        This uses the effective Hamiltonian
+        :math:`H_{\\mathrm{eff}} = H_0 - \\mathbf{E} \\cdot \\boldsymbol{\\mu}`.
+
+        Parameters
+        ----------
+        E_vec : array-like of float, shape (3,)
+            Electric field vector ``[E_x, E_y, E_z]`` at the current time step.
         """
+
         Heff = self.H0
         if self.mu_ops["x"] is not None:
             Heff = Heff - float(E_vec[0]) * self.mu_ops["x"]
@@ -431,10 +496,15 @@ class QuTiPModel(DummyModel):
 
     def _lindblad_step(self, E_vec):
         """
-        Slow path for open-system evolution with collapse operators using QuTiP mesolve.
+        Slow path for open-system evolution with collapse operators using QuTiP
+        ``mesolve``.
 
-        + **`E_vec`** (array-like): Electric field vector [Ex, Ey, Ez] at current time step.
+        Parameters
+        ----------
+        E_vec : array-like of float, shape (3,)
+            Electric field vector ``[E_x, E_y, E_z]`` at the current time step.
         """
+
         H = self.H0
         if self.mu_ops["x"] is not None:
             H = H - float(E_vec[0]) * self.mu_ops["x"]
@@ -451,10 +521,15 @@ class QuTiPModel(DummyModel):
 
     def propagate(self, effective_efield_vec):
         """
-        Propagate the quantum molecular dynamics given the effective electric field vector.
+        Propagate the quantum molecular dynamics given the effective electric field
+        vector.
 
-        + **`effective_efield_vec`**: Effective electric field vector in the form [Ex, Ey, Ez].
+        Parameters
+        ----------
+        effective_efield_vec : array-like of float, shape (3,)
+            Effective electric field vector in the form ``[E_x, E_y, E_z]``.
         """
+
         self.E_vec = np.asarray(effective_efield_vec, dtype=float).reshape(3)
 
         if self.verbose:
@@ -476,10 +551,19 @@ class QuTiPModel(DummyModel):
 
     def calc_amp_vector(self):
         """
-        Calculate the amplitude vector (d<mu>/dt) for the current time step.
+        Calculate the amplitude vector :math:`\\mathrm{d}\\langle\\mu\\rangle/\\mathrm{d}t`
+        for the current time step.
 
-        If `fd_dmudt` is True, use finite-difference (cheaper); else use analytical derivative if available.
+        If ``fd_dmudt`` is ``True``, use finite differences (cheaper); otherwise, use
+        the analytical derivative if available.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (3,)
+            The amplitude vector
+            :math:`[\\mathrm{d}\\langle\\mu_x\\rangle/\\mathrm{d}t,\\ \\mathrm{d}\\langle\\mu_y\\rangle/\\mathrm{d}t,\\ \\mathrm{d}\\langle\\mu_z\\rangle/\\mathrm{d}t]`.
         """
+
         amp = np.zeros(3, float)
         if self.fd_dmudt:
             amp = (self._mu_curr - self._mu_prev) / self.dt
@@ -507,13 +591,18 @@ class QuTiPModel(DummyModel):
 
     def append_additional_data(self):
         """
-        Append additional data to be sent back to MaxwellLink, which can be retrieved by the user
-        via the Python interface: maxwelllink.SocketMolecule.additional_data_history, where
-        additional_data_history is a list of dictionaries.
+        Append additional data to be sent back to MaxwellLink.
 
-        Returns:
-        - A dictionary containing additional data.
+        The data can be retrieved by the user via the Python interface:
+        ``maxwelllink.SocketMolecule.additional_data_history``, where
+        ``additional_data_history`` is a list of dictionaries.
+
+        Returns
+        -------
+        dict
+            A dictionary containing additional data.
         """
+
         data = {
             "time_au": self.t,
             "mu_x_au": float(self._mu_curr[0]),
@@ -567,8 +656,18 @@ class QuTiPModel(DummyModel):
 
     def _snapshot(self):
         """
-        Return a snapshot of the internal state for propagation. Deep copy the arrays to avoid mutation issues.
+        Return a snapshot of the internal state for propagation.
+
+        Notes
+        -----
+        Deep copy the arrays to avoid mutation issues.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the snapshot of the internal state.
         """
+
         return {
             "time": self.t,
             "rho": self.rho.full().copy(),
@@ -579,7 +678,13 @@ class QuTiPModel(DummyModel):
     def _restore(self, snapshot):
         """
         Restore the internal state from a snapshot.
+
+        Parameters
+        ----------
+        snapshot : dict
+            A dictionary containing the snapshot of the internal state.
         """
+
         self.t = snapshot["time"]
         self.rho = qt.Qobj(snapshot["rho"])
         self._mu_prev = snapshot["mu_prev"].copy()

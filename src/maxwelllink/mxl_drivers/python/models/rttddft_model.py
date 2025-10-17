@@ -16,11 +16,14 @@ except ImportError:
 
 class RTTDDFTModel(DummyModel):
     """
-    A real-time time-dependent density functional theory (RT-TDDFT) quantum dynamics model using the Psi4 quantum chemistry package.
-    This class implements a RT-TDDFT model for quantum dynamics, which can be integrated with the MaxwellLink framework.
+    A real-time time-dependent density functional theory (RT-TDDFT) quantum
+    dynamics model using the Psi4 quantum chemistry package.
 
-    Example
-    -------
+    This class implements an RT-TDDFT model for quantum dynamics, which can be
+    integrated with the MaxwellLink framework.
+
+    Examples
+    --------
     Create from an XYZ file and then set the molecule id with restricted SCF:
 
     >>> model = RTTDDFTModel(
@@ -67,25 +70,64 @@ class RTTDDFTModel(DummyModel):
         """
         Initialize the necessary parameters for the RT-TDDFT quantum dynamics model.
 
-        + **`engine`** (str): The computational engine to use (e.g., "psi4"). Default is "psi4". Currently, only "psi4" is supported.
-        + **`molecule_xyz`** (str): Path to the XYZ file containing the molecular structure. The second line of the XYZ file may contain the charge and multiplicity.
-        + **`functional`** (str): Any Psi4 functional label, e.g. "PBE", "B3LYP", "SCAN", "PBE0". Default is "SCF" (Hartree-Fock).
-        + **`basis`** (str): Any basis set label recognized by Psi4, e.g. "sto-3g", "6-31g", "cc-pVDZ". Default is "sto-3g".
-        + **`dt_rttddft_au`** (float): Time step for real-time TDDFT propagation in atomic units (a.u.). Default is 0.04 a.u. If the FDTD time step is an integer multiple of this, the driver will sub-step internally. This sub-stepping can avoid propagating EM fields too frequently when the molecule requires a small time step.
-        + **`delta_kick_au`** (float): Strength of the initial delta-kick perturbation along the x, y, and z direction in atomic units (a.u.). Default is 0.0e-3 a.u. If this value is set to a non-zero value, the driver will apply a delta-kick perturbation at t=0 to initiate the dynamics. With this delta-kick, and also setting the FDTD coupling to zero, one can compute the conventional RT-TDDFT linear absorption spectrum of the molecule.
-        + **`delta_kick_direction`** (str): Direction of the initial delta-kick perturbation. Can be "x", "y", "z", "xy", "xz", "yz", or "xyz". Default is "xyz".
-        + **`memory`** (str): Memory allocation for Psi4, e.g. "8GB", "500MB". Default is "8GB".
-        + **`num_threads`** (int): Number of CPU threads to use in Psi4. Default is 1.
-        + **`checkpoint`** (bool): Whether to dump checkpoint files during propagation to allow restarting from the last checkpoint. Default is False.
-        + **`restart`** (bool): Whether to restart the propagation from the last checkpoint. Default is False. Setting this to True requires that checkpoint files exist. When restarting, the driver will ignore the initial delta-kick perturbation even if it is set to a non-zero value.
-        + **`verbose`** (bool): Whether to print verbose output. Default is False.
-        + **`remove_permanent_dipole`** (bool): Whether to remove the effect of permanent dipole moments in the light-matter coupling term. Default is False.
-        + **`dft_grid_name`** (str): Name of the DFT grid to use in Psi4, e.g. "SG0", "SG1". Default is "SG1". Using "SG0" can speed up DFT calculations significantly but is less accurate.
-        + **`dft_radial_points`** (int): Number of radial points in the DFT grid. Default is -1 (Psi4 default).
-        + **`dft_spherical_points`** (int): Number of spherical points in the DFT grid. Default is -1 (Psi4 default).
-        + **`electron_propagation`** (str): The electron propagation scheme to use. Options are "etrs" (Enforced Time-Reversal Symmetry) or "pc" (Predictor-Corrector). Default is "pc".
-        + **`threshold_pc`** (float): Convergence threshold for the predictor-corrector scheme. Default is 1e-8.
+        Parameters
+        ----------
+        engine : str, default: "psi4"
+            The computational engine to use (e.g., ``"psi4"``). Currently, only
+            ``"psi4"`` is supported.
+        molecule_xyz : str
+            Path to the XYZ file containing the molecular structure. The second line
+            of the XYZ file may contain the charge and multiplicity.
+        functional : str, default: "SCF"
+            Any Psi4 functional label, e.g. ``"PBE"``, ``"B3LYP"``, ``"SCAN"``,
+            ``"PBE0"``. Default is ``"SCF"`` (Hartree-Fock).
+        basis : str, default: "sto-3g"
+            Any basis set label recognized by Psi4, e.g. ``"sto-3g"``, ``"6-31g"``,
+            ``"cc-pVDZ"``.
+        dt_rttddft_au : float, default: 0.04
+            Time step for real-time TDDFT propagation in atomic units (a.u.). If the
+            FDTD time step is an integer multiple of this, the driver will sub-step
+            internally. This sub-stepping can avoid propagating EM fields too frequently
+            when the molecule requires a small time step.
+        delta_kick_au : float, default: 0.0e-3
+            Strength of the initial delta-kick perturbation along the x, y, and z
+            direction in atomic units (a.u.). If this value is non-zero, the driver
+            will apply a delta-kick perturbation at :math:`t=0` to initiate the dynamics.
+            With this delta-kick, and also setting the FDTD coupling to zero, one can
+            compute the conventional RT-TDDFT linear absorption spectrum of the molecule.
+        delta_kick_direction : str, default: "xyz"
+            Direction of the initial delta-kick perturbation. Can be ``"x"``, ``"y"``,
+            ``"z"``, ``"xy"``, ``"xz"``, ``"yz"``, or ``"xyz"``.
+        memory : str, default: "8GB"
+            Memory allocation for Psi4, e.g. ``"8GB"``, ``"500MB"``.
+        num_threads : int, default: 1
+            Number of CPU threads to use in Psi4.
+        checkpoint : bool, default: False
+            Whether to dump checkpoint files during propagation to allow restarting from
+            the last checkpoint.
+        restart : bool, default: False
+            Whether to restart the propagation from the last checkpoint. Setting this to
+            ``True`` requires that checkpoint files exist. When restarting, the driver
+            will ignore the initial delta-kick perturbation even if it is non-zero.
+        verbose : bool, default: False
+            Whether to print verbose output.
+        remove_permanent_dipole : bool, default: False
+            Whether to remove the effect of permanent dipole moments in the
+            light–matter coupling term.
+        dft_grid_name : str, default: "SG0"
+            Name of the DFT grid to use in Psi4, e.g. ``"SG0"``, ``"SG1"``. Using
+            ``"SG0"`` can speed up DFT calculations significantly but is less accurate.
+        dft_radial_points : int, default: -1
+            Number of radial points in the DFT grid. ``-1`` uses the Psi4 default.
+        dft_spherical_points : int, default: -1
+            Number of spherical points in the DFT grid. ``-1`` uses the Psi4 default.
+        electron_propagation : str, default: "etrs"
+            The electron propagation scheme to use. Options are ``"etrs"`` (Enforced
+            Time-Reversal Symmetry) or ``"pc"`` (Predictor-Corrector). Default is ``"pc"``.
+        threshold_pc : float, default: 1e-6
+            Convergence threshold for the predictor–corrector scheme.
         """
+
         super().__init__(verbose, checkpoint, restart)
 
         if engine.lower() != "psi4":
@@ -158,9 +200,14 @@ class RTTDDFTModel(DummyModel):
         """
         Set the time step and molecule ID for this quantum dynamics model.
 
-        + **`dt_new`** (float): The new time step in atomic units (a.u.).
-        + **`molecule_id`** (int): The ID of the molecule.
+        Parameters
+        ----------
+        dt_new : float
+            The new time step in atomic units (a.u.).
+        molecule_id : int
+            The ID of the molecule.
         """
+
         self.dt = float(dt_new)
         self.molecule_id = int(molecule_id)
         self.checkpoint_filename = "rttddft_checkpoint_id_%d.npy" % self.molecule_id
@@ -199,8 +246,13 @@ class RTTDDFTModel(DummyModel):
     def _init_psi4(self):
         """
         Initialize Psi4 and set up the molecule, basis set, and functional.
-        This method is called during the first propagation step after receiving the molecule ID.
+
+        Notes
+        -----
+        This method is called during the first propagation step after receiving the
+        molecule ID.
         """
+
         # Set memory and output file for Psi4
         psi4.set_memory(self.memory)
         psi4.core.set_num_threads(self.num_threads)
@@ -337,13 +389,25 @@ class RTTDDFTModel(DummyModel):
 
     def _build_KS_psi4(self, Da_np, Db_np, restricted, V_ext=None):
         """
-        Return Fa, Fb given current densities.
+        Return ``Fa``, ``Fb`` given current densities.
 
-        + **`Da_np`** (ndarray): Alpha density matrix in AO basis.
-        + **`Db_np`** (ndarray): Beta density matrix in AO basis.
-        + **`restricted`** (bool): Whether the calculation is restricted (RKS) or unrestricted (UKS).
-        + **`V_ext`** (ndarray or None): External potential in AO basis to be added to both Fa and Fb. Default is None.
+        Parameters
+        ----------
+        Da_np : numpy.ndarray
+            Alpha density matrix in AO basis.
+        Db_np : numpy.ndarray
+            Beta density matrix in AO basis.
+        restricted : bool
+            Whether the calculation is restricted (RKS) or unrestricted (UKS).
+        V_ext : numpy.ndarray or None, optional
+            External potential in AO basis to be added to both ``Fa`` and ``Fb``.
+
+        Returns
+        -------
+        tuple of numpy.ndarray
+            ``(Fa, Fb)`` Fock matrices in AO basis.
         """
+
         if restricted:
             # RKS: J from total density (2 * Da), K from Da if hybrid
             Jtot = self._build_J_psi4(2.0 * Da_np)
@@ -381,29 +445,61 @@ class RTTDDFTModel(DummyModel):
 
     def _build_J_psi4(self, P):
         """
-        Coulomb J[P] in AO basis using 4-index (pq|rs).
+        Coulomb :math:`J[P]` in AO basis using 4-index :math:`(pq|rs)`.
 
-        + **`P`** (ndarray): Density matrix in AO basis.
+        Parameters
+        ----------
+        P : numpy.ndarray
+            Density matrix in AO basis.
+
+        Returns
+        -------
+        numpy.ndarray
+            Coulomb matrix :math:`J`.
         """
+
         return np.einsum("pqrs,rs->pq", self.I_ao, P, optimize=True)
 
     def _build_K_psi4(self, P):
         """
-        Exchange K[P] in AO basis using 4-index (pr|qs). Only used if alpha_hfx > 0.
+        Exchange :math:`K[P]` in AO basis using 4-index :math:`(pr|qs)`. Only used if
+        ``alpha_hfx > 0``.
 
-        + **`P`** (ndarray): Density matrix in AO basis.
+        Parameters
+        ----------
+        P : numpy.ndarray
+            Density matrix in AO basis.
+
+        Returns
+        -------
+        numpy.ndarray
+            Exchange matrix :math:`K`.
         """
+
         return np.einsum("prqs,rs->pq", self.I_ao, P, optimize=True)
 
     def _build_Vxc_psi4(self, Da_np, Db_np, restricted):
         """
-        Build V_xc in AO basis from current spin densities via VBase.
-        VBase expects *real* densities; pass the real (Hermitian) parts.
+        Build :math:`V_{xc}` in AO basis from current spin densities via ``VBase``.
 
-        + **`Da_np`** (ndarray): Alpha density matrix in AO basis.
-        + **`Db_np`** (ndarray): Beta density matrix in AO basis.
-        + **`restricted`** (bool): Whether the calculation is restricted (RKS) or unrestricted (UKS).
+        ``VBase`` expects *real* densities; pass the real (Hermitian) parts.
+
+        Parameters
+        ----------
+        Da_np : numpy.ndarray
+            Alpha density matrix in AO basis.
+        Db_np : numpy.ndarray
+            Beta density matrix in AO basis.
+        restricted : bool
+            Whether the calculation is restricted (RKS) or unrestricted (UKS).
+
+        Returns
+        -------
+        numpy.ndarray or tuple of numpy.ndarray
+            For RKS, returns a single matrix ``V``.
+            For UKS, returns ``(V_a, V_b)``.
         """
+
         nbf = Da_np.shape[0]
         if restricted:
             D = psi4.core.Matrix.from_array(np.real((Da_np + Db_np.T) / 2))  # Da==Db
@@ -422,12 +518,14 @@ class RTTDDFTModel(DummyModel):
 
     def _molecule_positions_bohr(self):
         """
-        Return current Cartesian positions (nat,3) in Bohr from psi4.Molecule.
+        Return current Cartesian positions ``(nat, 3)`` in Bohr from ``psi4.Molecule``.
 
         Returns
         -------
-        R : (nat,3) ndarray in Bohr
+        numpy.ndarray
+            Array of shape ``(nat, 3)`` with positions in Bohr.
         """
+
         nat = self.mol.natom()
         R = np.zeros((nat, 3), dtype=float)
         for a in range(nat):
@@ -439,11 +537,23 @@ class RTTDDFTModel(DummyModel):
     def _energy_dipole_analysis_psi4(self, Da_np, Db_np):
         """
         Compute total energy and dipole moment from current densities.
+
         This is mainly for analysis and output during the propagation.
 
-        + **`Da_np`** (ndarray): Alpha density matrix in AO basis.
-        + **`Db_np`** (ndarray): Beta density matrix in AO basis.
+        Parameters
+        ----------
+        Da_np : numpy.ndarray
+            Alpha density matrix in AO basis.
+        Db_np : numpy.ndarray
+            Beta density matrix in AO basis.
+
+        Returns
+        -------
+        tuple
+            ``(Etot, dip_vec)``, where ``Etot`` is the total energy (Hartree) and
+            ``dip_vec`` is the dipole vector ``[μ_x, μ_y, μ_z]`` in a.u.
         """
+
         Dtot = Da_np + Db_np
         Jtot = self._build_J_psi4(Dtot)
         # V_xc energy from VBase quadrature (if available)
@@ -492,11 +602,20 @@ class RTTDDFTModel(DummyModel):
 
     def _propagate_etrs(self, effective_efield_vec, reset_substep_num=None):
         """
-        Propagate the quantum molecular dynamics given the effective electric field vector using
-        the Enforced Time-Reversal Symmetry (ETRS) scheme (https://octopus-code.org/documentation/14/manual/calculations/time-dependent/).
+        Propagate the quantum molecular dynamics given the effective electric field
+        vector using the Enforced Time-Reversal Symmetry (ETRS) scheme
+        (https://octopus-code.org/documentation/14/manual/calculations/time-dependent/).
 
-        + **`effective_efield_vec`**: Effective electric field vector in the form [Ex, Ey, Ez].
+        Parameters
+        ----------
+        effective_efield_vec : array-like of float, shape (3,)
+            Effective electric field vector in the form ``[E_x, E_y, E_z]``.
+        reset_substep_num : int or None, optional
+            If provided, resets the number of sub-steps to this value for the current
+            propagation. Otherwise, uses the default number of sub-steps determined
+            during initialization.
         """
+
         self.step_started = True
         self.step_completed = False
 
@@ -608,11 +727,20 @@ class RTTDDFTModel(DummyModel):
 
     def _propagate_pc(self, effective_efield_vec, reset_substep_num=None):
         """
-        Propagate the quantum molecular dynamics given the effective electric field vector using
-        the Predictor-Corrector (PC) scheme (https://pubs.acs.org/doi/10.1021/acs.jctc.0c00053).
+        Propagate the quantum molecular dynamics given the effective electric field
+        vector using the Predictor–Corrector (PC) scheme
+        (https://pubs.acs.org/doi/10.1021/acs.jctc.0c00053).
 
-        + **`effective_efield_vec`**: Effective electric field vector in the form [Ex, Ey, Ez].
+        Parameters
+        ----------
+        effective_efield_vec : array-like of float, shape (3,)
+            Effective electric field vector in the form ``[E_x, E_y, E_z]``.
+        reset_substep_num : int or None, optional
+            If provided, resets the number of sub-steps to this value for the current
+            propagation. Otherwise, uses the default number of sub-steps determined
+            during initialization.
         """
+
         self.step_started = True
         self.step_completed = False
 
@@ -768,11 +896,18 @@ class RTTDDFTModel(DummyModel):
 
     def propagate(self, effective_efield_vec, reset_substep_num=None):
         """
-        Propagate the quantum molecular dynamics given the effective electric field vector.
+        Propagate the quantum molecular dynamics given the effective electric field
+        vector.
 
-        + **`effective_efield_vec`**: Effective electric field vector in the form [Ex, Ey, Ez].
-        + **`reset_substep_num`** (int or None): If provided, reset the number of sub-steps to this value for the current propagation step.
+        Parameters
+        ----------
+        effective_efield_vec : array-like of float, shape (3,)
+            Effective electric field vector in the form ``[E_x, E_y, E_z]``.
+        reset_substep_num : int or None, optional
+            If provided, reset the number of sub-steps to this value for the current
+            propagation step.
         """
+
         if self.electron_propagation == "etrs":
             self._propagate_etrs(
                 effective_efield_vec, reset_substep_num=reset_substep_num
@@ -787,12 +922,17 @@ class RTTDDFTModel(DummyModel):
             )
 
     def calc_amp_vector(self):
-        """
-        Update the source amplitude vector after propagating this molecule for one time step.
-        amp = d/dt[\rho(t) * mu]
+        r"""
+        Update the source amplitude vector after propagating this molecule for one time
+        step.
 
-        Returns:
-        - A numpy array representing the amplitude vector in the form [Ax, Ay, Az].
+        The amplitude is
+        :math:`\\displaystyle \\frac{\\mathrm{d}}{\\mathrm{d}t}[\\rho(t)\\,\\mu]`.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (3,)
+            The amplitude vector ``[A_x, A_y, A_z]``.
         """
 
         # Orthonormal-basis densities & KS matrices
@@ -842,12 +982,17 @@ class RTTDDFTModel(DummyModel):
 
     def append_additional_data(self):
         """
-        Append additional data to be sent back to MaxwellLink, which can be retrieved by the user
-        via: maxwelllink.SocketMolecule.additional_data_history.
+        Append additional data to be sent back to MaxwellLink.
 
-        Returns:
-        - A dictionary containing additional data.
+        The data can be retrieved by the user via:
+        ``maxwelllink.SocketMolecule.additional_data_history``.
+
+        Returns
+        -------
+        dict
+            A dictionary containing additional data.
         """
+
         data = {}
         data["time_au"] = self.t
         data["energy_au"] = self.energies[-1] if len(self.energies) > 0 else 0.0
@@ -860,10 +1005,13 @@ class RTTDDFTModel(DummyModel):
         """
         Dump the internal state of the model to a checkpoint.
 
-        This function saves the current density matrices (Da, Db), Fock matrices (Fa, Fb),
-        current time (t), and step count (count) to a NumPy .npy file.
-        The checkpoint file is named "rttddft_checkpoint_id_<molid>.npy".
+        Notes
+        -----
+        This saves the current density matrices (``Da``, ``Db``), Fock matrices
+        (``Fa``, ``Fb``), current time (``t``), and step count (``count``) to a NumPy
+        ``.npy`` file named ``rttddft_checkpoint_id_<molid>.npy``.
         """
+
         # try to save self.Da, self.Db, self.Fa, self.Fb in a single npy file
         np.save(
             self.checkpoint_filename,
@@ -901,8 +1049,19 @@ class RTTDDFTModel(DummyModel):
 
     def _snapshot(self):
         """
-        Return a snapshot of the internal state for propagation. Deep copy the arrays to avoid mutation issues.
+        Return a snapshot of the internal state for propagation.
+
+        Notes
+        -----
+        Deep copy the arrays to avoid mutation issues.
+
+        Returns
+        -------
+        dict
+            A dictionary containing ``time``, ``count``, and deep copies of ``Da``,
+            ``Db``, ``Fa``, ``Fb``.
         """
+
         snapshot = {
             "time": self.t,
             "count": self.count,
@@ -916,7 +1075,13 @@ class RTTDDFTModel(DummyModel):
     def _restore(self, snapshot):
         """
         Restore the internal state from a snapshot.
+
+        Parameters
+        ----------
+        snapshot : dict
+            A dictionary containing the snapshot of the internal state.
         """
+
         self.t = snapshot["time"]
         self.count = snapshot["count"]
         self.Da = snapshot["Da"]
@@ -929,13 +1094,20 @@ class RTTDDFTModel(DummyModel):
     def _propagate_full_rt_tddft(self, nsteps=100, effective_efield_vec=np.zeros(3)):
         """
         Standalone function to propagate the RT-TDDFT for a given number of steps.
-        This function is mainly for testing and validation purposes.
-        To use this function, the self.delta_kick_au parameter in self.__init__()
-        should be set to a non-zero value to apply an initial delta-kick perturbation at t=0.
 
-        + **`nsteps`** (int): Number of FDTD steps to propagate. Default is 100.
-        + **`effective_efield_vec`**: Effective electric field vector received from FDTD in the form [Ex, Ey, Ez]. Default is [0.0, 0.0, 0.0].
+        This function is mainly for testing and validation purposes. To use this
+        function, ``self.delta_kick_au`` in ``__init__`` should be set to a non-zero
+        value to apply an initial delta-kick perturbation at :math:`t=0`.
+
+        Parameters
+        ----------
+        nsteps : int, default: 100
+            Number of FDTD steps to propagate.
+        effective_efield_vec : array-like of float, shape (3,), optional
+            Effective electric field vector received from FDTD in the form
+            ``[E_x, E_y, E_z]``. Default is ``[0.0, 0.0, 0.0]``.
         """
+
         for idx in range(nsteps):
             self.propagate(effective_efield_vec)
         # print out the last step info
@@ -956,13 +1128,20 @@ class RTTDDFTModel(DummyModel):
 
     def _get_lr_tddft_spectrum(self, states=20, tda=False):
         """
-        Standalone function to compute the linear absorption spectrum of molecules using the linear-response TDDFT (LR-TDDFT) method.
+        Standalone function to compute the linear absorption spectrum of molecules using
+        the linear-response TDDFT (LR-TDDFT) method.
+
         This function is mainly for testing and validation purposes.
 
-        + **`states`** (int): Number of excited states to compute. Default is 20.
-        + **`tda`** (bool): Whether to use the Tamm-Dancoff approximation (TDA). Default is False (full TDDFT).
-        0 = full TDDFT, 1 = TDA.
+        Parameters
+        ----------
+        states : int, default: 20
+            Number of excited states to compute.
+        tda : bool, default: False
+            Whether to use the Tamm–Dancoff approximation (TDA). Default is False
+            (full TDDFT). ``0 =`` full TDDFT, ``1 =`` TDA.
         """
+
         if self.engine == "psi4":
             from psi4.driver.procrouting.response.scf_response import tdscf_excitations
 
@@ -993,6 +1172,7 @@ class RTTDDFTModel(DummyModel):
 if __name__ == "__main__":
     """
     Run the doctests to validate the RTTDDFTModel class.
+
     >>> python rttddft_model.py -v
     """
     import doctest

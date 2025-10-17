@@ -16,6 +16,25 @@ __all__ = [
 
 # --- Lazy attribute loader for direct class access ---
 def __getattr__(name: str):
+    """
+    Lazy attribute loader that imports and returns model classes on demand.
+
+    Parameters
+    ----------
+    name : str
+        The attribute name requested (e.g., ``"DummyModel"``, ``"TLSModel"``).
+
+    Returns
+    -------
+    type
+        The requested class object.
+
+    Raises
+    ------
+    AttributeError
+        If the requested attribute is not a known model class.
+    """
+
     if name == "DummyModel":
         from .dummy_model import DummyModel
 
@@ -47,9 +66,27 @@ def __getattr__(name: str):
 @lru_cache(maxsize=None)
 def _load(cls_path: str):
     """
-    Import 'package.module:ClassName' once and cache the class.
-    Example: '.tls_model:TLSModel'
+    Import a class specified by ``'package.module:ClassName'`` exactly once and
+    cache the class object.
+
+    Parameters
+    ----------
+    cls_path : str
+        Dotted path with a colon separating module and class, e.g.
+        ``'.tls_model:TLSModel'``.
+
+    Returns
+    -------
+    type
+        The imported class object.
+
+    Examples
+    --------
+    >>> Cls = _load('.tls_model:TLSModel')
+    >>> isinstance(Cls, type)
+    True
     """
+
     mod, cls = cls_path.split(":")
     module = import_module(mod, package=__name__)
     return getattr(module, cls)
@@ -57,8 +94,19 @@ def _load(cls_path: str):
 
 def _factory(cls_path: str) -> Callable:
     """
-    Return a callable that, when invoked, imports the class and constructs it.
-    This matches mxl_driver's expectation that __drivers__[name](...) is callable.
+    Create a lazy factory callable that imports the class at first use and
+    constructs an instance when invoked.
+
+    Parameters
+    ----------
+    cls_path : str
+        Dotted path with a colon separating module and class, e.g.
+        ``'.qutip_model:QuTiPModel'``.
+
+    Returns
+    -------
+    Callable
+        A callable ``ctor(*args, **kwargs)`` that returns an instance of the class.
     """
 
     def _ctor(*args, **kwargs):

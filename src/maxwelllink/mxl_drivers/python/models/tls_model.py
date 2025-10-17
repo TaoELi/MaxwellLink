@@ -11,15 +11,18 @@ except:
 class TLSModel(DummyModel):
     """
     A two-level system (TLS) quantum dynamics model.
-    This class implements a simple two-level system model for quantum dynamics,
-    which can be integrated with the MaxwellLink framework.
-    The TLS model is characterized by its transition frequency, dipole moment,
-    and orientation of the dipole moment.
 
-    Implementing this class is mostly for demonstration purposes. Users who want to
-    enjoy model quantum system calculations should use **QuTiPModel** instead, which
-    provides a very general and robust implementation of an arbitrary model Hamiltonian
-    (with Lindbladian dissipation) based on the **QuTiP** library.
+    This class implements a simple two-level system model for quantum dynamics,
+    which can be integrated with the MaxwellLink framework. The TLS model is
+    characterized by its transition frequency, dipole moment, and orientation of
+    the dipole moment.
+
+    Notes
+    -----
+    Implementing this class is mostly for demonstration purposes. Users who want
+    to enjoy model quantum system calculations should use **QuTiPModel** instead,
+    which provides a very general and robust implementation of an arbitrary model
+    Hamiltonian (with Lindbladian dissipation) based on the **QuTiP** library.
     """
 
     def __init__(
@@ -35,16 +38,26 @@ class TLSModel(DummyModel):
         """
         Initialize the necessary parameters for the TLS quantum dynamics model.
 
-        + **`omega`** (float): Transition frequency in atomic units (a.u.). Default is 2.4188843e-1 a.u.
-        (1.0 in MEEP units with [T]=0.1 fs)
-        + **`dipole_moment`** (float): Dipole moment in atomic units (a.u.). Default is 1.870819866e2 a.u.
-        (0.1 in MEEP units with [T]=0.1 fs)
-        + **`orientation`** (int): Orientation of the dipole moment, can be 0 (x), 1 (y), or 2 (z). Default is 2 (z).
-        + **`pe_initial`** (float): Initial population in the excited state. Default is 0.0.
-        + **`checkpoint`** (bool): Whether to enable checkpointing. Default is False.
-        + **`restart`** (bool): Whether to restart from a checkpoint if available. Default is False.
-        + **`verbose`** (bool): Whether to print verbose output. Default is False.
+        Parameters
+        ----------
+        omega : float, default: 2.4188843e-1
+            Transition frequency in atomic units (a.u.). Default is ``2.4188843e-1``
+            a.u. (``1.0`` in MEEP units with ``[T]=0.1 fs``).
+        mu12 : float, default: 1.870819866e2
+            Dipole moment in atomic units (a.u.). Default is ``1.870819866e2`` a.u.
+            (``0.1`` in MEEP units with ``[T]=0.1 fs``).
+        orientation : int, default: 2
+            Orientation of the dipole moment; can be ``0`` (x), ``1`` (y), or ``2`` (z).
+        pe_initial : float, default: 0.0
+            Initial population in the excited state.
+        checkpoint : bool, default: False
+            Whether to enable checkpointing.
+        restart : bool, default: False
+            Whether to restart from a checkpoint if available.
+        verbose : bool, default: False
+            Whether to print verbose output.
         """
+
         # Initialize the base class (DummyModel)
         super().__init__(verbose, checkpoint, restart)
 
@@ -82,12 +95,17 @@ class TLSModel(DummyModel):
 
     def initialize(self, dt_new, molecule_id):
         """
-        Set the time step and molecule ID for this quantum dynamics model, and
-        provide additional initialization for the TLS.
+        Set the time step and molecule ID for this quantum dynamics model, and provide
+        additional initialization for the TLS.
 
-        + **`dt_new`** (float): The new time step in atomic units (a.u.).
-        + **`molecule_id`** (int): The ID of the molecule.
+        Parameters
+        ----------
+        dt_new : float
+            The new time step in atomic units (a.u.).
+        molecule_id : int
+            The ID of the molecule.
         """
+
         self.dt = float(dt_new)
         self.molecule_id = int(molecule_id)
 
@@ -111,11 +129,20 @@ class TLSModel(DummyModel):
 
     def _reset_tls_population(self, excited_population: float = 0.0):
         """
-        Reset the TLS population to a specified excited state population in a pure state.
-        This function name starts with an underscore to indicate that it is intended for internal use.
+        Reset the TLS population to a specified excited state population in a pure
+        state.
 
-        + **`excited_population`** (float): Initial population in the excited state.
+        Notes
+        -----
+        This function name starts with an underscore to indicate that it is intended
+        for internal use.
+
+        Parameters
+        ----------
+        excited_population : float, default: 0.0
+            Initial population in the excited state.
         """
+
         if excited_population < 0 or excited_population > 1:
             raise ValueError("Excited population must be between 0 and 1.")
         self.C = np.array(
@@ -128,10 +155,15 @@ class TLSModel(DummyModel):
 
     def propagate(self, effective_efield_vec):
         """
-        Propagate the quantum molecular dynamics given the effective electric field vector.
+        Propagate the quantum molecular dynamics given the effective electric field
+        vector.
 
-        + **`effective_efield_vec`**: Effective electric field vector in the form [Ex, Ey, Ez].
+        Parameters
+        ----------
+        effective_efield_vec : array-like of float, shape (3,)
+            Effective electric field vector in the form ``[E_x, E_y, E_z]``.
         """
+
         if self.verbose:
             print(
                 f"[molecule ID {self.molecule_id}] Time: {self.t:.4f} a.u., receiving effective_efield_vec: {effective_efield_vec[2]:.6E}"
@@ -156,11 +188,16 @@ class TLSModel(DummyModel):
 
     def calc_amp_vector(self):
         """
-        Update the source amplitude vector after propagating this molecule for one time step.
+        Update the source amplitude vector after propagating this molecule for one
+        time step.
 
-        Returns:
-        - A numpy array representing the amplitude vector in the form [dmu_x/dt, dmu_y/dt, dmu_z/dt].
+        Returns
+        -------
+        numpy.ndarray of float, shape (3,)
+            Amplitude vector in the form
+            :math:`[\\mathrm{d}\\mu_x/\\mathrm{d}t,\\ \\mathrm{d}\\mu_y/\\mathrm{d}t,\\ \\mathrm{d}\\mu_z/\\mathrm{d}t]`.
         """
+
         # analytical expression for dmu/dt in a TLS
         amp = -2.0 * self.omega * np.imag(self.rho[0, 1]) * self.dipole_moment
         amp_vec = np.zeros(3)
@@ -175,13 +212,18 @@ class TLSModel(DummyModel):
 
     def append_additional_data(self):
         """
-        Append additional data to be sent back to MaxwellLink, which can be retrieved by the user
-        via the Python interface: maxwelllink.SocketMolecule.additional_data_history, where
-        additional_data_history is a list of dictionaries.
+        Append additional data to be sent back to MaxwellLink.
 
-        Returns:
-        - A dictionary containing additional data.
+        The data can be retrieved by the user via the Python interface:
+        ``maxwelllink.SocketMolecule.additional_data_history``, where
+        ``additional_data_history`` is a list of dictionaries.
+
+        Returns
+        -------
+        dict
+            A dictionary containing additional data.
         """
+
         data = {}
         data["time_au"] = self.t
         data["energy_au"] = self.energy if self.energy is not None else 0.0
@@ -197,8 +239,12 @@ class TLSModel(DummyModel):
     def _dump_to_checkpoint(self):
         """
         Dump the internal state of the model to a checkpoint.
-        self.checkpoint_filename includes molid at self.initialize().
+
+        Notes
+        -----
+        ``self.checkpoint_filename`` includes ``molid`` at ``self.initialize()``.
         """
+
         np.savez(self.checkpoint_filename, density_matrix=self.rho, time=self.t)
 
     def _reset_from_checkpoint(self):
@@ -220,7 +266,13 @@ class TLSModel(DummyModel):
     def _snapshot(self):
         """
         Return a snapshot of the internal state for propagation.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the snapshot of the internal state.
         """
+
         snapshot = {
             "time": self.t,
             "density_matrix": self.rho.copy(),
@@ -230,6 +282,12 @@ class TLSModel(DummyModel):
     def _restore(self, snapshot):
         """
         Restore the internal state from a snapshot.
+
+        Parameters
+        ----------
+        snapshot : dict
+            A dictionary containing the snapshot of the internal state.
         """
+
         self.t = snapshot["time"]
         self.rho = snapshot["density_matrix"]

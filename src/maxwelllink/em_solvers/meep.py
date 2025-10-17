@@ -1,3 +1,10 @@
+"""
+Meep-specific EM units and coupling utilities for MaxwellLink.
+
+Provides conversions between Meep units and atomic units, plus helpers for
+source construction and field integrations.
+"""
+
 from __future__ import annotations
 import json
 import numpy as np
@@ -35,14 +42,35 @@ def _reset_module_state():
 
 
 def _register_sim_cleanup(sim):
-    """Register an interpreter-exit cleanup."""
+    """
+    Register an interpreter-exit cleanup that resets shared module state.
+
+    Parameters
+    ----------
+    sim : meep.Simulation
+        The active Meep simulation (unused; present for signature symmetry).
+    """
+
     if not __MXL__ATEXIT_REGISTERED["flag"]:
         atexit.register(_reset_module_state)
         __MXL__ATEXIT_REGISTERED["flag"] = True
 
 
 def _to_mp_v3(v):
-    """Convert our Vector3 or tuple/list to mp.Vector3."""
+    """
+    Convert a 3-vector into ``mp.Vector3``.
+
+    Parameters
+    ----------
+    v : Vector3 or tuple or list or mp.Vector3
+        Vector-like input.
+
+    Returns
+    -------
+    mp.Vector3
+        The corresponding Meep vector.
+    """
+
     if isinstance(v, Vector3):
         return mp.Vector3(v.x, v.y, v.z)
     # tolerate mp.Vector3 already, or (x,y,z)
@@ -54,36 +82,116 @@ def _to_mp_v3(v):
 
 
 def _make_custom_time_src(key):
+    """
+    Create a Meep ``CustomSource`` that streams time-dependent amplitudes from a
+    shared accumulator keyed by ``key``.
+
+    Parameters
+    ----------
+    key : hashable
+        Lookup key for the instantaneous source amplitude.
+
+    Returns
+    -------
+    mp.CustomSource
+        A custom source object that queries the accumulator each time step.
+    """
+
     # MEEP calls this each time step; stream from the global accumulator
     return mp.CustomSource(lambda t: instantaneous_source_amplitudes[key])
 
 
 class MeepUnits(DummyEMUnits):
+
     def __init__(self, time_units_fs: float = 0.1):
+        """
+        Meep unit system with conversions to/from atomic units.
+
+        Parameters
+        ----------
+        time_units_fs : float, default: 0.1
+            The Meep time unit expressed in femtoseconds.
+        """
         super().__init__()
         self.time_units_fs = time_units_fs
 
     def efield_em_to_au(self, Emu_vec3):
         """
-        Convert the regularized E-field integral from MEEP units to atomic units.
-        Kept here for backward compatibility; MEEP backend uses it directly.
+        Convert the regularized electric-field integral from Meep units to atomic units.
+
+        Notes
+        -----
+        This helper is used directly by the Meep backend.
+
+        Parameters
+        ----------
+        Emu_vec3 : array-like of float, shape (3,)
+            Regularized field integral in Meep units.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (3,)
+            Field integral in atomic units.
         """
+
         factor = 1.2929541569381223e-6 / (self.time_units_fs**2)
         return np.asarray(Emu_vec3, dtype=float) * factor
 
     def source_amp_au_to_em(self, amp_au_vec3):
-        """Convert source amplitude (a.u.) to MEEP units. (dipole/time)"""
+        """
+        Convert source amplitude (a.u.) to Meep units.
+
+        Parameters
+        ----------
+        amp_au_vec3 : array-like of float, shape (3,)
+            Source amplitude vector in atomic units.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (3,)
+            Source amplitude vector in Meep units.
+        """
+
         factor = 0.002209799779149953
         return np.asarray(amp_au_vec3, dtype=float) * factor
 
     def time_em_to_au(self, time_em: float):
+        """
+        Convert Meep time to atomic units.
+
+        Parameters
+        ----------
+        time_em : float
+            Time in Meep units.
+
+        Returns
+        -------
+        float
+            Time in atomic units.
+        """
+
         return float(time_em) * self.time_units_fs * FS_TO_AU
 
     def units_helper(self, dx, dt):
         """
-        Helper function to explain the unit system used in MEEP and its connection to atomic units.
-        This units helper will reduce the confusion when using MEEP with molecular dynamics.
+        Explain the Meep unit system and its connection to atomic units.
+
+        This prints a summary of conversions based on the current resolution and
+        Courant factor.
+
+        Parameters
+        ----------
+        dx : float
+            Spatial grid spacing in Meep units.
+        dt : float
+            Time step size in Meep units.
+
+        Raises
+        ------
+        RuntimeError
+            If the Courant factor is not ``0.5``.
         """
+
         # calculate units conversion factors
         mu2efield_au = self.efield_em_to_au(1.0)
         mu2efield_si = mu2efield_au * 5.14220675112e11  # V/m
@@ -123,12 +231,25 @@ class MeepUnits(DummyEMUnits):
 
 
 class MoleculeMeepWrapper:
+
     def __init__(
         self,
         time_units_fs: float = 0.1,
         dt: Optional[float] = None,
         molecule: Molecule = None,
     ):
+        """
+        Wrapper that adapts a ``Molecule`` to Meep, handling units, sources, and IO.
+
+        Parameters
+        ----------
+        time_units_fs : float, default: 0.1
+            The Meep time unit expressed in femtoseconds.
+        dt : float or None, optional
+            Time step in Meep units; if provided, propagated to the molecule.
+        molecule : Molecule
+            The molecule to wrap and couple to Meep.
+        """
         self.m = molecule
         self.m._refresh_time_units(time_units_fs)
         if dt is not None:
@@ -160,6 +281,15 @@ class MoleculeMeepWrapper:
         )
 
     def _init_sources(self):
+        """
+        Construct Meep sources for the molecule's polarization kernel (1D/2D/3D).
+
+        Notes
+        -----
+        Sources are memoized per polarization fingerprint and component to allow
+        sharing across molecules with identical spatial kernels.
+        """
+
         srcs = []
         center = _to_mp_v3(self.center)
         size = _to_mp_v3(self.size)
@@ -243,6 +373,20 @@ class MoleculeMeepWrapper:
         self.sources = srcs
 
     def _calculate_ep_integral(self, sim: mp.Simulation):
+        """
+        Compute the regularized E-field integral over the molecule's kernel.
+
+        Parameters
+        ----------
+        sim : meep.Simulation
+            Active Meep simulation.
+
+        Returns
+        -------
+        list of float
+            Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
+        """
+
         vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
         x = y = z = 0.0
         if self.dimensions == 1:
@@ -322,13 +466,39 @@ class MoleculeMeepWrapper:
         return [np.real(x), np.real(y), np.real(z)]
 
     def initialize_driver(self):
+        """
+        Initialize the wrapped molecule's driver (non-socket mode).
+
+        Notes
+        -----
+        Uses the molecule's cached ``dt_au`` and ``molecule_id``.
+        """
+
         self.m.initialize_driver(self.dt_au, self.molecule_id)
         self.d_f = self.m.d_f
 
     def propagate(self, efield_vec3):
+        """
+        Propagate the wrapped molecule for one EM step.
+
+        Parameters
+        ----------
+        efield_vec3 : array-like of float, shape (3,)
+            Effective electric field vector in atomic units.
+        """
+
         self.m.propagate(efield_vec3)
 
     def calc_amp_vector(self):
+        """
+        Compute and return the current source amplitude vector from the molecule.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (3,)
+            Source amplitudes in atomic units.
+        """
+
         return self.m.calc_amp_vector()
 
 
@@ -336,6 +506,22 @@ class MoleculeMeepWrapper:
 def update_molecules_no_socket(
     molecules: List[MoleculeMeepWrapper], sources_non_molecule: List = None
 ):
+    """
+    Create a Meep step function (no sockets) that couples molecules to the EM grid.
+
+    Parameters
+    ----------
+    molecules : list of MoleculeMeepWrapper
+        Molecules to couple.
+    sources_non_molecule : list or None, optional
+        Additional Meep sources unrelated to molecules.
+
+    Returns
+    -------
+    callable
+        A step function compatible with ``meep.Simulation.run``.
+    """
+
     if sources_non_molecule is None:
         sources_non_molecule = []
 
@@ -412,6 +598,24 @@ def update_molecules_no_socket(
 def update_molecules_no_mpi(
     hub, molecules: List[MoleculeMeepWrapper], sources_non_molecule: List = None
 ):
+    """
+    Create a Meep step function (sockets, no MPI) that couples molecules to the EM grid.
+
+    Parameters
+    ----------
+    hub : SocketHub
+        Socket hub for driver communication.
+    molecules : list of MoleculeMeepWrapper
+        Molecules to couple.
+    sources_non_molecule : list or None, optional
+        Additional Meep sources unrelated to molecules.
+
+    Returns
+    -------
+    callable
+        A step function compatible with ``meep.Simulation.run``.
+    """
+
     if sources_non_molecule is None:
         sources_non_molecule = []
 
@@ -537,7 +741,22 @@ def update_molecules(
 ):
     """
     MPI-safe step function aligned with the no-MPI version and streaming sources.
+
+    Parameters
+    ----------
+    hub : SocketHub
+        Socket hub for driver communication.
+    molecules : list of MoleculeMeepWrapper
+        Molecules to couple.
+    sources_non_molecule : list or None, optional
+        Additional Meep sources unrelated to molecules.
+
+    Returns
+    -------
+    callable
+        A step function compatible with ``meep.Simulation.run``.
     """
+
     import json as _json
 
     # detect MPI
@@ -731,16 +950,18 @@ def update_molecules(
 
 class MeepSimulation(mp.Simulation):
     """
-    A wrapper of meep.Simulation with MaxwellLink features.
+    A wrapper of ``meep.Simulation`` with MaxwellLink features.
 
-    This class extends the meep.Simulation class to include functionalities for coupling with quantum mechanical models via MaxwellLink.
-    It provides methods to set up the simulation, run it with time-dependent electric fields, and communicate with external quantum drivers.
+    This extends Meep's simulation to couple with quantum models via MaxwellLink.
 
-    Attributes:
-        socket_hub (SocketHub): An instance of SocketHub for managing socket communication.
-        time_units_fs (float): Time unit in femtoseconds for unit conversions.
-        efield_history (List[np.ndarray]): History of electric field vectors during the simulation.
-        dipole_history (List[np.ndarray]): History of dipole moment vectors received from the quantum driver.
+    Attributes
+    ----------
+    hub : SocketHub or None
+        Manager for socket communication with external drivers.
+    molecules : list of MoleculeMeepWrapper
+        Wrapped molecules coupled to the EM grid.
+    time_units_fs : float
+        Time unit in femtoseconds for unit conversions.
     """
 
     def __init__(
@@ -750,6 +971,21 @@ class MeepSimulation(mp.Simulation):
         time_units_fs: float = 0.1,
         **kwargs,
     ):
+        """
+        Initialize the simulation and wrap molecules with Meep adapters.
+
+        Parameters
+        ----------
+        hub : SocketHub or None, optional
+            Socket hub for driver communication.
+        molecules : list or None, optional
+            Molecules to couple; will be wrapped as ``MoleculeMeepWrapper``.
+        time_units_fs : float, default: 0.1
+            The Meep time unit expressed in femtoseconds.
+        **kwargs
+            Additional keyword arguments forwarded to ``meep.Simulation``.
+        """
+
         super().__init__(**kwargs)
         if self.Courant != 0.5:
             raise RuntimeError("MaxwellLink currently only supports Courant=0.5!")
@@ -775,15 +1011,22 @@ class MeepSimulation(mp.Simulation):
     # overload mp.Simulation.run() function
     def run(self, *user_step_funcs, **kwargs):
         """
-        `run(step_functions..., until=condition/time)`  ##sig-keep
+        Run the simulation with optional user step functions and stopping conditions.
 
-        Run the simulation until a certain time or condition, calling the given step
-        functions (if any) at each timestep. The keyword argument `until` is *either* a
-        number, in which case it is an additional time (in Meep units) to run for, *or* it
-        is a function (of no arguments) which returns `True` when the simulation should
-        stop. `until` can also be a list of stopping conditions which may include a number
-        of additional functions.
+        Notes
+        -----
+        If molecules are present, a MaxwellLink coupling step is automatically
+        inserted (socket or non-socket variant as appropriate) before user-provided
+        step functions.
+
+        Parameters
+        ----------
+        *user_step_funcs
+            One or more per-step callables.
+        **kwargs
+            Passed through to ``meep.Simulation.run`` (e.g., ``until=...``).
         """
+
         step_funcs = list(user_step_funcs)
         if self.molecules:
             # auto-insert our coupling step first

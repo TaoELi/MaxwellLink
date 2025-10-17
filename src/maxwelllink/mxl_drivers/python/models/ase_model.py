@@ -35,11 +35,20 @@ FORCE_PER_EFIELD_AU_EV_PER_ANG = 51.422067476
 
 def _parse_kwargs_string(s: str) -> Dict:
     """
-    Parse a compact 'k1=v1,k2=v2' into dict with numbers/bools auto-cast.
-    (Used for preset params and for passing kwargs to user spec.)
+    Parse a compact ``'k1=v1,k2=v2'`` string into a dictionary with numbers/bools
+    auto-cast. (Used for preset params and for passing kwargs to a user spec.)
 
-    + **`s`** (str): Input string.
+    Parameters
+    ----------
+    s : str
+        Input string.
+
+    Returns
+    -------
+    dict
+        Parsed key-value pairs with best-effort type casting.
     """
+
     if not s:
         return {}
 
@@ -80,14 +89,30 @@ def _build_calculator(name: str, **kwargs) -> Calculator:
     """
     Minimal factory for common ASE calculators.
 
-    Examples:
-    - name='psi4' -> Psi4 via ase.calculators.psi4 (Psi4 binary required)
-    - name='dftb'  -> pip install dftbplus (and set DFTB+ binary)
-    - name='orca'  -> ORCA via ase.calculators.orca (ORCA binary required)
+    Examples
+    --------
+    - ``name='psi4'`` → Psi4 via ``ase.calculators.psi4`` (Psi4 binary required)
+    - ``name='dftb'`` → install DFTB+ (and set DFTB+ binary)
+    - ``name='orca'`` → ORCA via ``ase.calculators.orca`` (ORCA binary required)
 
-    + **`name`** (str): Name of the calculator.
-    + **`kwargs`**: Additional kwargs passed to the calculator constructor.
+    Parameters
+    ----------
+    name : str
+        Name of the calculator.
+    **kwargs
+        Additional keyword arguments passed to the calculator constructor.
+
+    Returns
+    -------
+    ase.calculators.calculator.Calculator
+        An ASE Calculator instance.
+
+    Raises
+    ------
+    ImportError
+        If the calculator cannot be constructed.
     """
+
     n = (name or "").strip().lower()
 
     if n == "psi4":
@@ -128,19 +153,28 @@ def _build_calculator(name: str, **kwargs) -> Calculator:
 
 class ForceAugmenter(Calculator):
     """
-    ASE Calculator wrapper that adds an external uniform E-field force F_i^ext = q_i E
-    to each atom i, where q_i are per-atom charges (either fixed or recomputed each step).
+    ASE Calculator wrapper that adds an external uniform E-field force
+    :math:`F_i^{\\mathrm{ext}} = q_i \\mathbf{E}` to each atom :math:`i`, where
+    :math:`q_i` are per-atom charges (either fixed or recomputed each step).
     """
 
     implemented_properties = ("energy", "forces")
 
     def __init__(self, base, charges=None, recompute_charges=False, verbose=False):
         """
-        + **`base`** (Calculator): An ASE Calculator instance to wrap.
-        + **`charges`** (array-like or None): Per-atom charges in |e| units. If None, set recompute_charges=True.
-        + **`recompute_charges`** (bool): If True, query charges each step (e.g. Mulliken). Default is False.
-        + **`verbose`** (bool): Whether to print verbose output. Default is False.
+        Parameters
+        ----------
+        base : ase.calculators.calculator.Calculator
+            An ASE Calculator instance to wrap.
+        charges : array-like or None, optional
+            Per-atom charges in :math:`\\lvert e \\rvert` units. If ``None``, set
+            ``recompute_charges=True``.
+        recompute_charges : bool, default: False
+            If ``True``, query charges each step (e.g., Mulliken).
+        verbose : bool, default: False
+            Whether to print verbose output.
         """
+
         super().__init__()
         self.base = base
         self.charges = None if charges is None else np.asarray(charges, float).copy()
@@ -157,19 +191,29 @@ class ForceAugmenter(Calculator):
         """
         Set the external uniform E-field vector in atomic units (a.u.).
 
-        + **`Evec3_au`** (array-like): 3-element array-like representing the E-field vector in a.u.
+        Parameters
+        ----------
+        Evec3_au : array-like of float, shape (3,)
+            3-element array-like representing the E-field vector in a.u.
         """
+
         self._E_au = np.asarray(Evec3_au, float).reshape(3)
 
     def _geom_key(self, atoms: Atoms):
         """
         Build a key for the current molecular geometry.
 
-        + **`atoms`** (Atoms): An ASE Atoms object.
+        Parameters
+        ----------
+        atoms : ase.Atoms
+            An ASE ``Atoms`` object.
 
-        Returns:
-        - A hashable key representing the current geometry.
+        Returns
+        -------
+        tuple
+            A hashable key representing the current geometry (positions, cell, numbers).
         """
+
         # Positions + cell + numbers
         pos = atoms.get_positions()
         cell = atoms.cell.array
@@ -185,14 +229,22 @@ class ForceAugmenter(Calculator):
 
     def calculation_required(self, atoms, properties):
         """
-        Determine whether a recalculation is required based on changes in the atomic configuration.
+        Determine whether a recalculation is required based on changes in the atomic
+        configuration.
 
-        + **`atoms`** (Atoms): An ASE Atoms object.
-        + **`properties`** (tuple): A tuple of properties to be calculated (e.g., 'energy', 'forces').
+        Parameters
+        ----------
+        atoms : ase.Atoms
+            An ASE ``Atoms`` object.
+        properties : tuple
+            Properties to be calculated (e.g., ``'energy'``, ``'forces'``).
 
-        Returns:
-        - A boolean indicating whether a recalculation is required.
+        Returns
+        -------
+        bool
+            Whether a recalculation is required.
         """
+
         # If we have a cached forces/energy for the current molecular geometry, no recalc needed.
         key_now = self._geom_key(atoms)
         if self._cache_key is not None and key_now == self._cache_key:
@@ -212,11 +264,17 @@ class ForceAugmenter(Calculator):
         """
         Calculate the external force on each atom due to the uniform E-field.
 
-        + **`atoms`** (Atoms): An ASE Atoms object.
+        Parameters
+        ----------
+        atoms : ase.Atoms
+            An ASE ``Atoms`` object.
 
-        Returns:
-        - A numpy array of shape (N, 3) representing the external forces on each atom in eV/Angstrom (internal units of ASE forces).
+        Returns
+        -------
+        numpy.ndarray of float, shape (N, 3)
+            External forces on each atom in eV/Å (ASE internal force units).
         """
+
         if True:
             # Resolve charges
             if self.recompute_charges:
@@ -250,10 +308,16 @@ class ForceAugmenter(Calculator):
         """
         Calculate the requested properties for the given atomic configuration.
 
-        + **`atoms`** (Atoms): An ASE Atoms object.
-        + **`properties`** (tuple): A tuple of properties to be calculated (e.g., 'energy', 'forces').
-        + **`system_changes`** (list): A list of changes in the atomic configuration.
+        Parameters
+        ----------
+        atoms : ase.Atoms, optional
+            An ASE ``Atoms`` object.
+        properties : tuple, default: ('energy',)
+            Properties to be calculated (e.g., ``'energy'``, ``'forces'``).
+        system_changes : list
+            List of changes in the atomic configuration.
         """
+
         key_now = self._geom_key(atoms)
 
         # If cache matches and covers requested properties, serve from cache and return
@@ -315,12 +379,17 @@ class ASEModel(DummyModel):
     r"""
     General BOMD (Born-Oppenheimer MD) driver using ASE.
 
-    This model provides the two key functionalities like other Models supported by MaxwellLink:
+    This model provides the two key functionalities like other Models supported by
+    MaxwellLink:
 
-    1. **MD coupled to E-field**: Injects F_i^ext = q_i E (uniform field) to the molecular forces
-    in MD simulations, where q_i are per-atom charges (constant user-supplied or calculator-reported each step).
+    1. **MD coupled to E-field**: Injects
+       :math:`F_i^{\\mathrm{ext}} = q_i \\mathbf{E}` (uniform field) to the molecular
+       forces in MD simulations, where :math:`q_i` are per-atom charges (constant
+       user-supplied or calculator-reported each step).
 
-    2. **Return source amplitude**: $\dot{\mu} = \sum_i q_i v_i$ (converted to atomic units)
+    2. **Return source amplitude**:
+       :math:`\\dot{\\boldsymbol{\\mu}} = \\sum_i q_i \\mathbf{v}_i`
+       (converted to atomic units).
     """
 
     def __init__(
@@ -338,18 +407,35 @@ class ASEModel(DummyModel):
         **extra,
     ):
         """
-        + **`atoms`**: either an ASE Atoms object or a path to structure file (e.g., xyz) readable by ASE.
-        + **`calculator`**: name of ASE calculator ('psi4', 'dftb', 'orca', ...)
-        + **`calc_kwargs`**: dict of kwargs passed to calculator constructor
-        + **`charges`**: a string "[-1.0 1.0]" representing an array of per-atom charges (in |e|), separated by **space** (not **comma**).
-        If None, need to set recompute_charges=True
-        + **`recompute_charges`**: if True, query charges each step (e.g., Mulliken). Default is False.
-        + **`n_substeps`**: number of MD sub-steps per MEEP step. Default is 1.
-        + **`temperature_K`**: initial temperature in Kelvin for Maxwell-Boltzmann distribution. Default is 0.0 K.
-        + **`verbose`**: whether to print verbose output. Default is False.
-        + **`checkpoint`**: whether to enable checkpointing. Default is False.
-        + **`restart`**: whether to restart from a checkpoint if available. Default is False.
+        Parameters
+        ----------
+        atoms : ase.Atoms or str
+            Either an ASE ``Atoms`` object or a path to a structure file (e.g., ``.xyz``)
+            readable by ASE.
+        calculator : str, default: 'xtb'
+            Name of ASE calculator (``'psi4'``, ``'dftb'``, ``'orca'``, ...).
+        calc_kwargs : dict or None, optional
+            Dict of kwargs passed to the calculator constructor.
+        charges : str or sequence of float or None, optional
+            A string like ``"[-1.0 1.0]"`` representing an array of per-atom charges
+            (in :math:`\\lvert e \\rvert`), separated by **space** (not **comma**).
+            If ``None``, set ``recompute_charges=True``.
+        recompute_charges : bool, default: False
+            If ``True``, query charges each step (e.g., Mulliken).
+        n_substeps : int, default: 1
+            Number of MD sub-steps per MEEP step.
+        temperature_K : float, default: 0.0
+            Initial temperature in Kelvin for the Maxwell–Boltzmann distribution.
+        verbose : bool, default: False
+            Whether to print verbose output.
+        checkpoint : bool, default: False
+            Whether to enable checkpointing.
+        restart : bool, default: False
+            Whether to restart from a checkpoint if available.
+        **extra
+            Additional keyword arguments forwarded to the calculator constructor.
         """
+
         super().__init__(verbose=verbose, checkpoint=checkpoint, restart=restart)
 
         # atoms
@@ -419,9 +505,14 @@ class ASEModel(DummyModel):
         """
         Initialize the model with the new time step and molecule ID.
 
-        + **`dt_new`** (float): The new time step in atomic units (a.u.).
-        + **`molecule_id`** (int): The ID of the molecule.
+        Parameters
+        ----------
+        dt_new : float
+            The new time step in atomic units (a.u.).
+        molecule_id : int
+            The ID of the molecule.
         """
+
         self.dt = float(dt_new)
         self.molecule_id = int(molecule_id)
 
@@ -470,8 +561,12 @@ class ASEModel(DummyModel):
         """
         Propagate the BO molecular dynamics given the effective electric field vector.
 
-        + **`effective_efield_vec`**: Effective electric field vector in the form [Ex, Ey, Ez].
+        Parameters
+        ----------
+        effective_efield_vec : array-like of float, shape (3,)
+            Effective electric field vector in the form ``[E_x, E_y, E_z]``.
         """
+
         # 1. set the field for the wrapper (a.u.)
         self.E_vec = np.asarray(effective_efield_vec, float).reshape(3)
 
@@ -508,11 +603,15 @@ class ASEModel(DummyModel):
         self.t += self.dt
 
     def calc_amp_vector(self):
-        """
-        Return the amplitude vector (dmu/dt) for the current time step in atomic units.
+        r"""
+        Return the amplitude vector :math:`\\mathrm{d}\\boldsymbol{\\mu}/\\mathrm{d}t`
+        for the current time step in atomic units.
 
-        In classical MD: dmu/dt = sum_i q_i v_i
+        In classical MD:
+        :math:`\\displaystyle \\frac{\\mathrm{d}\\boldsymbol{\\mu}}{\\mathrm{d}t}
+        = \\sum_i q_i \\mathbf{v}_i`.
         """
+
         if self._vel_angs_per_fs is None or self._charges is None:
             return np.zeros(3, float)
 
@@ -525,13 +624,18 @@ class ASEModel(DummyModel):
 
     def append_additional_data(self):
         """
-        Append additional data to be sent back to MaxwellLink, which can be retrieved by the user
-        via the Python interface: maxwelllink.SocketMolecule.additional_data_history, where
-        additional_data_history is a list of dictionaries.
+        Append additional data to be sent back to MaxwellLink.
 
-        Returns:
-        - A dictionary containing additional data.
+        The data can be retrieved by the user via the Python interface:
+        ``maxwelllink.SocketMolecule.additional_data_history``, where
+        ``additional_data_history`` is a list of dictionaries.
+
+        Returns
+        -------
+        dict
+            A dictionary containing additional data.
         """
+
         d = {
             "time_au": float(self.t),
             "temperature_K": float(self.atoms.get_temperature()),
@@ -572,8 +676,18 @@ class ASEModel(DummyModel):
 
     def _snapshot(self):
         """
-        Return a snapshot of the internal state for propagation. Deep copy the arrays to avoid mutation issues.
+        Return a snapshot of the internal state for propagation.
+
+        Notes
+        -----
+        Deep copy the arrays to avoid mutation issues.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the snapshot of the internal state.
         """
+
         return {
             "time": self.t,
             "positions": self.atoms.get_positions().copy(),
@@ -583,7 +697,13 @@ class ASEModel(DummyModel):
     def _restore(self, snapshot):
         """
         Restore the internal state from a snapshot.
+
+        Parameters
+        ----------
+        snapshot : dict
+            A dictionary containing the snapshot of the internal state.
         """
+
         self.t = snapshot["time"]
         self.atoms.set_positions(snapshot["positions"])
         self.atoms.set_velocities(snapshot["velocities"])
