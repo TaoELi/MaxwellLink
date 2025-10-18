@@ -225,5 +225,3 @@ docs/source/api
 src/maxwelllink/mxl_drivers/python/models/*.npz
 src/maxwelllink/mxl_drivers/python/models/*.txt
 src/maxwelllink/mxl_drivers/python/models/rttddft_df_model.py*
-
-examples/
