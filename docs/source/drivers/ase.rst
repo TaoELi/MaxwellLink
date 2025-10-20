@@ -8,9 +8,19 @@ with any ASE-compatible calculator. The implementation is provided by
 
 .. note::
   During the simulation, the ASE driver receives the electric field,
-  applies :math:`\mathbf{F}_i = Q_i \widetilde{\mathbf{E}}`, and returns
-  :math:`\mathrm{d}\boldsymbol{\mu}/\mathrm{d}t = \sum_i Q_i \mathbf{v}_i`, where
-  :math:`Q_i` and :math:`\mathbf{v}_i` are the partial charge (defined in ``charges`` in :ref:`Parameters`) and velocity of atom
+  applies
+  
+  .. math::
+    
+    \mathbf{F}_i = Q_i \widetilde{\mathbf{E}}, 
+  
+  and returns
+  
+  .. math::
+
+    \mathrm{d}\boldsymbol{\mu}/\mathrm{d}t = \sum_i Q_i \mathbf{v}_i, 
+    
+  where :math:`Q_i` and :math:`\mathbf{v}_i` are the partial charge (defined in ``charges`` in :ref:`Parameters`) and velocity of atom
   :math:`i`.
 
 Requirements

@@ -9,10 +9,19 @@ installer.
 .. note::
 
   During the run the ``fix mxl`` connects to the ``SocketHub``, receives the electric field,
-  applies :math:`\mathbf{F}_i = q_i \widetilde{\mathbf{E}}`, and returns
-  :math:`\mathrm{d}\boldsymbol{\mu}/\mathrm{d}t = \sum_i q_i \mathbf{v}_i`, where 
-  :math:`q_i` and :math:`\mathbf{v}_i` are the partial charge and velocity of atom :math:`i`.
-  LAMMPS halts automatically if the hub closes the connection.
+  applies
+
+  .. math::
+
+    \mathbf{F}_i = Q_i \widetilde{\mathbf{E}}, 
+
+  and returns
+
+  .. math::
+
+    \mathrm{d}\boldsymbol{\mu}/\mathrm{d}t = \sum_i Q_i \mathbf{v}_i, 
+
+  where :math:`Q_i` and :math:`\mathbf{v}_i` are the partial charge and velocity of atom :math:`i`.
 
 Requirements
 ------------
@@ -87,7 +96,7 @@ Returned data
 Notes
 -----
 
-- Ensure every atom has a charge (``q``) defined; otherwise the external force is
+- Ensure every atom has a charge (``Q``) defined; otherwise the external force is
   zero.
 - The fix forces neighbor-list rebuilds every step, matching the requirement of
   exchanging fields at the FDTD cadence.

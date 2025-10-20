@@ -41,10 +41,21 @@ Optional drivers (Meep, QuTiP, Psi4, ASE, LAMMPS) can be added by following the 
 
 Visit the [documentation](docs/source/overview.rst) for installation details, tutorials, API reference, and guidelines on extending **MaxwellLink**.
 
+Alternatively, the documentation can be built locally. Use the optional `docs` extra to install the Sphinx toolchain:
+
+```bash
+pip install ".[docs]"
+```
+
+Then generate the API and HTML pages using Sphinx and open them in your default browser:
+
+```bash
+make doc html
+```
+
 ## Citation
 
 If **MaxwellLink** helps your research, please cite this project together with the coupled solvers you employ (e.g., Meep, Psi4, QuTiP, ASE, LAMMPS).
 
 - Li, T. E. MaxwellLink: A framework for self-consistent light-matter simulations. *To be submitted* 2025.
-
 

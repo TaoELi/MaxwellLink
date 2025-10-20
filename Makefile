@@ -1,4 +1,4 @@
-.PHONY: lint pretty
+.PHONY: lint pretty doc html
 SRC=src tests examples tutorials
 
 lint:
@@ -7,3 +7,16 @@ lint:
 
 pretty:
 	black $(SRC)
+
+SPHINXBUILD ?= sphinx-build
+SPHINXAPIDOC ?= sphinx-apidoc
+DOCS_SOURCE = docs/source
+DOCS_BUILD = docs/build/html
+DOCS_API = $(DOCS_SOURCE)/api
+
+doc:
+	$(SPHINXAPIDOC) -o $(DOCS_API) src/maxwelllink -f -e -M
+	$(SPHINXBUILD) -b html $(DOCS_SOURCE) $(DOCS_BUILD)
+
+html:
+	python -c 'import pathlib, webbrowser, sys; index = pathlib.Path("docs/build/html/index.html").resolve(); sys.exit("Docs not built; run `make doc` first.") if not index.exists() else webbrowser.open(index.as_uri())'
