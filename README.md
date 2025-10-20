@@ -6,9 +6,11 @@
   <a href="docs/source/overview.rst">
     <img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Docs badge">
   </a>
+
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-GPLv2-blue.svg" alt="License: GPLv2">
   </a>
+  
   <img src="https://img.shields.io/badge/python-3.9%2B-brightgreen.svg" alt="Python versions">
 </p>
 
