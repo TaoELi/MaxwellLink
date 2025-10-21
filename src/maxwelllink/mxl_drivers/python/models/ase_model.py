@@ -23,14 +23,8 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 # from ase.md.langevin import Langevin
 from ase.io import read as ase_read
 
-# ----- Unit constants -----
-# 1 a.u. of time = 0.02418884326505 fs  => fs_to_au = 1 fs in a.u.
-FS_TO_AU = 41.341373335  # you already use this in your code
-# 1 Å = BOHR_PER_ANG * a0
-BOHR_PER_ANG = 1.889726124565062
-# E(a.u.) = 5.142206747e11 V/m; F(eV/Å) for q=1 is E(V/m) * 1e-10
-# So F(eV/Å) = q * E(a.u.) * 51.422067476  (≈ 5.1422e11 * 1e-10)
-FORCE_PER_EFIELD_AU_EV_PER_ANG = 51.422067476
+# units parameters
+from maxwelllink.units import FS_TO_AU, FORCE_PER_EFIELD_AU_EV_PER_ANG, BOHR_PER_ANG
 
 
 def _parse_kwargs_string(s: str) -> Dict:

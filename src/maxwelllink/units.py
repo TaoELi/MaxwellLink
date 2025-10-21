@@ -1,1 +1,11 @@
 FS_TO_AU = 41.341373335  # 1 fs in atomic units
+
+AU_TO_FS = 1.0 / FS_TO_AU
+AU_TO_EV = 27.211399
+EV_TO_CM_INV = 8065.540106923572
+FS_INV_TO_EV = 4.135668  # 1fs-1 to 4.13 eV
+
+BOHR_PER_ANG = 1.889726124565062
+# E(a.u.) = 5.142206747e11 V/m; F(eV/Å) for q=1 is E(V/m) * 1e-10
+# So F(eV/Å) = q * E(a.u.) * 51.422067476  (≈ 5.1422e11 * 1e-10)
+FORCE_PER_EFIELD_AU_EV_PER_ANG = 51.422067476

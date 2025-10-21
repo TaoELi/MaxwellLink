@@ -260,7 +260,7 @@ class SingleModeSimulation(DummyEMSimulation):
     def _evaluate_drive(self, time_au: float) -> float:
         """
         Evaluate the drive term at the given time.
-        
+
         Parameters
         ----------
         time_au : float
@@ -290,7 +290,7 @@ class SingleModeSimulation(DummyEMSimulation):
     def _collect_socket_responses(self, efield_vec: Sequence[float]) -> Dict[int, dict]:
         """
         Send requests to socket molecules and collect their responses.
-        
+
         Parameters
         ----------
         efield_vec : array-like of float, shape (3,)
@@ -328,7 +328,7 @@ class SingleModeSimulation(DummyEMSimulation):
             Sum of molecular source amplitudes along the coupling axis.
         qc : float
             Current cavity field amplitude.
-        
+
         Returns
         -------
         float
@@ -361,14 +361,14 @@ class SingleModeSimulation(DummyEMSimulation):
     def _step_molecules(self, efield_vec: Sequence[float], time_au: float):
         """
         Propagate all molecules for one EM step and collect their source amplitudes.
-        
+
         Parameters
         ----------
         efield_vec : array-like of float, shape (3,)
             Effective electric field vector in atomic units.
         time_au : float
-            Current simulation time in atomic units.    
-        
+            Current simulation time in atomic units.
+
         Returns
         -------
         float

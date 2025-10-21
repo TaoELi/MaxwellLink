@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, sys
+import sys
 from pathlib import Path
 from importlib.metadata import version as pkg_version, PackageNotFoundError
 
@@ -24,7 +24,7 @@ extensions = [
     "sphinx.ext.intersphinx",
     "sphinx.ext.todo",
     "sphinx.ext.viewcode",
-    "myst_parser",           
+    "myst_parser",
     "sphinx.ext.mathjax",
     "nbsphinx",
 ]
@@ -38,7 +38,7 @@ mathjax3_config = {
 
 # Follow the links to examples/ in the root directory
 followlinks = True
-nbsphinx_execute = "never" 
+nbsphinx_execute = "never"
 
 
 # Build autosummary pages for modules/classes/functions automatically
@@ -51,14 +51,12 @@ autodoc_default_options = {
     "inherited-members": True,
     "show-inheritance": True,
 }
-autodoc_typehints = "description"  
+autodoc_typehints = "description"
 autodoc_class_signature = "separated"
 autodoc_preserve_defaults = True
 
 # For heavy dependencies that are not needed for docs building
-autodoc_mock_imports = [
-    "meep", "qutip", "ase", "psi4"
-]
+autodoc_mock_imports = ["meep", "qutip", "ase", "psi4"]
 
 # Napoleon (Google/NumPy docstrings)
 napoleon_google_docstring = True
