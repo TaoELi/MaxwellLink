@@ -10,3 +10,4 @@ EM solvers and molecular drivers.
 
    notebook/single_mode_tls.ipynb
    notebook/socket_tls_workflow.ipynb
+   notebook/vsc_cavmd.ipynb
