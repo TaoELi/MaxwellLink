@@ -30,33 +30,6 @@ class SingleModeUnits(DummyEMUnits):
         super().__init__()
 
 
-def _axis_to_index(axis: Union[int, str]) -> int:
-    """
-    Normalize a coupling axis specification to an integer index.
-
-    Parameters
-    ----------
-    axis : int or str
-        Axis specification. Accepted values: ``0``, ``1``, ``2`` or
-        ``"x"``, ``"y"``, ``"z"`` (case-insensitive).
-
-    Returns
-    -------
-    int
-        Axis index in ``{0, 1, 2}``.
-    """
-
-    if isinstance(axis, int):
-        if axis not in (0, 1, 2):
-            raise ValueError("Axis index must be 0 (x), 1 (y), or 2 (z).")
-        return axis
-    lookup = {"x": 0, "y": 1, "z": 2}
-    idx = lookup.get(str(axis).lower())
-    if idx is None:
-        raise ValueError("Axis must be 0, 1, 2 or one of 'x', 'y', 'z'.")
-    return idx
-
-
 class MoleculeSingleModeWrapper(MoleculeDummyWrapper):
     """
     Wrapper that adapts a ``Molecule`` to SingleModeSimulation, handling units, sources, and IO.
@@ -160,12 +133,12 @@ class SingleModeSimulation(DummyEMSimulation):
         molecules: Optional[Iterable[Molecule]] = None,
         drive: Optional[Union[float, Callable[[float], float]]] = None,
         coupling_strength: float = 1.0,
-        coupling_axis: Union[int, str] = 2,
+        coupling_axis: str = "xy",
         hub: Optional[SocketHub] = None,
-        qc_initial: float = 0.0,
-        pc_initial: float = 0.0,
-        mu_initial: float = 0.0,
-        dmudt_initial: float = 0.0,
+        qc_initial: list = [0.0, 0.0, 0.0],
+        pc_initial: list = [0.0, 0.0, 0.0],
+        mu_initial: list = [0.0, 0.0, 0.0],
+        dmudt_initial: list = [0.0, 0.0, 0.0],
         record_history: bool = True,
         include_dse: bool = False,
         molecule_half_step: bool = False,
@@ -176,7 +149,7 @@ class SingleModeSimulation(DummyEMSimulation):
         dt_au : float
             Simulation time step in atomic units.
         frequency_au : float
-            Cavity angular frequency :math:`\\omega_0` (a.u.).
+            Cavity angular frequency :math:`\\omega_{\rm c}` (a.u.).
         damping_au : float
             Damping constant :math:`\\kappa` (a.u.).
         molecules : iterable of Molecule, optional
@@ -184,19 +157,19 @@ class SingleModeSimulation(DummyEMSimulation):
         drive : float or callable, optional
             Constant drive term or function ``drive(t_au)``.
         coupling_strength : float, default: 1.0
-            Prefactor :math:`g` multiplying the summed molecular amplitudes.
-        coupling_axis : int or str, default: 2 (``"z"``)
-            Component of the molecular amplitude used for coupling.
+            Prefactor :math:`\varepsilon`.
+        coupling_axis : str, default: "xy"
+            Component(s) of the molecular dipole used for coupling.
         hub : SocketHub, optional
             Socket hub shared by all socket-mode molecules.
-        qc_initial : float, default: 0.0
-            Initial cavity field amplitude :math:`E(0)` (a.u.).
-        pc_initial : float, default: 0.0
-            Initial time derivative :math:`\\dot{E}(0)` (a.u.).
-        mu_initial : float, default: 0.0
-            Initial total molecular dipole along the coupling axis (a.u.).
-        dmudt_initial : float, default: 0.0
-            Initial time derivative of the total molecular dipole along the coupling axis (a.u.).
+        qc_initial : list, default: [0.0, 0.0, 0.0]
+            Initial cavity field coordinate (a.u.).
+        pc_initial : list, default: [0.0, 0.0, 0.0]
+            Initial cavity field momentum (a.u.).
+        mu_initial : list, default: [0.0, 0.0, 0.0]
+            Initial total molecular dipole vector (a.u.).
+        dmudt_initial : list, default: [0.0, 0.0, 0.0]
+            Initial time derivative of the total molecular dipole vector (a.u.).
         record_history : bool, default: True
             Record time, field, velocity, drive, and molecular response histories.
         include_dse : bool, default: True
@@ -214,7 +187,19 @@ class SingleModeSimulation(DummyEMSimulation):
         self.frequency = float(frequency_au)
         self.damping = float(damping_au)
         self.coupling_strength = float(coupling_strength)
-        self.axis = _axis_to_index(coupling_axis)
+        self.axis = np.array([False, False, False], dtype=bool)
+
+        if "x" in coupling_axis.lower():
+            self.axis[0] = True
+        if "y" in coupling_axis.lower():
+            self.axis[1] = True
+        if "z" in coupling_axis.lower():
+            self.axis[2] = True
+
+        # we need True in at least one axis
+        if not np.any(self.axis):
+            raise ValueError("At least one coupling axis (x, y, or z) must be specified.")
+
         self.drive = drive if drive is not None else (lambda _: 0.0)
         if isinstance(self.drive, (int, float)):
             const = float(self.drive)
@@ -250,18 +235,15 @@ class SingleModeSimulation(DummyEMSimulation):
             next_id += 1
 
         self.time = 0.0
-        self.qc = float(qc_initial)
-        self.pc = float(pc_initial)
-        self.dipole = float(mu_initial)
-        self.dipole_prev = self.dipole
-        self.dmudt = float(dmudt_initial)
-        self.dmudt_prev = self.dmudt
-        self.efield_prev = np.zeros(3, dtype=float)
-        self.acceleration = 0.0
+        self.qc = np.array(qc_initial, dtype=float) * self.axis
+        self.pc = np.array(pc_initial, dtype=float) * self.axis
+        self.dipole = np.array(mu_initial, dtype=float) * self.axis
+        self.dipole_prev = self.dipole.copy()
+        self.dmudt = np.array(dmudt_initial, dtype=float) * self.axis
+        self.dmudt_prev = self.dmudt.copy()
+        self.acceleration = np.zeros(3, dtype=float)
 
         self.include_dse = bool(include_dse)
-        # TODO: remove this temporary variable eventually, 
-        # we should be able to set within Molecule class and decide whether to extrapolate or not there.
         self.molecule_half_step = bool(molecule_half_step)
 
         self.record_history = bool(record_history)
@@ -335,7 +317,7 @@ class SingleModeSimulation(DummyEMSimulation):
             responses = self.hub.step_barrier(requests)
         return responses
 
-    def _calc_acceleration(self, time: float, mu: float, qc: float) -> float:
+    def _calc_acceleration(self, time: float, mu: np.ndarray, qc: np.ndarray) -> np.ndarray:
         """
         Calculate the cavity mode acceleration at the given time.
 
@@ -343,10 +325,10 @@ class SingleModeSimulation(DummyEMSimulation):
         ----------
         time : float
             Current simulation time in atomic units.
-        mu : float
-            Sum of molecular dipole moments along the coupling axis.
-        qc : float
-            Current cavity field amplitude.
+        mu : np.ndarray of float, shape (3,)
+            Sum of individual molecular dipole moment vectors.
+        qc : np.ndarray of float, shape (3,)
+            Current cavity field coordinates.
 
         Returns
         -------
@@ -357,18 +339,20 @@ class SingleModeSimulation(DummyEMSimulation):
         acceleration = (
             drive_val - self.coupling_strength * mu - (self.frequency**2) * qc
         )
+        # print("In Function, Cavity acceleration:", acceleration)
+        acceleration *= self.axis
         return acceleration
 
-    def _calc_effective_efield(self, qc: float, mu: float) -> np.ndarray:
+    def _calc_effective_efield(self, qc: np.ndarray, mu: np.ndarray) -> np.ndarray:
         """
         Calculate the effective electric field vector for the cavity mode.
 
         Parameters
         ----------
         qc : float
-            Current cavity mode coordinate.
+            Current cavity mode coordinate vector.
         mu : float
-            Current total molecular dipole along the coupling axis.
+            Current total molecular dipole vector.
 
         Returns
         -------
@@ -376,11 +360,14 @@ class SingleModeSimulation(DummyEMSimulation):
             Effective electric field vector in atomic units.
         """
         efield_vec = np.array([0.0, 0.0, 0.0], dtype=float)
-        efield_vec[self.axis] = -self.coupling_strength * qc
+        efield_vec = -self.coupling_strength * qc
 
         # add dipole self-energy term for the electric field if enabled
         if self.include_dse:
-            efield_vec[self.axis] -= self.coupling_strength**2 / self.frequency**2 * mu
+            efield_vec -= self.coupling_strength**2 / self.frequency**2 * mu
+        efield_vec *= self.axis
+
+        # print("In Function, Effective E-field vector:", efield_vec)
         return efield_vec
 
     def _calc_energy(self, mu) -> float:
@@ -410,7 +397,7 @@ class SingleModeSimulation(DummyEMSimulation):
             wrapper.additional_data_history[-1]["energy_au"]
             for wrapper in self.wrappers
         )
-        total_energy = kinetic_energy + potential_energy + e_molecule
+        total_energy = np.sum((kinetic_energy + potential_energy) * self.axis) + e_molecule
         return total_energy
 
     def _calc_dipole_vec(self) -> np.ndarray:
@@ -435,7 +422,7 @@ class SingleModeSimulation(DummyEMSimulation):
                 dipole_vec[2] += latest_data.get("muz_au") * rescaling_factor
         return dipole_vec
 
-    def _step_molecules(self, efield_vec: Sequence[float], time_au: float):
+    def _step_molecules(self, efield_vec: Sequence[float]):
         """
         Propagate all molecules for one EM step and collect their dipole moments.
 
@@ -443,8 +430,6 @@ class SingleModeSimulation(DummyEMSimulation):
         ----------
         efield_vec : array-like of float, shape (3,)
             Effective electric field vector in atomic units.
-        time_au : float
-            Current simulation time in atomic units.
 
         Returns
         -------
@@ -481,9 +466,17 @@ class SingleModeSimulation(DummyEMSimulation):
                     except Exception:
                         pass
         # dmu/dt
-        dmudt = sum(wrapper.last_amp[self.axis] for wrapper in self.wrappers)
+        dmudt = np.zeros(3, dtype=float)
+        for wrapper in self.wrappers:
+            dmudt += wrapper.last_amp
         # for dipole gauge we use mu directly instead of dmu/dt
-        dipole = self._calc_dipole_vec()[self.axis]
+        dipole = self._calc_dipole_vec()
+        # we need to filter only the coupling axis
+        dipole = dipole * self.axis
+        dmudt = dmudt * self.axis
+
+        # print("In Function, Total Dipole vector:", dipole)
+        # print("In Function, Total Dipole velocity (dmu/dt):", dmudt)
         return dipole, dmudt
 
     # ------------------------------------------------------------------
@@ -498,7 +491,7 @@ class SingleModeSimulation(DummyEMSimulation):
         pc_half = self.pc + 0.5 * self.dt * self.acceleration
 
         # 2. update position to full step
-        qc_prev = self.qc
+        qc_prev = self.qc.copy()
         self.qc += self.dt * pc_half
 
         # updating E-field at half step using interpolated dipole
@@ -510,11 +503,11 @@ class SingleModeSimulation(DummyEMSimulation):
         )
 
         # update dipole info
-        self.dipole_prev = self.dipole
-        self.dmudt_prev = self.dmudt
+        self.dipole_prev = self.dipole.copy()
+        self.dmudt_prev = self.dmudt.copy()
 
         # the value for n+1/2 time step
-        self.dipole, self.dmudt = self._step_molecules(efield_vec, self.time)
+        self.dipole, self.dmudt = self._step_molecules(efield_vec)
 
         # extrapolate to n+1 time step (ONLY NEEDED FOR VELOCITY VERLET MOLECULE PROPAGATION)
         if self.molecule_half_step:
@@ -530,14 +523,14 @@ class SingleModeSimulation(DummyEMSimulation):
 
         # 4. update acceleration and time
         self.time += self.dt
-        self.acceleration = acceleration
+        self.acceleration = acceleration.copy()
 
         if self.record_history:
             self.time_history.append(self.time)
-            self.qc_history.append(self.qc)
-            self.pc_history.append(self.pc)
+            self.qc_history.append(self.qc.copy())
+            self.pc_history.append(self.pc.copy())
             self.drive_history.append(self._evaluate_drive(self.time))
-            self.molecule_response_history.append(float(self.dipole))
+            self.molecule_response_history.append(self.dmudt.copy())
             self.energy_history.append(self._calc_energy(self.dipole))
 
     def run(self, until: Optional[float] = None, steps: Optional[int] = None):
@@ -571,3 +564,7 @@ class SingleModeSimulation(DummyEMSimulation):
                 print(
                     f"[SingleModeCavity] Completed {idx + 1}/{steps} [{(idx + 1) / steps * 100:.1f}%] steps, time/step: {avg_time_per_step:.2e} seconds, remaining time: {remaining:.2f} seconds."
                 )
+        
+        # close the hub
+        if self.hub is not None:
+            self.hub.stop()

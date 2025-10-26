@@ -818,7 +818,8 @@ class SocketHub:
                     del self.clients[st_key]
                 except KeyError:
                     pass
-            self._log(f"CONNECTED: mol {molid} <- {st.address}")
+            address = st.address
+            self._log(f"CONNECTED: mol {molid} <- {address}")
             # NEW: this molid is part of a frozen barrier -> force re-dispatch
             self._reset_inflight_for(molid)
             st.pending_send = False  # defensive: this is a fresh socket
