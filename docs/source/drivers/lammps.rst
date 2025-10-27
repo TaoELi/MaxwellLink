@@ -87,11 +87,13 @@ Returned data
 -------------
 
 
-- ``t_fs`` – Time in femtoseconds.
-- ``temp_K`` – Temperature of the MD system in Kelvin.
-- ``pe_au`` – Potential energy in atomic units (not implemented, always zero).
-- ``ke_au`` – Kinetic energy in atomic units.
-- ``dmudt_au`` – Dipole time derivative vector in atomic units.
+- ``time_au`` – Simulation time in atomic units.
+- ``mux_au``, ``muy_au``, ``muz_au`` – Molecular dipole components in atomic units at half a time step after the force evaluation time.
+- ``mux_m_au``, ``muy_m_au``, ``muz_m_au`` – Molecular dipole components in atomic units at the force evaluation time.
+- ``energy_au`` – Sum of kinetic and potential energy in atomic units.
+- ``temp_K`` – Instantaneous temperature in Kelvin.
+- ``pe_au`` – Potential energy contribution in atomic units (currently zero with pairwise-only setups).
+- ``ke_au`` – Kinetic energy contribution in atomic units.
 
 Notes
 -----

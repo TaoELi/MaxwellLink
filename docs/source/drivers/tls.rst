@@ -93,7 +93,7 @@ Returned data
 
 - ``time_au`` – Simulation time in atomic units.
 - ``energy_au`` – Instantaneous TLS energy.
-- ``mu_x_au``, ``mu_y_au``, ``mu_z_au`` – Dipole vector components.
+- ``mux_au``, ``muy_au``, ``muz_au`` – Dipole vector components (non-zero along the selected orientation) in atomic units.
 - ``Pe`` / ``Pg`` – Excited- and ground-state populations.
 - ``Pge_real`` / ``Pge_imag`` – Real and imaginary parts of the coherence.
 

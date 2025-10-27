@@ -123,8 +123,8 @@ retrieved from ``Molecule.additional_data_history`` (see
 ``tests/test_qutip/test_meep_2d_socket_qutip_tls_relaxation.py``):
 
 - ``time_au`` – Simulation time in atomic units.
-- ``mu_x_au``, ``mu_y_au``, ``mu_z_au`` – Time-dependent dipole moments in atomic units.
-- ``rho_diag`` – Density matrix diagonal elements (populations).
-- ``Pe`` – Excited state population for TLS (when dimension of density matrix equals two).
-- ``Pg`` – Ground state population for TLS (when dimension of density matrix equals two).
-- ``Pge_real``, ``Pge_imag`` – Real and imaginary parts of the TLS coherence (when dimension of density matrix equals two).
+- ``energy_au`` – Instantaneous expectation value of the system Hamiltonian.
+- ``mux_au``, ``muy_au``, ``muz_au`` – Dipole expectation values in atomic units.
+- ``rho_diag`` – Density matrix diagonal elements (populations) as a list.
+- ``Pg`` / ``Pe`` – Ground- and excited-state populations when the Hilbert space dimension is two.
+- ``Pge_real`` / ``Pge_imag`` – Real and imaginary parts of the TLS coherence when the Hilbert space dimension is two.

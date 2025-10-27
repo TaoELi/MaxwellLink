@@ -159,7 +159,7 @@ Returned data
 
 - ``time_au`` – Simulation clock in atomic units.
 - ``energy_au`` – Total energy including nuclear and electronic contributions.
-- ``mu_x_au``, ``mu_y_au``, ``mu_z_au`` – Instantaneous dipole components.
+- ``mux_au``, ``muy_au``, ``muz_au`` – Time-dependent dipole components in atomic units.
 
 Notes
 -----

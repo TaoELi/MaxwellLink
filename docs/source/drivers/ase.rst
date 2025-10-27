@@ -106,6 +106,9 @@ Returned data
 -------------
 
 - ``time_au`` – Simulation time in atomic units.
+- ``energy_au`` – Electronic energy returned by the wrapped ASE calculator.
+- ``mux_au``, ``muy_au``, ``muz_au`` – Molecular dipole components in atomic units half a time step after the force evaluation time.
+- ``mux_m_au``, ``muy_m_au``, ``muz_m_au`` – Molecular dipole components in atomic units at the force evaluation time.
 - ``temperature_K`` – Instantaneous temperature reported by ASE.
 
 Notes

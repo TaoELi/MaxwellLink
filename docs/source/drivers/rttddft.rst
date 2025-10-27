@@ -131,7 +131,7 @@ Returned data
 
 - ``time_au`` – Simulation clock in atomic units.
 - ``energy_au`` – Total electronic energy from `Psi4 <https://psicode.org/>`_.
-- ``mu_x_au``, ``mu_y_au``, ``mu_z_au`` – Time-dependent dipole components.
+- ``mux_au``, ``muy_au``, ``muz_au`` – Time-dependent dipole components in atomic units.
 
 Notes
 -----
