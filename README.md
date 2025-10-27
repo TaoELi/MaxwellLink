@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="docs/source/overview.rst">
-    <img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Docs badge">
+    <img src="https://img.shields.io/badge/docs%20latest-blue.svg" alt="Docs badge">
   </a>
 
   <a href="LICENSE">
