@@ -229,3 +229,4 @@ src/maxwelllink/mxl_drivers/python/models/rttddft_df_model.py*
 src/maxwelllink/mxl_drivers/python/models/rttddft_pyscf_model.py*
 setup.py*
 src/maxwelllink/sockets/_sockets_cpp.cpp
+*.bak
