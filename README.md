@@ -27,7 +27,7 @@ Create a fresh conda environment and install from source:
 
 ```bash
 CONDA_ENV="mxl"
-conda create -n "$CONDA_ENV"
+conda create -n "$CONDA_ENV" python=3.13
 conda activate "$CONDA_ENV"
 
 git clone https://github.com/TaoELi/MaxwellLink.git
