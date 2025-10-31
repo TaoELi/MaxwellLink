@@ -21,7 +21,7 @@ Key capabilities
 ----------------
 
 - Simplified and **unified Python API** for self-consistent light-matter simulations.
-- Couple an EM solver (currently Meep FDTD or a single-mode cavity) to one or many molecular
+- Couple an EM solver (such as Meep FDTD or a single-mode cavity) to one or many molecular
   drivers running in the same process or across networked nodes via **TCP sockets**.
 - Mix **heterogeneous molecular theories** within a single EM simulation, ranging from
   two-level systems (TLSs), QuTiP model Hamiltonians, to Psi4-based RT-TDDFT,
@@ -41,15 +41,16 @@ Included EM solvers
 - **Single-mode cavity** – a simple 1D cavity mode solver with support for
   damping and external driving fields, useful for prototyping, debugging, and 
   simplified quantum optics and polaritonics calculations.
+- **Laser driven dynamics** – a driver that applies arbitrary user-defined classical electric fields
+  without back-action from the molecular system, useful for pump-probe and strong-field simulations.
 
-Included driver families
-------------------------
+Included molecular drivers
+----------------------------
 
 - **Model systems** – a lightweight TLS driver and a `QuTiP <https://qutip.org>`_ interface for custom
   Hamiltonians with optional Lindblad terms.
 - **First-principles nonadiabatic quantum dynamics** – RT-TDDFT and
-  RT-TDDFT-Ehrenfest drivers implemented using `Psi4 <https://psicode.org/>`_ capable of sub-stepping when the electronic time
-  step is shorter than the FDTD step.
+  RT-TDDFT-Ehrenfest drivers implemented using `Psi4 <https://psicode.org/>`_.
 - **Classical or first-principles molecular mechanics** – ASE drivers that wrap any
   `ASE <https://ase-lib.org/index.html>`_ calculator (including `Psi4 <https://psicode.org/>`_,
   `ORCA <https://www.faccts.de/orca/>`_, `DFTB+ <https://www.dftbplus.org/>`_) and a `LAMMPS <https://www.lammps.org/>`_ plugin using

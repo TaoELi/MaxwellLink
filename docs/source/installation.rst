@@ -44,7 +44,7 @@ suitable for production simulations. One can install `Meep <https://meep.readthe
 
 .. code-block:: bash
 
-   conda install -n "$CONDA_ENV" -c conda-forge pymeep="*=mpi_mpich_*"
+   conda install -c conda-forge pymeep="*=mpi_mpich_*"
 
 Optional driver dependencies
 ----------------------------
@@ -57,13 +57,13 @@ be pulled into the same conda environment.
 .. code-block:: bash
 
    # Model Hamiltonians via QuTiP
-   conda install -n "$CONDA_ENV" -c conda-forge qutip
+   conda install -c conda-forge qutip
 
    # Psi4 for RT-TDDFT and Ehrenfest drivers
-   conda install -n "$CONDA_ENV" -c conda-forge psi4
+   conda install -c conda-forge psi4
 
    # Atomic Simulation Environment (ASE) for classical/MM drivers
-   conda install -n "$CONDA_ENV" -c conda-forge ase
+   conda install -c conda-forge ase
 
    # LAMMPS driver with fix mxl (installs a custom binary lmp_mxl)
    mxl_install_lammps

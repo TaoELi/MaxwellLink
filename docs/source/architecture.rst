@@ -8,7 +8,7 @@ Architecture overview
 placing them in different processes (or even different nodes) and letting them
 communicate through a socket protocol, inspired by the `i-PI <https://docs.ipi-code.org/>`_ project:
 
-1. The EM solver (`Meep <https://meep.readthedocs.io/en/latest/>`_ FDTD or single-mode cavity) advances Maxwell's equations.
+1. The EM solver (such as `Meep <https://meep.readthedocs.io/en/latest/>`_ FDTD or single-mode cavity) advances Maxwell's equations.
 2. After each time step, **MaxwellLink** measures the regularized electric field at
    every coupled molecule and converts it to atomic units.
 3. Those field vectors are sent to the driver processes through a ``SocketHub``
@@ -34,8 +34,7 @@ SocketHub
 - Generates molecule IDs on demand.
 - Implements the ``NEEDINIT -> INIT -> READY/HAVEDATA`` handshake for each client.
 - Detects dropped connections during sends or receives and pauses the EM solver
-  until all expected drivers reconnect (see the reconnection loops exercised in
-  ``tests/test_tls/test_meep_2d_socket_tls1_relaxation.py``).
+  until all expected drivers reconnect.
 - Exposes helpers such as :func:`maxwelllink.sockets.sockets.get_available_host_port` for easy
   use.
 
@@ -44,7 +43,7 @@ Abstract Molecule
 
 ``Molecule`` provides a unified interface for constructing molecular 
 drivers for both socket communications and non-socket (single-process) runs. Pass
-``hub=SocketHub(...)`` to connect to an external driver, or ``driver="tls"`` (and
+``hub=SocketHub(...)`` to connect to an external driver, or ``driver="..."`` (and
 ``driver_kwargs``) to instantiate the model locally. Every molecule records
 time-resolved data in ``additional_data_history``.
 
@@ -56,11 +55,13 @@ molecular parameters and dynamics are handled by each driver implementation.
 EM solvers
 ---------------------
 
-Currently, two EM solvers are available in **MaxwellLink**: 
+Currently, three EM solvers are available in **MaxwellLink**: 
 
 - The **Meep FDTD** engine: ``MeepSimulation`` (:mod:`maxwelllink.em_solvers.meep`)
 
 - The **single-mode cavity** solver:  ``SingleModeSimulation`` (:mod:`maxwelllink.em_solvers.single_mode_cavity`).
+
+- The **laser-driven dynamics** solver:  ``LaserDrivenSimulation`` (:mod:`maxwelllink.em_solvers.laser_driven`).
 
 ``MeepSimulation`` derives from `meep.Simulation <https://meep.readthedocs.io/en/master/Python_User_Interface/#simulation>`_ and automatically
 inserts the appropriate step function for updating molecules when ``MeepSimulation.run()`` is called.
@@ -81,6 +82,9 @@ When using ``MeepSimulation``, three additional parameters should be specified c
 approximates the field as a single damped harmonic oscillator evolving in atomic
 units. It supports the same socket and non-socket molecule interfaces, making it
 useful for rapid prototyping or unit tests without launching Meep.
+
+``LaserDrivenSimulation``, defined in :class:`~maxwelllink.em_solvers.laser_driven.LaserDrivenSimulation`,
+applies user-defined classical electric fields to molecules without back-action from the molecular system.
 
 
 Please read :doc:`em_solvers/index` section for detailed definitions of different EM solvers.

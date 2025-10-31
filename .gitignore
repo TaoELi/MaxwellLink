@@ -209,6 +209,7 @@ __marimo__/
 
 # LAMMPS
 log.lammps
+in.lmp-e
 
 # Psi4
 psi4*.dat
