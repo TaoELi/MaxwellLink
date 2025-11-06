@@ -16,7 +16,7 @@ import time
 import numpy as np
 
 from ..molecule import Molecule
-from ..sockets import SocketHub
+from ..sockets import SocketHub, am_master
 from ..units import FS_TO_AU
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
 
@@ -653,4 +653,5 @@ class SingleModeSimulation(DummyEMSimulation):
 
         # close the hub
         if self.hub is not None:
-            self.hub.stop()
+            if am_master():
+                self.hub.stop()

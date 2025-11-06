@@ -218,9 +218,9 @@ class MeepUnits(DummyEMUnits):
             # % (41.341373335 / self.time_units_fs / 2.0 / np.pi),
             "- Angular frequency [omega = 2 pi * f]: 1 mu = %.4E eV = %.4E cm-1 = %.4E a.u.\n"
             % (
-                0.242 / self.time_units_fs * 27.211 * 0.1,
-                0.242 / self.time_units_fs * 27.211 * 0.1 * EV_TO_CM_INV,
-                0.242 / self.time_units_fs * 0.1,
+                0.242 / self.time_units_fs * 27.211 * 0.1 * 2.0 * np.pi,
+                0.242 / self.time_units_fs * 27.211 * 0.1 * EV_TO_CM_INV * 2.0 * np.pi,
+                0.242 / self.time_units_fs * 0.1 * 2.0 * np.pi,
             ),
             "- Electric field [E]: 1 mu = %.2E V/m = %.2E a.u.\n"
             % (mu2efield_si, mu2efield_au),
@@ -1010,4 +1010,5 @@ class MeepSimulation(mp.Simulation):
 
         # after run, stop and clean up the hub
         if self.socket_hub is not None:
-            self.socket_hub.stop()
+            if mp.am_master():
+                self.socket_hub.stop()

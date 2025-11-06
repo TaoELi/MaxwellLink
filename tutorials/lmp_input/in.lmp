@@ -22,7 +22,7 @@ velocity all create 300.0 2345187
 #thermo_style	multi
 #thermo		1
 
-fix 1 all mxl socket_meep_lammps_vsc 32435 unix
+fix 1 all mxl socket_cavmd 32435 unix
 fix 2 all nve
 # fix 3 all langevin 300.0 300.0 10000.0 2345187
 
