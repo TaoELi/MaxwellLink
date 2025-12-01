@@ -666,7 +666,11 @@ class ASEModel(DummyModel):
 
         d = {
             "time_au": float(self.t),
-            "energy_au": float(self.forcewrap._cache_energy if self.forcewrap._cache_energy is not None else 0.0),
+            "energy_au": float(
+                self.forcewrap._cache_energy
+                if self.forcewrap._cache_energy is not None
+                else 0.0
+            ),
             "mux_au": float(self.dipole_projected[0]),
             "muy_au": float(self.dipole_projected[1]),
             "muz_au": float(self.dipole_projected[2]),
