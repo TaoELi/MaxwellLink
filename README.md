@@ -45,5 +45,5 @@ Visit the [documentation](https://taoeli.github.io/MaxwellLink/) for installatio
 
 If **MaxwellLink** helps your research, please cite this project together with the coupled solvers you employ (e.g., Meep, Psi4, QuTiP, ASE, LAMMPS).
 
-- X. Ji, A. F. Bocanegra Vargas, G. Meng, and T. E. Li. MaxwellLink: A Unified Framework for Self-Consistent Light-Matter Simulations. *Submitted* 2025.
+- X. Ji, A. F. Bocanegra Vargas, G. Meng, and T. E. Li. MaxwellLink: A Unified Framework for Self-Consistent Light-Matter Simulations. *Submitted* 2025. [data](https://github.com/TaoELi/maxwelllink_examples)
 
