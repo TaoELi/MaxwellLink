@@ -15,6 +15,9 @@ DOCS_BUILD = docs/build/html
 DOCS_API = $(DOCS_SOURCE)/api
 
 doc:
+    # copy notebook files to docs
+	rm -rf $(DOCS_SOURCE)/tutorials/notebook/*
+	cp -r tutorials/* $(DOCS_SOURCE)/tutorials/notebook/
 	$(SPHINXAPIDOC) -o $(DOCS_API) src/maxwelllink -f -e -M
 	$(SPHINXBUILD) -b html $(DOCS_SOURCE) $(DOCS_BUILD)
 

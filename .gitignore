@@ -222,6 +222,7 @@ tests/raw_tests/
 #doc
 docs/source/api
 examples_legacy
+docs/source/tutorials/notebook/*
 
 .vscode
 

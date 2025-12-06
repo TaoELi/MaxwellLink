@@ -52,6 +52,12 @@ jobs:
       - name: Clean previous doc build
         run: rm -rf docs/build
 
+      - name: Clean previous notebooks
+        run: rm -rf docs/source/tutorials/notebook/*
+      
+      - name: Copy tutorial notebooks
+        run: mkdir -p docs/source/tutorials/notebook/ && cp -r tutorials/* docs/source/tutorials/notebook/
+
       - name: Build HTML
         run: |
           sphinx-build -b html -d docs/build/doctrees docs/source docs/build/html
