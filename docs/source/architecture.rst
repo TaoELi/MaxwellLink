@@ -113,7 +113,7 @@ the LAMMPS binary with **MaxwellLink** support.
 
 Please read :doc:`drivers/index` section for detailed definitions of different molecular drivers.
 
-MPI awareness
+MPI Parallelism
 -------------
 
 EM solvers, such as `Meep <https://meep.readthedocs.io/en/latest/>`_ FDTD, can be launched under MPI. **MaxwellLink** is compatible with MPI, 
@@ -121,7 +121,7 @@ allowing for distributed simulations. Only the master
 rank (rank 0) interacts with sockets; field integrals and returned molecule responses
 are broadcast to the other ranks via ``mpi4py``.
 
-Resilience and checkpoints
+Checkpointing
 --------------------------
 
 Driver classes that inherit from :class:`DummyModel`
