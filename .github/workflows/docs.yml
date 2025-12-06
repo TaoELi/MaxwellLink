@@ -49,6 +49,9 @@ jobs:
         run: |
           sphinx-apidoc -o docs/source/api src/maxwelllink -f -e -M
 
+      - name: Clean previous doc build
+        run: rm -rf docs/build
+
       - name: Build HTML
         run: |
           sphinx-build -b html -d docs/build/doctrees docs/source docs/build/html

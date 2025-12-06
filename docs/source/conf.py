@@ -39,6 +39,8 @@ mathjax3_config = {
 # Follow the links to examples/ in the root directory
 followlinks = True
 nbsphinx_execute = "never"
+# Store extracted notebook outputs directly in the published `_images` folder
+nbsphinx_outputdir = "_images"
 
 
 # Build autosummary pages for modules/classes/functions automatically

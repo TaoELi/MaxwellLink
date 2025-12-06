@@ -223,6 +223,8 @@ tests/raw_tests/
 docs/source/api
 examples_legacy
 
+.vscode
+
 # under development
 src/maxwelllink/mxl_drivers/python/models/*.npz
 src/maxwelllink/mxl_drivers/python/models/*.txt
