@@ -46,7 +46,7 @@ nbsphinx_outputdir = "_images"
 # Build autosummary pages for modules/classes/functions automatically
 autosummary_generate = True
 
-# Autodoc settings: good defaults for scientific code
+# Autodoc setting
 autodoc_default_options = {
     "members": True,
     "undoc-members": False,
