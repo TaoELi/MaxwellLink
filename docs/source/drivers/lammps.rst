@@ -82,8 +82,8 @@ Parameters
    * - ``unix``
      - Optional flag (append ``unix`` to the ``fix`` command) to connect via a
        Unix-domain socket at ``/tmp/socketmxl_<host>``.
-   * - ``reset-dipole``
-     - Optional flag (append ``reset-dipole`` to the ``fix`` command) to subtract the molecular dipole moment by that at time zero.
+   * - ``reset_dipole``
+     - Optional flag (append ``reset_dipole`` to the ``fix`` command) to subtract the molecular dipole moment by that at time zero.
 
 Returned data
 -------------

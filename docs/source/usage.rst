@@ -215,7 +215,7 @@ input bash script launches one main job and two driver jobs. The two driver jobs
 Inspecting TLS output
 ---------------------
 
-In all the three workflows, after ``sim.run`` completes, the code below recovers the excited-state
+In all the above workflows, after ``sim.run`` completes, the code below recovers the excited-state
 population and the simulation time in atomic units.
 
 .. code-block:: python
@@ -242,7 +242,7 @@ while field integrals and returned molecular response are broadcast to worker ra
 Driver restarts
 ---------------
 
-If a driver disconnects unexpectedly, the hub pauses the `Meep <https://meep.readthedocs.io/en/latest/>`_ time loop and
+If a driver disconnects unexpectedly, the hub pauses the EM solver time loop and
 waits for the driver to reconnect. Enabling ``checkpoint=true`` and
 ``restart=true`` in the driver parameters lets expensive molecular dynamics
 recover from transient failures without restarting the EM simulation.
