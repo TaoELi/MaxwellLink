@@ -4,8 +4,11 @@ Installation
 The recommended way to install **MaxwellLink** is through a conda environment that
 provides third-party EM solvers and molecular drivers alongside Python 3.9+.
 
+Recommended Installation Option
+---------------------------------
+
 Prerequisites
--------------
+~~~~~~~~~~~~~~~
 
 - A recent Python (``>=3.9``). **MaxwellLink** is tested with CPython.
 - A working MPI stack (e.g. MPICH or OpenMPI) whenever you plan to run Meep or
@@ -14,7 +17,7 @@ Prerequisites
   such as LAMMPS from source.
 
 Create a conda environment
---------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
@@ -23,20 +26,18 @@ Create a conda environment
    conda create -n "$CONDA_ENV" python=3.13
    conda activate "$CONDA_ENV"
 
-Install **MaxwellLink** from source
------------------------------------
+Install **MaxwellLink**
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   git clone https://github.com/TaoELi/MaxwellLink.git
-   cd MaxwellLink
-   pip install .
+   pip install maxwelllink
 
 This installs the Python package together with the ``mxl_driver`` console entry
 point used to launch molecular drivers.
 
 Optional EM solvers
------------------------
+~~~~~~~~~~~~~~~~~~~~~
 
 Currently, **MaxwellLink** ships with `Meep <https://meep.readthedocs.io/en/latest/>`_ and a simple single-mode cavity solver. While the built-in
 single-mode cavity is mainly for prototyping and debugging, `Meep <https://meep.readthedocs.io/en/latest/>`_ is a full-featured FDTD package
@@ -51,7 +52,7 @@ suitable for production simulations. One can install `Meep <https://meep.readthe
    `official instructions <https://meep.readthedocs.io/en/latest/Installation/>`_.
 
 Optional driver dependencies
-----------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A two-level system (TLS) model ships with **MaxwellLink** and does not require extra packages.
 Beyond this lightweight driver, **MaxwellLink** supports several molecular drivers that depend on
@@ -76,11 +77,35 @@ The `LAMMPS <https://www.lammps.org/>`_ helper downloads, patches, and builds a 
 ``fix mxl``; alternatively copy the provided ``fix_maxwelllink.cpp`` and ``fix_maxwelllink.h`` files in source code (src/maxwelllink/mxl_drivers/lammps/) into
 your existing `LAMMPS <https://www.lammps.org/>`_ build and recompile.
 
-Verify the installation
------------------------
 
-After installing the desired drivers, run the core regression tests to confirm
-that the coupling between EM solvers and the molecular drivers works in your environment.
+Install **MaxwellLink** from source
+--------------------------------------
+
+In the same conda environment, if you are interested in understanding and contributing to **MaxwellLink**, clone the repository and install the package:
+
+.. code-block:: bash
+
+   git clone https://github.com/TaoELi/MaxwellLink.git
+   cd MaxwellLink
+   pip install .
+
+
+Enter the developer mode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Install developer dependencies to set up a development environment:
+
+.. code-block:: bash
+
+   pip install ".[dev]"
+
+
+Testing and Validation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+After contributing to the code, add a test file in the ``tests/`` folder and run the test suite to ensure everything works as expected.
+
+Use ``pytest`` to run the tests. From the root directory of the repository, run:
 
 .. code-block:: bash
 
@@ -95,7 +120,7 @@ installed or adjust your ``PYTHONPATH`` so that the drivers can import them.
 
 
 Build the Documentation
------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The documentation can be built locally. Use the optional `docs` extra to install the Sphinx toolchain:
 
