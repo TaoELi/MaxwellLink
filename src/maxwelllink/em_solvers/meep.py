@@ -284,15 +284,27 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         self.polarization_type = self.m.polarization_type
 
         # if polarization_type is "numerical" or "transverse", self.m.resolution must be set to a positive number
-        if self.polarization_type in ["numerical", "transverse"]:
+        if self.polarization_type in ["numerical", "transverse", "point"]:
             if (
                 not hasattr(self.m, "resolution")
                 or self.m.resolution is None
                 or self.m.resolution <= 0
             ):
                 raise ValueError(
-                    "For numerical or transverse polarization_type, the molecular resolution must be set to a positive number indicating the Meep simulation resolution."
+                    "For numerical, transverse, or point polarization_type, the molecular resolution must be set to a positive number indicating the Meep simulation resolution."
                 )
+        if self.polarization_type == "anisotropic":
+            if not isinstance(self.sigma, (list, tuple)) or len(self.sigma) != 3:
+                raise ValueError(
+                    "For anisotropic polarization_type, self.sigma should be a list or tuple of three floats indicating (sigma_x, sigma_y, sigma_z)."
+                )
+            self.sigma = np.array(self.sigma, dtype=float)
+
+        if self.polarization_type == "point":
+            print(
+                "###! Point dipole polarization_type yields very fluctuating spontaneous emission decay in 3D only !###",
+                "###! Please consider using 'analytical', 'numerical' or 'transverse' polarization_type with a small sigma instead. !###",
+            )
 
         self._polarization_prefactor_3d = (
             1.0 / (2.0 * np.pi) ** 1.5 / self.sigma**5 * self.rescaling_factor
@@ -303,6 +315,20 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         self._polarization_prefactor_1d = (
             1.0 / (2.0 * np.pi) ** 0.5 / self.sigma * self.rescaling_factor
         )
+
+        # reset the value of polarization prefactors in multidimeonsional case
+        if self.polarization_type == "anisotropic":
+            # note that in 3D case, now the polarization is simply exp^(- (x^2/2/sigma_x^2 + y^2/2/sigma_y^2 + z^2/2/sigma_z^2)) instead of the x/y/z^2 weighted form
+            self.sigma_x, self.sigma_y, self.sigma_z = self.sigma
+            self._polarization_prefactor_1d = (
+                1.0 / (2.0 * np.pi) ** 0.5 / self.sigma_x * self.rescaling_factor
+            )
+            self._polarization_prefactor_2d = (
+                1.0 / (2.0 * np.pi) ** 1.0 / (self.sigma_x * self.sigma_y) * self.rescaling_factor
+            )
+            self._polarization_prefactor_3d = (
+                1.0 / (2.0 * np.pi) ** 1.5 / (self.sigma_x * self.sigma_y * self.sigma_z) * self.rescaling_factor
+            )
 
     def _init_sources(self):
         """
@@ -319,6 +345,10 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
             self._init_sources_gaussian_numerical()
         elif self.polarization_type == "transverse":
             self._init_sources_transverse()
+        elif self.polarization_type == "point":
+            self._init_sources_point()
+        elif self.polarization_type == "anisotropic":
+            self._init_sources_anisotropic_analytical()
         else:
             raise ValueError(
                 f"Unsupported polarization_type '{self.polarization_type}' for Meep molecule."
@@ -661,6 +691,150 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
 
         self.sources = srcs
 
+    def _init_sources_point(self):
+        """
+        Construct Meep sources for the molecule's polarization kernel (1D/2D/3D)
+        using a point dipole approximation.
+
+        Notes
+        -----
+        Sources are memoized per polarization fingerprint and component to allow
+        sharing across molecules with identical spatial kernels.
+        """
+
+        srcs = []
+        center = _to_mp_v3(self.center)
+        size = _to_mp_v3(self.size)
+        # we need to normalize the prefactor for point dipole source
+        dx = 1.0 / self.m.resolution
+        # overwrite the size to (0, 0, 0) as we are using point dipole approximation
+        size = mp.Vector3(0.0, 0.0, 0.0)
+
+        if self.dimensions == 1:
+            key = (self.polarization_fingerprint_hash, "Ez")
+            amplitude = self.rescaling_factor * 1.0 / dx**1
+            if key not in _fingerprint_source:
+                instantaneous_source_amplitudes[key] = 0.0
+                _fingerprint_source[key] = mp.Source(
+                    src=_make_custom_time_src(key),
+                    component=mp.Ez,
+                    center=center,
+                    size=size,
+                    amplitude=amplitude,
+                )
+            srcs.append(_fingerprint_source[key])
+        elif self.dimensions == 2:
+            key = (self.polarization_fingerprint_hash, "Ez")
+            amplitude = self.rescaling_factor * 1.0 / dx**2
+            if key not in _fingerprint_source:
+                instantaneous_source_amplitudes[key] = 0.0
+                _fingerprint_source[key] = mp.Source(
+                    src=_make_custom_time_src(key),
+                    component=mp.Ez,
+                    center=center,
+                    size=size,
+                    amplitude=amplitude,
+                )
+            srcs.append(_fingerprint_source[key])
+        else:  # 3D
+            for comp, tag in (
+                (mp.Ex, "Ex"),
+                (mp.Ey, "Ey"),
+                (mp.Ez, "Ez"),
+            ):
+                key = (self.polarization_fingerprint_hash, tag)
+                amplitude = self.rescaling_factor * 1.0 / dx**3
+                if key not in _fingerprint_source:
+                    instantaneous_source_amplitudes[key] = 0.0
+                    _fingerprint_source[key] = mp.Source(
+                        src=_make_custom_time_src(key),
+                        component=comp,
+                        center=center,
+                        size=size,
+                        amplitude=amplitude,
+                    )
+                srcs.append(_fingerprint_source[key])
+
+        self.sources = srcs
+
+    def _init_sources_anisotropic_analytical(self):
+        """
+        Construct Meep sources for the molecule's polarization kernel (1D/2D/3D)
+        using anisotropic analytical Gaussian functions.
+
+        Notes
+        -----
+        Sources are memoized per polarization fingerprint and component to allow
+        sharing across molecules with identical spatial kernels.
+        """
+
+        srcs = []
+        center = _to_mp_v3(self.center)
+        size = _to_mp_v3(self.size)
+
+        def amp_func_3d(R):
+            return (
+                self._polarization_prefactor_3d
+                * np.exp(-R.x ** 2 / (2.0 * self.sigma_x**2) - R.y ** 2 / (2.0 * self.sigma_y**2) - R.z ** 2 / (2.0 * self.sigma_z**2))
+            )
+
+        def amp_func_2d(R):
+            return self._polarization_prefactor_2d * np.exp(
+                -(R.x**2 / (2.0 * self.sigma_x**2) + R.y**2 / (2.0 * self.sigma_y**2))
+            )
+
+        def amp_func_1d(R):
+            return self._polarization_prefactor_1d * np.exp(
+                -(R.x**2) / (2.0 * self.sigma_x**2)
+            )
+
+        if self.dimensions == 1:
+            key = (self.polarization_fingerprint_hash, "Ez")
+            if key not in _fingerprint_source:
+                instantaneous_source_amplitudes[key] = 0.0
+                _fingerprint_source[key] = mp.Source(
+                    src=_make_custom_time_src(key),
+                    component=mp.Ez,
+                    center=center,
+                    size=size,
+                    amplitude=1.0,
+                    amp_func=amp_func_1d,
+                )
+            srcs.append(_fingerprint_source[key])
+        elif self.dimensions == 2:
+            key = (self.polarization_fingerprint_hash, "Ez")
+            if key not in _fingerprint_source:
+                instantaneous_source_amplitudes[key] = 0.0
+                _fingerprint_source[key] = mp.Source(
+                    src=_make_custom_time_src(key),
+                    component=mp.Ez,
+                    center=center,
+                    size=size,
+                    amplitude=1.0,
+                    amp_func=amp_func_2d,
+                )
+            srcs.append(_fingerprint_source[key])
+        else:  # 3D
+            for comp, tag in (
+                (mp.Ex, "Ex"),
+                (mp.Ey, "Ey"),
+                (mp.Ez, "Ez"),
+            ):
+                key = (self.polarization_fingerprint_hash, tag)
+                if key not in _fingerprint_source:
+                    instantaneous_source_amplitudes[key] = 0.0
+                    _fingerprint_source[key] = mp.Source(
+                        src=_make_custom_time_src(key),
+                        component=comp,
+                        center=center,
+                        size=size,
+                        amplitude=1.0,
+                        amp_func=amp_func_3d,
+                    )
+                srcs.append(_fingerprint_source[key])
+
+        self.sources = srcs
+
     def _calculate_ep_integral(self, sim: mp.Simulation):
         """
         Compute the regularized E-field integral over the molecule's kernel.
@@ -675,7 +849,16 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         list of float
             Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
         """
-        return self._calculate_ep_integral_gaussian_analytical(sim)
+        if self.polarization_type in ["analytical", "numerical", "transverse"]:
+            return self._calculate_ep_integral_gaussian_analytical(sim)
+        elif self.polarization_type == "point":
+            return self._calculate_ep_integral_point(sim)
+        elif self.polarization_type == "anisotropic":
+            return self._calculate_ep_integral_anisotropic_analytical(sim)
+        else:
+            raise ValueError(
+                f"Unsupported polarization_type '{self.polarization_type}' for Meep molecule."
+            )
 
     def _calculate_ep_integral_gaussian_analytical(self, sim: mp.Simulation):
         """
@@ -772,6 +955,131 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         return [np.real(x), np.real(y), np.real(z)]
 
 
+    def _calculate_ep_integral_point(self, sim: mp.Simulation):
+        """
+        Compute the regularized E-field integral over the molecule's kernel
+        using point dipole approximation.
+
+        Parameters
+        ----------
+        sim : meep.Simulation
+            Active Meep simulation.
+
+        Returns
+        -------
+        list of float
+            Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
+        """
+
+        dx = 1.0 / self.m.resolution
+
+        vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
+        x = y = z = 0.0
+        if self.dimensions == 1:
+            ez = sim.get_field_point(mp.Ez, self.center)
+            z = self.rescaling_factor * ez * dx**1
+        elif self.dimensions == 2:
+            ez = sim.get_field_point(mp.Ez, self.center)
+            z = self.rescaling_factor * ez * dx**2
+        else:  # 3D
+            #ex = sim.get_field_point(mp.Ex, self.center)
+            #ey = sim.get_field_point(mp.Ey, self.center)
+            #z = sim.get_field_point(mp.Ez, self.center)
+            # directly using the raw value at the point yields very noisy results, so we multiply by the voxel volume here
+            vol = mp.Volume(size=mp.Vector3(dx, dx, dx), center=_to_mp_v3(self.center))
+            ex = sim.get_array(mp.Ex, vol).mean()
+            ey = sim.get_array(mp.Ey, vol).mean()
+            ez = sim.get_array(mp.Ez, vol).mean()
+            x = self.rescaling_factor * ex * dx**3
+            y = self.rescaling_factor * ey * dx**3
+            z = self.rescaling_factor * ez * dx**3
+        return [np.real(x), np.real(y), np.real(z)]
+
+
+    def _calculate_ep_integral_anisotropic_analytical(self, sim: mp.Simulation):
+        """
+        Compute the regularized E-field integral over the molecule's kernel
+        using anisotropic analytical Gaussian functions.
+
+        Parameters
+        ----------
+        sim : meep.Simulation
+            Active Meep simulation.
+
+        Returns
+        -------
+        list of float
+            Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
+        """
+
+        vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
+        x = y = z = 0.0
+        if self.dimensions == 1:
+            z = sim.integrate_field_function(
+                [mp.Ez],
+                lambda R, ez: self._polarization_prefactor_1d
+                * exp(
+                    -((R.x - self.center.x) * (R.x - self.center.x))
+                    / (2.0 * self.sigma_x**2)
+                )
+                * (ez),
+                vol,
+            )
+        elif self.dimensions == 2:
+            z = sim.integrate_field_function(
+                [mp.Ez],
+                lambda R, ez: self._polarization_prefactor_2d
+                * exp(
+                    -(
+                        (R.x - self.center.x) * (R.x - self.center.x) / (2.0 * self.sigma_x**2)
+                        + (R.y - self.center.y) * (R.y - self.center.y) / (2.0 * self.sigma_y**2)
+                    )
+                )
+                * (ez),
+                vol,
+            )
+        else:  # 3D
+            z = sim.integrate_field_function(
+                [mp.Ez],
+                lambda R, ez: self._polarization_prefactor_3d
+                * exp(
+                    -(
+                        (R.x - self.center.x) * (R.x - self.center.x) / (2.0 * self.sigma_x**2)
+                        + (R.y - self.center.y) * (R.y - self.center.y) / (2.0 * self.sigma_y**2)
+                        + (R.z - self.center.z) * (R.z - self.center.z) / (2.0 * self.sigma_z**2)
+                    )
+                )
+                * (ez),
+                vol,
+            )
+            x = sim.integrate_field_function(
+                [mp.Ex],
+                lambda R, ex: self._polarization_prefactor_3d
+                * exp(
+                    -(
+                        (R.x - self.center.x) * (R.x - self.center.x) / (2.0 * self.sigma_x**2)
+                        + (R.y - self.center.y) * (R.y - self.center.y) / (2.0 * self.sigma_y**2)
+                        + (R.z - self.center.z) * (R.z - self.center.z) / (2.0 * self.sigma_z**2)
+                    )
+                )
+                * (ex),
+                vol,
+            )
+            y = sim.integrate_field_function(
+                [mp.Ey],
+                lambda R, ey: self._polarization_prefactor_3d
+                * exp(
+                    -(
+                        (R.x - self.center.x) * (R.x - self.center.x) / (2.0 * self.sigma_x**2)
+                        + (R.y - self.center.y) * (R.y - self.center.y) / (2.0 * self.sigma_y**2)
+                        + (R.z - self.center.z) * (R.z - self.center.z) / (2.0 * self.sigma_z**2)
+                    )
+                )
+                * (ey),
+                vol,
+            )
+        return [np.real(x), np.real(y), np.real(z)]
+    
 # ---------- NON-SOCKET Step Function for MEEP ----------
 def update_molecules_no_socket(
     molecules: List[MoleculeMeepWrapper], sources_non_molecule: List = None

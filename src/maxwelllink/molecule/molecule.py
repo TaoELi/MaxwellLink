@@ -71,7 +71,7 @@ class Molecule:
             Molecule size (extent).
         dimensions : int or None, optional
             Simulation dimensionality; one of ``1``, ``2``, or ``3``.
-        sigma : float or None, optional
+        sigma : float or list or None, optional
             Spatial polarization kernel width.
         resolution : int or None, optional
             Optional real-space resolution for building FDTD sources.
@@ -84,10 +84,13 @@ class Molecule:
         store_additional_data : bool, default: True
             Whether to store additional data history as a growing list (if True) or only keep the latest five frames (if False).
         polarization_type : str or None, optional
-            Type of polarization to use in EM FDTD propagation. Three options: "analytical", "numerical", "transverse".
-            Default is "analytical". "analytical" uses analytical Gaussian polarization profile,
-            "numerical" uses numerical Gaussian polarization profile,
-            "transverse" uses approximate transverse components of numerical Gaussian polarization profile from FFT.
+            Type of polarization to use in EM FDTD propagation. Five options: ``analytical``, ``numerical``, ``transverse``, ``point``, ``anisotropic``.
+            Default is ``analytical``. ``analytical`` uses analytical Gaussian polarization profile;
+            ``numerical`` uses numerical Gaussian polarization profile;
+            ``transverse`` uses approximate transverse components of numerical Gaussian polarization profile from FFT;
+            ``point`` uses point dipole approximation, which might not be accurate for evaluating self-interaction;
+            ``anisotropic`` uses anisotropic and analytical Gaussian polarization profile [self.sigma should be a list of three floats for 
+            (sigma_x, sigma_y, sigma_z) instead of a single float].
 
         Raises
         ------
