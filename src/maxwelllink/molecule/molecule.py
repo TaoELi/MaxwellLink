@@ -89,7 +89,7 @@ class Molecule:
             ``numerical`` uses numerical Gaussian polarization profile;
             ``transverse`` uses approximate transverse components of numerical Gaussian polarization profile from FFT;
             ``point`` uses point dipole approximation, which might not be accurate for evaluating self-interaction;
-            ``anisotropic`` uses anisotropic and analytical Gaussian polarization profile [self.sigma should be a list of three floats for
+            ``anisotropic`` uses anisotropic and analytical Gaussian polarization profile [``self.sigma`` should be a list of three floats for
             (sigma_x, sigma_y, sigma_z) instead of a single float].
 
         Raises
