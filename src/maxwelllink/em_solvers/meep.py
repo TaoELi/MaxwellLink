@@ -982,10 +982,12 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
         x = y = z = 0.0
         if self.dimensions == 1:
-            ez = sim.get_field_point(mp.Ez, self.center)
+            vol = mp.Volume(size=mp.Vector3(dx, 0, 0), center=_to_mp_v3(self.center))
+            ez = sim.get_array(mp.Ez, vol).mean()
             z = self.rescaling_factor * ez * dx**1
         elif self.dimensions == 2:
-            ez = sim.get_field_point(mp.Ez, self.center)
+            vol = mp.Volume(size=mp.Vector3(dx, dx, 0), center=_to_mp_v3(self.center))
+            ez = sim.get_array(mp.Ez, vol).mean()
             z = self.rescaling_factor * ez * dx**2
         else:  # 3D
             # ex = sim.get_field_point(mp.Ex, self.center)
