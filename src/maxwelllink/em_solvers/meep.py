@@ -1023,14 +1023,11 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
 
         dx = 1.0 / self.m.resolution
 
-        vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
         x = y = z = 0.0
         if self.dimensions == 1:
-            vol = mp.Volume(size=mp.Vector3(dx, 0, 0), center=_to_mp_v3(self.center))
             ez = sim.get_field_point(mp.Ez, self.center)
             z = self.rescaling_factor * ez * dx**1
         elif self.dimensions == 2:
-            vol = mp.Volume(size=mp.Vector3(dx, dx, 0), center=_to_mp_v3(self.center))
             ez = sim.get_field_point(mp.Ez, self.center)
             z = self.rescaling_factor * ez * dx**2
         else:  # 3D
@@ -1041,7 +1038,7 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
             y = self.rescaling_factor * ey * dx**3
             z = self.rescaling_factor * ez * dx**3
         return [np.real(x), np.real(y), np.real(z)]
-    
+
     def _calculate_ep_integral_anisotropic_analytical(self, sim: mp.Simulation):
         """
         Compute the regularized E-field integral over the molecule's kernel
