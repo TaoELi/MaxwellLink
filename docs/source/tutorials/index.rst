@@ -9,7 +9,7 @@ Advanced features in **MaxwellLink** which differ from other light-matter simula
 in a separate section.
 
 Single-Mode Cavity
-------------------
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. toctree::
    :maxdepth: 1
@@ -20,7 +20,7 @@ Single-Mode Cavity
    notebook/singlemode_vsc.ipynb
 
 MEEP FDTD
----------
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. toctree::
    :maxdepth: 1
@@ -30,9 +30,12 @@ MEEP FDTD
 
 
 Advanced Features
-------------------
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. toctree::
    :maxdepth: 1
 
    notebook/advanced_features_polarization_type.ipynb
+
+
+Users can also explore different features of **MaxwellLink** via ``vibe simulations``.  See :doc:`agent_skills` for more details. 
