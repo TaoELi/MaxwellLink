@@ -32,4 +32,5 @@ description: This skill should be used when users need MaxwellLink + Meep FDTD w
 - When Matplotlib is imported, set `MPLCONFIGDIR=/tmp/mplconfig` to avoid cache permission errors.
 
 ## Other common bugs 
-- The `dimensions=...` input can only be assigned in `mxl.Molecule()` not `mxl.MeepSimulation()`. For example, assiging `dimensions=1` in both `mxl.Molecule()` and `mxl.MeepSimulation()` will lead to runtime error: meep: cannot require a ez component in a 1D grid.
+- The `dimensions=...` input can only be assigned in `mxl.Molecule()` not `mxl.MeepSimulation()`. For example, assigning `dimensions=1` in both `mxl.Molecule()` and `mxl.MeepSimulation()` will lead to runtime error: `meep: cannot require a ez component in a 1D grid`.
+- In 1D and 2D simulations, `mxl.Molecule` (or molecular drivers) should have a transition dipole moment along z-direction, because `mxl.MeepSimulation()` sets the `mxl.Molecule` to emit only along z-direction in 1D and 2D.

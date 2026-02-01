@@ -155,3 +155,5 @@ Notes
 
 - :class:`MeepSimulation` enforces ``Courant = 0.5``. Provide ``resolution`` and other grid parameters accordingly.
 - MPI runs automatically confine socket communication to rank 0 while broadcasting amplitudes to all ranks; disconnections pause the solver until the hub reports reconnection.
+- The ``dimensions=...`` input can only be assigned in :class:`Molecule` not :class:`MeepSimulation`. For example, assigning ``dimensions=1`` in both :class:`Molecule` and :class:`MeepSimulation` will lead to runtime error: ``meep: cannot require a ez component in a 1D grid``.
+- In 1D and 2D simulations, :class:`Molecule` (or molecular drivers) should have a transition dipole moment along z-direction, because :class:`MeepSimulation` sets the :class:`Molecule` to emit only along z-direction in 1D and 2D.
