@@ -360,6 +360,11 @@ body[data-theme="auto"][data-default-mode="dark"] {
   background: var(--color-sidebar-background);
 }
 
+.sidebar-brand img {
+  max-height: 88px;
+  width: auto;
+}
+
 .sidebar .sidebar-brand-text {
   font-weight: 700;
   letter-spacing: 0.08em;

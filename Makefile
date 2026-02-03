@@ -16,7 +16,7 @@ DOCS_API = $(DOCS_SOURCE)/api
 
 doc:
 	rm -rf $(DOCS_SOURCE)/tutorials/notebook/*
-	cp -r tutorials/* $(DOCS_SOURCE)/tutorials/notebook/
+	rsync -av --exclude='README.md' tutorials/ $(DOCS_SOURCE)/tutorials/notebook/
 	$(SPHINXAPIDOC) -o $(DOCS_API) src/maxwelllink -f -e -M
 	$(SPHINXBUILD) -b html $(DOCS_SOURCE) $(DOCS_BUILD)
 

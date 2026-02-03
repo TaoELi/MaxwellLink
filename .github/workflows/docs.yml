@@ -56,7 +56,7 @@ jobs:
         run: rm -rf docs/source/tutorials/notebook/*
       
       - name: Copy tutorial notebooks
-        run: mkdir -p docs/source/tutorials/notebook/ && cp -r tutorials/* docs/source/tutorials/notebook/
+        run: mkdir -p docs/source/tutorials/notebook/ && rsync -av --exclude='README.md' tutorials/ docs/source/tutorials/notebook/
 
       - name: Build HTML
         run: |
