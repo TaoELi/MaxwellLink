@@ -1,7 +1,7 @@
 MaxwellLink
 ======================================
 
-.. image:: ../../media/icon.png
+.. image:: ../../media/icon_main.png
    :alt: MaxwellLink icon
    :align: center
    :scale: 50

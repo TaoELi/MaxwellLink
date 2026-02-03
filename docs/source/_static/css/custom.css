@@ -365,11 +365,6 @@ body[data-theme="auto"][data-default-mode="dark"] {
   letter-spacing: 0.08em;
 }
 
-.sidebar-brand img {
-  max-height: 130px;
-  width: auto;
-}
-
 .sidebar nav a.current {
   background: rgba(18, 100, 163, 0.12);
   border-radius: 12px;

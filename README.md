@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="media/icon.png" alt="MaxwellLink icon" width="200">
+  <img src="media/icon_main.png" alt="MaxwellLink icon" width="200">
 </p>
 
 <p align="center">
