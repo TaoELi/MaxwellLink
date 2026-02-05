@@ -44,8 +44,12 @@ Abstract Molecule
 ``Molecule`` (:mod:`maxwelllink.molecule.molecule`) provides a unified interface for constructing molecular 
 drivers for both socket communications and non-socket (single-process) runs. Pass
 ``hub=SocketHub(...)`` to connect to an external driver, or ``driver="..."`` (and
-``driver_kwargs``) to instantiate the model locally. Every molecule records
-time-resolved data in ``additional_data_history``.
+``driver_kwargs``) to instantiate the model locally. 
+
+Every molecule records time-resolved data in ``Molecule.additional_data_history`` (a Python list of dicts ordered in the simulation time).
+
+For faciliating obtaining molecular time-resolved data, ``Molecule.extra`` is a dict that stores the post-processed data in the form of Numpy arrays. 
+The content of ``extra`` is determined by the driver implementation; for example, the TLS driver stores the population trajectory in ``extra["Pe"]`` and the time points in ``extra["time_au"]``.  
 
 In ``Molecule``, each molecule only stores the information necessary for
 EM simulations, such as the center / size of the molecule in the EM grid and the

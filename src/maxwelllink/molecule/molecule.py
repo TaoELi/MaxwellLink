@@ -19,6 +19,7 @@ backend modules.
 
 from __future__ import annotations
 
+import numpy as np
 import json
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -141,6 +142,11 @@ class Molecule:
             # use a deque to limit memory usage: if thousands of molecules are attached,
             # perhaps we don't want to store too much history)
             self.additional_data_history = deque(maxlen=5)
+
+        # add a post-processed additional_data_history for storing processed data
+        # additional_data_history is a list of dicts, each dict can contain multiple fields
+        # before closing the simulation, we would like to process the raw data into a more compact form
+        self.extra = {}
 
         if self.dimensions not in (1, 2, 3) and self.dimensions is not None:
             raise ValueError("Molecule only supports 1D, 2D and 3D simulations.")
@@ -335,3 +341,24 @@ class Molecule:
             raise RuntimeError(
                 "Molecule is not properly initialized in socket or non-socket mode."
             )
+    
+    def post_process_additional_data(self):
+        """
+        Post-process the raw additional_data_history into a more compact form
+        and store it in self.extra.
+
+        This function can be customized based on the specific data fields
+        stored in additional_data_history. 
+
+        This function should be called before closing the simulation.
+        """
+        if len(self.additional_data_history) == 0:
+            return
+        
+        # using the first entry of additional_data_history to identify fields
+        sample_entry = self.additional_data_history[0]
+        for key in sample_entry.keys():
+            # collect all values for this key
+            values = np.array([entry[key] for entry in self.additional_data_history])
+            # store in extra
+            self.extra[key] = values

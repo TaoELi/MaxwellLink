@@ -1694,6 +1694,13 @@ class MeepSimulation(mp.Simulation):
                 )
         super().run(*step_funcs, **kwargs)
 
+        # post-process the additional_data_history for each molecule before closing
+        for wrapper in self.molecules:
+            mol = wrapper.m
+            if hasattr(mol, "extra"):
+                # process the raw additional_data_history into a more compact form
+                mol.post_process_additional_data()
+
         # after run, stop and clean up the hub
         if self.socket_hub is not None:
             if mp.am_master():

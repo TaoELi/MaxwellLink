@@ -76,7 +76,7 @@ Driver skeleton
      class handles the stage/commit protocol used by the socket driver.
 
    - Override :meth:`append_additional_data` if you wish to stream diagnostics back
-     to the EM solver (they appear in ``Molecule.additional_data_history``).
+     to the EM solver (they appear in ``Molecule.additional_data_history`` and also in ``Molecule.extra``).
 
    - Implement ``_dump_to_checkpoint`` / ``_reset_from_checkpoint`` when
      checkpoint/restart is desirable.

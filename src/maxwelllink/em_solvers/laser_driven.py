@@ -418,6 +418,13 @@ class LaserDrivenSimulation(DummyEMSimulation):
                     f"[LaserDriven] Completed {idx + 1}/{steps} [{(idx + 1) / steps * 100:.1f}%] steps, time/step: {avg_time_per_step:.2e} seconds, remaining time: {remaining:.2f} seconds."
                 )
 
+        # post-process the additional_data_history for each molecule before closing
+        for wrapper in self.wrappers:
+            mol = wrapper.m
+            if hasattr(mol, "extra"):
+                # process the raw additional_data_history into a more compact form
+                mol.post_process_additional_data()
+                
         # close the hub
         if self.hub is not None:
             if am_master():
