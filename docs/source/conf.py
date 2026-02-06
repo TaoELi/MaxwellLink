@@ -101,6 +101,9 @@ html_static_path = ["_static"]
 html_css_files = [
     "css/custom.css",
 ]
+html_js_files = [
+    "js/theme-light-only.js",
+]
 
 # Ensure referrer header is sent for embedded content (e.g., YouTube) to avoid
 # player configuration errors such as "Error 153".

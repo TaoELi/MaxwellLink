@@ -44,7 +44,7 @@ Automated light-matter simulations on Anvil HPC
 
 Using `Purdue Anvil HPC system <https://www.rcac.purdue.edu/knowledge/anvil>`_ (available via the `NSF ACCESS program <https://www.access-ci.org/>`_) as an example, you can also use MaxwellLink's agent skills to run light-matter simulations on remote HPC clusters via VS Code and the Codex extension.
 
-Please watch the following `walkthrough video <https://www.youtube.com/watch?v=c0PVxcvriDM>`_ for an introduction to using MaxwellLink's agent skills on HPC systems:
+Please watch the following `demo video <https://www.youtube.com/watch?v=c0PVxcvriDM>`_ for an introduction to using MaxwellLink's agent skills on HPC systems:
 
 .. youtube:: c0PVxcvriDM
 
