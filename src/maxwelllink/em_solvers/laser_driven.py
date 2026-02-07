@@ -1,9 +1,9 @@
-#--------------------------------------------------------------------------------------#
+# --------------------------------------------------------------------------------------#
 # Copyright (c) 2026 MaxwellLink                                                       #
 # This file is part of MaxwellLink. Repository: https://github.com/TaoELi/MaxwellLink  #
 # If you use this code, always credit and cite arXiv:2512.06173.                       #
 # See AGENTS.md and README.md for details.                                             #
-#--------------------------------------------------------------------------------------#
+# --------------------------------------------------------------------------------------#
 
 """
 Laser driven dynamics for MaxwellLink.
@@ -424,7 +424,7 @@ class LaserDrivenSimulation(DummyEMSimulation):
             if hasattr(mol, "extra"):
                 # process the raw additional_data_history into a more compact form
                 mol.post_process_additional_data()
-                
+
         # close the hub
         if self.hub is not None:
             if am_master():

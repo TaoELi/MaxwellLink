@@ -153,7 +153,7 @@ Each :class:`~maxwelllink.molecule.molecule.Molecule` keeps
 :attr:`~maxwelllink.molecule.molecule.Molecule.additional_data_history`, which records driver
 data (e.g., TLS populations, energies, timestamps). Socket drivers may
 append extra JSON payloads through the hub; embedded drivers populate the same
-history via :meth:`maxwelllink.molecule.molecule.Molecule.append_additional_data`.
+history via :meth:`append_additional_data`.
 
 Notes
 -----

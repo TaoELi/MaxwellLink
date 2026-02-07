@@ -1,9 +1,9 @@
-#--------------------------------------------------------------------------------------#
+# --------------------------------------------------------------------------------------#
 # Copyright (c) 2026 MaxwellLink                                                       #
 # This file is part of MaxwellLink. Repository: https://github.com/TaoELi/MaxwellLink  #
 # If you use this code, always credit and cite arXiv:2512.06173.                       #
 # See AGENTS.md and README.md for details.                                             #
-#--------------------------------------------------------------------------------------#
+# --------------------------------------------------------------------------------------#
 
 """
 Single-mode cavity electrodynamics for MaxwellLink.
@@ -52,10 +52,6 @@ class MoleculeSingleModeWrapper(MoleculeDummyWrapper):
             The molecule to wrap.
         dt_au : float
             Time step in atomic units.
-        axis : int or str
-            Axis of the molecule to be coupled to the cavity mode. Accepted values: ``0``, ``1``, ``2`` or
-            ``"x"``, ``"y"``, ``"z"`` (case-insensitive).
-
         """
         super().__init__(molecule=molecule)
         self.dt_au = float(dt_au)
@@ -201,7 +197,7 @@ class SingleModeSimulation(DummyEMSimulation):
             Record time, field, velocity, drive, and molecular response histories.
         include_dse : bool, default: False
             Include dipole self-energy term in the simulation.
-        molecule_half_step : bool, default: True
+        molecule_half_step : bool, default: False
             Whether to further evaluate molecular info for another half time step.
         shift_dipole_baseline : bool, default: False
             Whether to shift all dipole values using the initial dipole value, so initial dipole value is changed to zero.

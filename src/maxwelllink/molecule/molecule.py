@@ -1,9 +1,9 @@
-#--------------------------------------------------------------------------------------#
+# --------------------------------------------------------------------------------------#
 # Copyright (c) 2026 MaxwellLink                                                       #
 # This file is part of MaxwellLink. Repository: https://github.com/TaoELi/MaxwellLink  #
 # If you use this code, always credit and cite arXiv:2512.06173.                       #
 # See AGENTS.md and README.md for details.                                             #
-#--------------------------------------------------------------------------------------#
+# --------------------------------------------------------------------------------------#
 
 """
 A molecule class capable of operating in both socket and non-socket modes.
@@ -341,20 +341,20 @@ class Molecule:
             raise RuntimeError(
                 "Molecule is not properly initialized in socket or non-socket mode."
             )
-    
+
     def post_process_additional_data(self):
         """
         Post-process the raw additional_data_history into a more compact form
         and store it in self.extra.
 
         This function can be customized based on the specific data fields
-        stored in additional_data_history. 
+        stored in additional_data_history.
 
         This function should be called before closing the simulation.
         """
         if len(self.additional_data_history) == 0:
             return
-        
+
         # using the first entry of additional_data_history to identify fields
         sample_entry = self.additional_data_history[0]
         for key in sample_entry.keys():

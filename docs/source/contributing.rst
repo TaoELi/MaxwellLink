@@ -117,8 +117,7 @@ Example template:
            return self._current_amp
 
 Ensure every new parameter is documented and exposed through ``__init__`` so the
-driver can be constructed from ``--param`` strings (see
-:func:`maxwelllink.mxl_drivers.python.mxl_driver.read_args_kwargs`).
+driver can be constructed from ``--param`` strings.
 
 Testing tips
 ~~~~~~~~~~~~

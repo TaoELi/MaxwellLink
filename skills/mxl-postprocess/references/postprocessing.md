@@ -1,6 +1,6 @@
 # Post-processing hints
 
-MaxwellLink stores driver diagnostics on each `Molecule` in `additional_data_history` (list of dicts). Common keys: `time_au`, `mux_au/muy_au/muz_au`, `dmuxdt_au`, `energy_au`, `Pe/Pg`, `rho_diag`, plus solver-specific histories.
+MaxwellLink stores driver diagnostics on each `Molecule` in `additional_data_history` (list of dicts). Common keys: `time_au`, `mux_au/muy_au/muz_au`, `energy_au`, `Pe/Pg`, `rho_diag`, plus solver-specific histories.
 
 ## Extract arrays (Python)
 ```python
@@ -24,7 +24,7 @@ plt.show()
 
 ## Combine multiple molecules
 ```python
-responses = [np.array([d["dmuxdt_au"] for d in mol.additional_data_history]) for mol in sim.molecules]
+responses = [np.array([d["mux_au"] for d in mol.additional_data_history]) for mol in sim.molecules]
 total = np.sum(responses, axis=0)
 ```
 
