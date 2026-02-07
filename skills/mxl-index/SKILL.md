@@ -18,7 +18,6 @@ description: This skill should be used when users ask how to set up, choose, or 
 
 ## Load the right skill
 - Input scaffolding + templates: `skills/mxl-project-scaffold/SKILL.md`
-- NL-to-simulation benchmark/eval loop: `skills/mxl-nl2sim-eval/SKILL.md`
 - Core workflow invariants (socket vs embedded, MPI rank-0 rules): `skills/mxl-core/SKILL.md`
 - EM solvers:
   - Meep FDTD: `skills/mxl-meep/SKILL.md`

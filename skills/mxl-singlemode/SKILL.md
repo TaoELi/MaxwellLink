@@ -10,7 +10,7 @@ description: This skill should be used when users need the MaxwellLink single-mo
 
 ## Configure
 - Set `dt_au`, `frequency_au`, `damping_au`, `coupling_strength`, and `coupling_axis`.
-- Optional physics knobs used in strong-coupling workflows: `include_dse` and `gauge="dipole"|"velocity"`.
+- Optional physics knobs used in strong-coupling workflows: `include_dse`.
 - Attach molecules in embedded or socket mode (same `Molecule` interface as elsewhere).
 
 ## Prefer templates

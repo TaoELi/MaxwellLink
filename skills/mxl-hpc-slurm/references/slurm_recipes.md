@@ -10,19 +10,23 @@ Use this pattern when the EM solver (server/hub) and molecular drivers (clients)
 ## Main job (server): `submit_main.sh`
 ```bash
 #!/usr/bin/env bash
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH -J mxl_main
 #SBATCH -o mxl_main.%j.out
 #SBATCH -e mxl_main.%j.err
 
 set -euo pipefail
 
-# Prefer srun under SLURM; mpirun also works on many systems.
-srun -n "${SLURM_NTASKS:-1}" python -u em_main.py
+# Prefer mpirun under SLURM; choose srun if required by specific HPC setting
+mpirun -n "${SLURM_NTASKS:-1}" python -u em_main.py
 ```
 
 ## Driver job (client): `submit_driver.sh`
 ```bash
 #!/usr/bin/env bash
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH -J mxl_driver
 #SBATCH -o mxl_driver.%j.out
 #SBATCH -e mxl_driver.%j.err
