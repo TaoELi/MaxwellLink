@@ -29,4 +29,4 @@ Driver:
 
 ## Notes
 - For SLURM/HPC two-step runs, write a host/port file from the main job (e.g. via `maxwelllink.sockets.get_available_host_port(localhost=False, save_to_file="tcp_host_port_info.txt")`) and have the driver job read it.
-- Optional parameter setting in `mxl.SingleModeSimulation`: `include_dse=True` should be included for simulating vibrational strong coupling with real-molecule drivers (such as LAMMPS or Psi4). This option does not need to be included for model drivers (tls or qutip).
+- In `mxl.SingleModeSimulation`: `include_dse=True` must be included for simulating vibrational strong coupling with real-molecule drivers (such as LAMMPS or Psi4). This option does not need to be included for model drivers (tls or qutip).

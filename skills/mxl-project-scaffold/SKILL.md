@@ -27,3 +27,4 @@ description: This skill should be used when users ask to prepare MaxwellLink inp
 - `singlemode-tls-socket-tcp`: SingleModeSimulation + TLS over TCP (fast socket workflow)
 - `laser-tls-embedded`: LaserDrivenSimulation + embedded TLS (prescribed field)
 - `slurm-meep-tls-tcp`: SLURM two-step main+driver jobs over TCP (multi-node pattern), writes `tcp_host_port_info.txt`
+- `slurm-meep-lammps-tcp`: SLURM two-step Meep+LAMMPS (`fix mxl`) jobs over TCP, patches `in_mxl.lmp` and runs `lmp_mxl`

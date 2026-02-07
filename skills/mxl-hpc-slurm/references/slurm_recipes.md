@@ -58,6 +58,10 @@ mxl_driver --model tls --address "$HOST" --port "$PORT" --param "omega=0.242, mu
 ```
 
 ## LAMMPS driver job (client): `submit_driver_lammps.sh`
+
+This recipe is scaffolded directly by:
+`skills/mxl-project-scaffold/assets/templates/slurm-meep-lammps-tcp`.
+
 ```bash
 #!/usr/bin/env bash
 #SBATCH -J mxl_lammps

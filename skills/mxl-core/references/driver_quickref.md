@@ -38,3 +38,4 @@ All Python drivers run via `mxl_driver --model <id> --param "k1=v1, ..."` (socke
 - In LAMMPS input: `fix 1 all mxl <host> <port> [unix] [reset_dipole]`.
 - Hub must be reachable from the LAMMPS process; ensure atoms carry charges.
 - Common SLURM pattern: driver job reads `tcp_host_port_info.txt` (written by main job) and runs `srun lmp_mxl -in in.lmp`.
+- Preferred scaffold template for HPC: `skills/mxl-project-scaffold/assets/templates/slurm-meep-lammps-tcp`.

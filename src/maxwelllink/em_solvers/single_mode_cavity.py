@@ -199,7 +199,7 @@ class SingleModeSimulation(DummyEMSimulation):
             Initial time derivative of the total molecular dipole vector (a.u.).
         record_history : bool, default: True
             Record time, field, velocity, drive, and molecular response histories.
-        include_dse : bool, default: True
+        include_dse : bool, default: False
             Include dipole self-energy term in the simulation.
         molecule_half_step : bool, default: True
             Whether to further evaluate molecular info for another half time step.

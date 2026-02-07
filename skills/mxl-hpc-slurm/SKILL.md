@@ -28,7 +28,8 @@ description: This skill should be used when users need to run MaxwellLink in SLU
 - When coupling to LAMMPS (`fix mxl`), treat the LAMMPS job as the client: read host/port, patch the LAMMPS input (or pass host/port directly), then `srun lmp_mxl -in in.lmp`.
 
 ## Prefer templates
-- Template: `skills/mxl-project-scaffold/assets/templates/slurm-meep-tls-tcp`
+- TLS over TCP template: `skills/mxl-project-scaffold/assets/templates/slurm-meep-tls-tcp`
+- LAMMPS over TCP template: `skills/mxl-project-scaffold/assets/templates/slurm-meep-lammps-tcp`
 
 ## References
 - Recipes: `skills/mxl-hpc-slurm/references/slurm_recipes.md`

@@ -1,0 +1,35 @@
+{
+  "template_id": "slurm-meep-lammps-tcp",
+  "host_port_file": "tcp_host_port_info.txt",
+  "time_units_fs": 20.0,
+  "resolution": 25,
+  "cell_size": [8.0, 0.0, 0.0],
+  "pml_thickness": 0.94,
+  "steps": 250000,
+  "hub": {
+    "timeout": 200.0,
+    "latency": 0.001
+  },
+  "molecule": {
+    "center": [0.0, 0.0, 0.0],
+    "size": [0.23, 0.0, 0.0],
+    "sigma": 0.04,
+    "dimensions": 1,
+    "rescaling_factor": 100000.0
+  },
+  "cavity": {
+    "use_bragg_resonator": true,
+    "rescaling": 0.47,
+    "nlayer": 5,
+    "n1": 2.0,
+    "n2": 1.0,
+    "t1": 0.125,
+    "t2": 0.25,
+    "center_thickness": 0.5
+  },
+  "lammps": {
+    "input_template": "in_mxl.lmp",
+    "data": "data.lmp"
+  },
+  "output_npz": "lammps_history.npz"
+}

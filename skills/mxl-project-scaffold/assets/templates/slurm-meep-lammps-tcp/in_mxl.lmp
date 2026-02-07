@@ -1,0 +1,44 @@
+units		electron
+atom_style	full
+
+#pair_style	lj/cut/coul/long 17.01
+pair_style      lj/cut/tip4p/long 1 2 1 1 0.278072379 17.007
+#bond_style      harmonic
+bond_style      class2 
+angle_style     harmonic
+#kspace_style	pppm 0.0001
+kspace_style	pppm/tip4p 0.0001
+
+read_data	data.lmp
+
+replicate 1 1 1
+
+pair_coeff  * * 0 0
+pair_coeff  1  1  0.000295147 5.96946
+
+neighbor	2.0 bin
+
+timestep	0.5
+
+variable        T equal 300.0
+
+velocity all create ${T} 2345187
+
+fix             NVT all nvt temp ${T} ${T} 100.0 
+thermo          100
+
+# run a 20-ps eq simulation to relax the dipole moment
+run 40000
+
+unfix NVT
+
+#---- productive calculations ----#
+reset_timestep  0
+
+fix 1 all mxl HOST PORT
+fix 2 all nve
+
+#dump		1 all xyz 25 dump.xyz
+
+run		100000000
+
