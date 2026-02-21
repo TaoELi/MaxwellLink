@@ -3,6 +3,7 @@
 </p>
 
 <p align="center">
+  <a href="https://arxiv.org/abs/2512.06173"><img src="https://img.shields.io/badge/arXiv-2512.06173-b31b1b.svg" alt="arXiv:2512.06173"></a>
   <a href="https://taoeli.github.io/MaxwellLink/overview.html"><img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Docs badge"></a>
   <a href="https://pypi.org/project/maxwelllink/"><img src="https://img.shields.io/pypi/v/maxwelllink.svg?label=pypi&logo=pypi" alt="PyPI version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv2-blue.svg" alt="License: GPLv2"></a>
