@@ -3,17 +3,12 @@
 </p>
 
 <p align="center">
-  <a href="https://taoeli.github.io/MaxwellLink/">
-    <img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Docs badge">
-  </a>
-  <a href="https://pypi.org/project/maxwelllink/">
-    <img src="https://img.shields.io/pypi/v/maxwelllink.svg?label=pypi&logo=pypi" alt="PyPI version">
-  </a>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/badge/license-GPLv2-blue.svg" alt="License: GPLv2">
-  </a>
+  <a href="https://taoeli.github.io/MaxwellLink/overview.html"><img src="https://img.shields.io/badge/docs-latest-blue.svg" alt="Docs badge"></a>
+  <a href="https://pypi.org/project/maxwelllink/"><img src="https://img.shields.io/pypi/v/maxwelllink.svg?label=pypi&logo=pypi" alt="PyPI version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv2-blue.svg" alt="License: GPLv2"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-brightgreen.svg" alt="Python versions">
 </p>
+
 
 **MaxwellLink** is a free and open-source framework for self-consistent light–matter simulations. It bridges electromagnetic solvers, such as [MEEP FDTD](https://meep.readthedocs.io/en/latest/) or the built-in single-mode cavity, with heterogeneous molecular drivers spanning from multilevel open quantum systems, force-field molecular mechanics, and (nonadiabatic) first-principles molecular dynamics. 
 
@@ -37,11 +32,11 @@ Create a fresh conda environment and install using *pip*:
 pip install maxwelllink
 ```
 
-Optional drivers ([MEEP FDTD](https://meep.readthedocs.io/en/latest/), [QuTiP](https://qutip.org/), [Psi4](https://psicode.org/), [ASE](https://wiki.fysik.dtu.dk/ase/), [LAMMPS](https://www.lammps.org/)) can be added by following the instructions in the [documentation]((https://taoeli.github.io/MaxwellLink/)).
+Optional drivers ([MEEP FDTD](https://meep.readthedocs.io/en/latest/), [QuTiP](https://qutip.org/), [Psi4](https://psicode.org/), [ASE](https://wiki.fysik.dtu.dk/ase/), [LAMMPS](https://www.lammps.org/)) can be added by following the instructions in the [documentation](https://taoeli.github.io/MaxwellLink/overview.html).
 
 ## Documentation
 
-Visit the [documentation](https://taoeli.github.io/MaxwellLink/) for installation details, tutorials, API reference, and guidelines on extending **MaxwellLink**.
+Visit the [documentation](https://taoeli.github.io/MaxwellLink/overview.html) for installation details, tutorials, API reference, and guidelines on extending **MaxwellLink**.
 
 ## Tutorials
 
