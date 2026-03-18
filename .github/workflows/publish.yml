@@ -5,7 +5,17 @@ on:
     branches: [ main ]
     paths:
       - "pyproject.toml"
+      - "setup.py"
+      - "MANIFEST.in"
+      - "AGENTS.md"
+      - "README.md"
       - "src/**"
+      - "tests/**"
+      - "skills/**"
+      - "docs/source/**"
+      - "media/**"
+      - "tutorials/**"
+      - ".github/workflows/publish.yml"
   workflow_dispatch:
 
 permissions:
@@ -82,6 +92,48 @@ jobs:
       - name: Build distributions
         if: steps.version_check.outputs.publish == 'true'
         run: python -m build
+
+      - name: Verify mxl init/clean CLI from built wheel
+        if: steps.version_check.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+
+          tmpdir="$(mktemp -d)"
+          cd "$tmpdir"
+
+          # Preferred subcommands
+          mxl init
+          test -f AGENTS.md
+          test -L src
+          test -L tests
+          test -L skills
+          test -L docs
+          test -L media
+          test -L tutorials
+          test -L README.md
+          test -L CLAUDE.md
+          test -L GEMINI.md
+
+          mxl clean
+          test ! -e AGENTS.md
+          test ! -e src
+          test ! -e tests
+          test ! -e skills
+          test ! -e docs
+          test ! -e media
+          test ! -e tutorials
+          test ! -e README.md
+          test ! -e CLAUDE.md
+          test ! -e GEMINI.md
+
+          # Backward-compatible aliases
+          mxl-init
+          test -f AGENTS.md
+          test -L src
+          mxl-clean
+          test ! -e AGENTS.md
+          test ! -e src
 
       - name: Publish to PyPI
         if: steps.version_check.outputs.publish == 'true'

@@ -230,6 +230,7 @@ docs/source/tutorials/notebook/*
 src/maxwelllink/mxl_drivers/python/models/*.npz
 src/maxwelllink/mxl_drivers/python/models/*.txt
 setup.py*
+!setup.py
 src/maxwelllink/sockets/_sockets_cpp.cpp
 *.bak
 maxwelllink_benchmark/

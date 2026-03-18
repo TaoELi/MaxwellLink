@@ -1,13 +1,20 @@
 # Top-level docs and config
 include README.md
+include AGENTS.md
 include LICENSE
 include pyproject.toml
 
 # LAMMPS fix files and installer docs/scripts
 recursive-include src/maxwelllink/mxl_drivers/lammps *.cpp *.h *.md *.sh
 
-# (Optional) include examples 
-# recursive-include examples *
+# Workspace payload sources used by mxl-init
+recursive-include src *.py *.md *.txt *.json *.sh *.cpp *.h
+recursive-include tests *
+recursive-include skills *
+recursive-include docs/source *
+recursive-include media *
+recursive-include tutorials *
+prune docs/build
 
 # (Optional) exclude build artifacts
 global-exclude *.pyc *.pyo *.pyd __pycache__ .DS_Store

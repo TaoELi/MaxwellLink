@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maxwelllink"
-version = "0.3.1"
+version = "0.3.2"
 description = "MaxwellLink: A unified framework for self-consistent light-matter simulations"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -53,6 +53,9 @@ keywords = [
 "mxl_driver" = "maxwelllink.mxl_drivers.python.mxl_driver:mxl_driver_main"
 # a simple installation script for modified LAMMPS with MaxwellLink support
 "mxl_install_lammps" = "maxwelllink.mxl_drivers.lammps.install:mxl_lammps_main"
+"mxl" = "maxwelllink.cli.mxl:main"
+"mxl-init" = "maxwelllink.cli.mxl_init:mxl_init_main"
+"mxl-clean" = "maxwelllink.cli.mxl_clean:mxl_clean_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -63,6 +66,7 @@ where = ["src"]
 include = ["maxwelllink*", "mxl_drivers*"]
 
 [tool.setuptools.package-data]
+"maxwelllink" = ["_workspace_payload/*", "_workspace_payload/**/*"]
 "maxwelllink.mxl_drivers.lammps" = ["fix_maxwelllink.*", "README.md"]
 
 [project.optional-dependencies]

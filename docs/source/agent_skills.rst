@@ -3,6 +3,35 @@ Agent Skills
 
 Agent Skills for **MaxwellLink** provide a simple way to get started with this package. Using natural language prompts, users can easily create input files and run jobs on both local machines and HPC systems. Users can then inspect the input files and modify them as needed for more customized simulations.
 
+
+Autonomous light-matter simulations with command line interfaces (CLIs)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A very elegant way to use MaxwellLink for autonomous light-matter simulations is to use the CLIs.
+
+After installation, create a clean working directory and run ``mxl-init`` within this directory to set up the **MaxwellLink** environment:
+
+.. code-block:: bash
+
+   mkdir myproject
+   cd myproject
+   mxl init
+
+Then, the package knowledge base (including the agent skills) will be automatically loaded and the agent will be ready to assist with your simulations. You can then use any of the supported agent providers (e.g., ``codex``, ``claude``, or ``gemini`` CLIs, IDE extensions, or desktop applications) to provide natural language prompts for setting up and running MaxwellLink simulations.
+
+For example, with the ``codex`` CLI, you can run the following command to start chatting with the agent: 
+
+.. code-block:: bash
+
+   codex 
+
+Finally, after the simulations, you can remove the **MaxwellLink** runtime knowledge base by running:
+
+.. code-block:: bash
+
+   mxl clean
+
+
 Prerequisites
 ~~~~~~~~~~~~~~
 
@@ -24,7 +53,7 @@ After installation, you can use MaxwellLink's agent skills to run light-matter s
    An agent provider, such as ``codex``, ``claude``, or ``gemini`` [command line interfaces (CLIs), IDE extensions, or desktop applications] needs to be installed and configured in your machine. 
 
 
-Automated light-matter simulations on local machines
+Autonomous light-matter simulations on local machines
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Please watch the following `walkthrough video <https://www.youtube.com/watch?v=ttAvvNByMLg>`_ for an introduction to using MaxwellLink's agent skills with VS Code and the Codex extension:
@@ -45,7 +74,7 @@ The above video tutorial uses the following input prompt:
    In my local machine, run an initially weakly excited two-level system coupled to 2d vacuum using meep fdtd and plot the excited-state population dynamics
 
 
-Automated light-matter simulations on Anvil HPC
+Autonomous light-matter simulations on Anvil HPC
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Using `Purdue Anvil HPC system <https://www.rcac.purdue.edu/knowledge/anvil>`_ (available via the `NSF ACCESS program <https://www.access-ci.org/>`_) as an example, we can also run MaxwellLink light-matter simulations.
