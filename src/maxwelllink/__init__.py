@@ -24,6 +24,7 @@ __all__ = [
     "TLSModel",
     # v2 features
     "MeepSimulation",
+    "meep_units_helper",
     "Molecule",
     "SingleModeSimulation",
     "Vector3",
@@ -82,9 +83,11 @@ def __getattr__(name):
 
     if name in {
         "MeepSimulation",
+        "meep_units_helper",
     }:
         from .em_solvers.meep import (
             MeepSimulation,
+            meep_units_helper,
         )
 
         return locals()[name]
