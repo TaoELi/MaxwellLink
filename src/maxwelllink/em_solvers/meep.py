@@ -221,7 +221,6 @@ class MeepUnits(DummyEMUnits):
             "the permittivity of free space (epsilon_0=1), and the permeability of free space (mu_0=1). \n",
             "To couple MEEP with molecular dynamics, we set [c] = [epsilon_0] = [mu_0] = [hbar] = 1. \n",
             "By further defining the time unit or length unit, we can fix the units system of MEEP (mu).\n\n",
-            
             "- Time [t]: 1 mu = %.4E fs = %.4E a.u.\n"
             % (self.time_units_fs, self.time_units_fs * FS_TO_AU),
             "- Length [x]: 1 mu = %.4E nm\n" % (299.792458 * self.time_units_fs),
@@ -236,12 +235,10 @@ class MeepUnits(DummyEMUnits):
             % (1.0 / omega_mu_to_ev),
             "- Electric field [E]: 1 mu = %.4E V/m = %.4E a.u.\n\n"
             % (mu2efield_si, mu2efield_au),
-
             "Given the simulation resolution = %d,\n - FDTD dt = %.4E mu (0.5/resolution) = %.4E fs\n"
             % (resolution, dt, dt * self.time_units_fs),
             "- FDTD dx = %.4E mu (1.0/resolution) = %.4E nm\n"
             % (dx, dx * self.time_units_fs * 299.792458),
-
             "Hope this helps!\n",
             "############################################\n\n",
         )
@@ -1599,10 +1596,11 @@ def update_molecules(
 
     return __step_function__
 
+
 def meep_units_helper(time_units_fs=None, length_units_nm=None):
     """
     Helper function to print out Meep unit conversions based on provided time or length units.
-    
+
     Parameters
     ----------
     time_units_fs : float or None, optional
@@ -1619,14 +1617,18 @@ def meep_units_helper(time_units_fs=None, length_units_nm=None):
         raise ValueError(
             "Can only provide one of time_units_fs and length_units_nm for proper unit handling."
         )
-    
-    print("Now let's take a moment to understand the Meep unit system based on your provided units:")
+
+    print(
+        "Now let's take a moment to understand the Meep unit system based on your provided units:"
+    )
     print("Given that you have specified:")
     if time_units_fs is not None:
         print(f"- Time unit: {time_units_fs} fs")
     elif length_units_nm is not None:
         print(f"- Length unit: {length_units_nm} nm")
-    print("By further assuming the MEEP simulation resolution is 10 pixels per length unit, we can derive the following Meep units:")
+    print(
+        "By further assuming the MEEP simulation resolution is 10 pixels per length unit, we can derive the following Meep units:"
+    )
 
     MeepSimulation(
         cell_size=mp.Vector3(8, 8, 0),
@@ -1634,7 +1636,6 @@ def meep_units_helper(time_units_fs=None, length_units_nm=None):
         time_units_fs=time_units_fs,
         length_units_nm=length_units_nm,
     )
-
 
 
 class MeepSimulation(mp.Simulation):
@@ -1697,7 +1698,7 @@ class MeepSimulation(mp.Simulation):
                 "Can only provide one of time_units_fs and length_units_nm for proper unit handling."
             )
 
-        if time_units_fs is not None:    
+        if time_units_fs is not None:
             self.time_units_fs = time_units_fs
         elif length_units_nm is not None:
             # derive time_units_fs from length_units_nm and speed of light
@@ -1716,7 +1717,9 @@ class MeepSimulation(mp.Simulation):
             for idx in range(len(self.molecules)):
                 # use meep wrapper for this molecule
                 m = MoleculeMeepWrapper(
-                    time_units_fs=self.time_units_fs, dt=self.dt, molecule=self.molecules[idx]
+                    time_units_fs=self.time_units_fs,
+                    dt=self.dt,
+                    molecule=self.molecules[idx],
                 )
                 self.molecules[idx] = m
 
