@@ -7,7 +7,7 @@ Agent Skills for **MaxwellLink** provide a simple way to get started with this p
 Autonomous light-matter simulations with command line interfaces (CLIs)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Inspired by the recently developed `FermiLink agent framework <https://github.com/TaoELi/FermiLink>`, **MaxwellLink** now provides an elegant method for integrating with AI agents. All we need is to type in `mxl init` in a working directory:
+Inspired by the recently developed `FermiLink agent framework <https://github.com/TaoELi/FermiLink>`_, **MaxwellLink** now provides an elegant method for integrating with AI agents. All we need is to type in `mxl init` in a working directory:
 
 .. code-block:: bash
    
@@ -26,7 +26,7 @@ Then we can interact with **any local AI agent** (Claude Code, OpenAI Codex, Gem
 If your machine supports SLURM job management (such as HPCs), run the following command to set up the HPC environment, so the agent can automatically use the correct SLURM environments for large-scale HPC simulations.
 
 .. code-block:: bash
-   
+
    mxl hpc
 
 Autonomous light-matter simulations on local machines
