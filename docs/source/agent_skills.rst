@@ -20,11 +20,13 @@ Then we can interact with **any local AI agent** (Claude Code, OpenAI Codex, Gem
 `mxl init` will set up the package knowledge base (source code tree + agent skills layer) in your working directory for agent reasoning. After the simulation, we can simply clean up the package knowledge base by:
 
 .. code-block:: bash
+
    mxl clean
 
 If your machine supports SLURM job management (such as HPCs), run the following command to set up the HPC environment, so the agent can automatically use the correct SLURM environments for large-scale HPC simulations.
 
 .. code-block:: bash
+   
    mxl hpc
 
 Autonomous light-matter simulations on local machines
