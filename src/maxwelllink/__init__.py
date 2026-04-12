@@ -12,6 +12,7 @@ __all__ = [
     "update_molecules_no_mpi",
     "update_molecules_no_socket",
     "SocketHub",
+    "SocketHubUCX",
     "get_available_host_port",
     "mxl_driver_main",
     "launch_driver",
@@ -109,8 +110,8 @@ def __getattr__(name):
 
         return locals()[name]
 
-    if name in {"SocketHub", "get_available_host_port"}:
-        from .sockets import SocketHub, get_available_host_port
+    if name in {"SocketHub", "SocketHubUCX", "get_available_host_port"}:
+        from .sockets import SocketHub, SocketHubUCX, get_available_host_port
 
         return locals()[name]
     if name in {"mxl_driver_main", "launch_driver", "terminate_driver"}:

@@ -5,12 +5,7 @@
 # See AGENTS.md and README.md for details.                                             #
 # --------------------------------------------------------------------------------------#
 
-"""This file is a python version of mxl_install_lammps.sh
-which is used to install a custom LAMMPS binary with fix_maxwelllink
-support. It downloads a specific LAMMPS release tarball from GitHub,
-adds the necessary source files, builds it with CMake, and places
-the resulting binary in the same directory as other mxl scripts.
-"""
+"""Build and install a custom LAMMPS binary with MaxwellLink support."""
 
 import os, shutil, subprocess, sys, sysconfig, tarfile
 from pathlib import Path
@@ -36,9 +31,9 @@ def _repo_root_from_here() -> Path:
     here = Path(__file__).resolve()
     for p in [here] + list(here.parents):
         if (p / "pyproject.toml").exists():
-            # pyproject is in repo root or in src; if it's in repo root, use it;
-            # if it's in src/, go one level up
-            return p if (p / "src").exists() is False else p.parent
+            if (p / "src" / "maxwelllink").exists():
+                return p
+            return p.parent
     # Fallback: 4 levels up from .../src/maxwelllink/mxl_drivers/lammps/install.py
     return Path(__file__).resolve().parents[4]
 
@@ -54,6 +49,57 @@ def _scripts_dir() -> Path:
 def _run(cmd):
     print("[mxl] $", " ".join(map(str, cmd)))
     subprocess.run(cmd, check=True)
+
+
+def _pkg_config_value(package: str, flag: str) -> str:
+    try:
+        return subprocess.check_output(["pkg-config", flag, package], text=True).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return ""
+
+
+def _fix_files_for_transport(transport: str):
+    if transport == "socket":
+        return ("fix_maxwelllink.cpp", "fix_maxwelllink.h"), "lmp_mxl"
+    if transport == "ucx":
+        return ("fix_maxwelllink_ucx.cpp", "fix_maxwelllink_ucx.h"), "lmp_mxl_ucx"
+    if transport == "both":
+        return (
+            "fix_maxwelllink.cpp",
+            "fix_maxwelllink.h",
+            "fix_maxwelllink_ucx.cpp",
+            "fix_maxwelllink_ucx.h",
+        ), "lmp_mxl_ucx"
+    raise ValueError(f"Unsupported LAMMPS transport: {transport}")
+
+
+def _ucxx_cmake_args() -> list[str]:
+    cflags = os.environ.get("MXL_LAMMPS_UCXX_CFLAGS", "").strip()
+    ldflags = os.environ.get("MXL_LAMMPS_UCXX_LDFLAGS", "").strip()
+
+    if not cflags and not ldflags:
+        pkg_name = os.environ.get("MXL_LAMMPS_UCXX_PKGCONFIG", "ucxx")
+        cflags = _pkg_config_value(pkg_name, "--cflags")
+        ldflags = _pkg_config_value(pkg_name, "--libs")
+
+    if not cflags and not ldflags:
+        raise RuntimeError(
+            "UCX transport requested, but UCXX compile/link flags were not found. "
+            "Install the UCXX C++ library and pkg-config metadata, or set "
+            "`MXL_LAMMPS_UCXX_CFLAGS` and `MXL_LAMMPS_UCXX_LDFLAGS`."
+        )
+
+    args = []
+    conda_prefix = os.environ.get("CONDA_PREFIX", "").strip()
+    if conda_prefix:
+        args.append(f"-DCMAKE_PREFIX_PATH={conda_prefix}")
+    if cflags:
+        args.append(f"-DCMAKE_CXX_FLAGS={cflags}")
+    if ldflags:
+        args.append(f"-DCMAKE_EXE_LINKER_FLAGS={ldflags}")
+        args.append(f"-DCMAKE_SHARED_LINKER_FLAGS={ldflags}")
+        args.append(f"-DCMAKE_MODULE_LINKER_FLAGS={ldflags}")
+    return args
 
 
 def _download_tarball(url: str, out: Path):
@@ -90,6 +136,23 @@ def mxl_lammps_main(argv=None):
         "--clean",
         action="store_true",
         help="Delete any previous LAMMPS source/build before building",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=("socket", "ucx", "both"),
+        default=os.environ.get("MXL_LAMMPS_TRANSPORT", "socket"),
+        help="Transport backend to compile into the LAMMPS binary.",
+    )
+    parser.add_argument(
+        "--cmake-arg",
+        action="append",
+        default=[],
+        help="Extra argument to append to the CMake configure command. Repeatable.",
+    )
+    parser.add_argument(
+        "--binary-name",
+        default="",
+        help="Override the installed LAMMPS binary name.",
     )
     args = parser.parse_args(argv)
 
@@ -130,15 +193,22 @@ def mxl_lammps_main(argv=None):
     else:
         print(f"[mxl] Reusing existing source tree: {src_root}")
 
+    fix_files, default_binary_name = _fix_files_for_transport(args.transport)
+
     # Copy our fix files
     here = Path(__file__).parent
     (src_root / "src" / "MISC").mkdir(parents=True, exist_ok=True)
-    for fn in ("fix_maxwelllink.cpp", "fix_maxwelllink.h"):
+    misc_dir = src_root / "src" / "MISC"
+    for stale in misc_dir.glob("fix_maxwelllink*.cpp"):
+        stale.unlink()
+    for stale in misc_dir.glob("fix_maxwelllink*.h"):
+        stale.unlink()
+    for fn in fix_files:
         src = here / fn
         if not src.exists():
             print(f"[mxl] ERROR: missing {src}", file=sys.stderr)
             return 4
-        shutil.copy2(src, src_root / "src" / "MISC" / fn)
+        shutil.copy2(src, misc_dir / fn)
 
     # Configure & build
     cmake_build_dir = src_root / "build"
@@ -170,6 +240,13 @@ def mxl_lammps_main(argv=None):
         "-D",
         "WITH_JPEG=off",
     ]
+    if args.transport in {"ucx", "both"}:
+        try:
+            cmake_cfg.extend(_ucxx_cmake_args())
+        except RuntimeError as exc:
+            print(f"[mxl] ERROR: {exc}", file=sys.stderr)
+            return 6
+    cmake_cfg.extend(args.cmake_arg)
     if sys.platform == "darwin" and platform.machine() == "arm64":
         cmake_cfg += ["-D", "CMAKE_OSX_ARCHITECTURES=arm64"]
 
@@ -186,7 +263,10 @@ def mxl_lammps_main(argv=None):
     src_bin = candidates[0]
 
     scripts_dir = _scripts_dir()
-    dest_bin = scripts_dir / ("lmp_mxl.exe" if os.name == "nt" else "lmp_mxl")
+    binary_name = args.binary_name.strip() or default_binary_name
+    if os.name == "nt" and not binary_name.endswith(".exe"):
+        binary_name += ".exe"
+    dest_bin = scripts_dir / binary_name
     dest_bin.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_bin, dest_bin)
     os.chmod(dest_bin, 0o755)

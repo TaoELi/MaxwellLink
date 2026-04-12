@@ -51,6 +51,9 @@ keywords = [
 "mxl_driver.py" = "maxwelllink.mxl_drivers.python.mxl_driver:mxl_driver_main"
 # a simplified version of mxl_driver.py 
 "mxl_driver" = "maxwelllink.mxl_drivers.python.mxl_driver:mxl_driver_main"
+# an opt-in UCX transport driver entrypoint
+"mxl_driver_ucx.py" = "maxwelllink.mxl_drivers.python.mxl_driver_ucx:mxl_driver_ucx_main"
+"mxl_driver_ucx" = "maxwelllink.mxl_drivers.python.mxl_driver_ucx:mxl_driver_ucx_main"
 # a simple installation script for modified LAMMPS with MaxwellLink support
 "mxl_install_lammps" = "maxwelllink.mxl_drivers.lammps.install:mxl_lammps_main"
 "mxl" = "maxwelllink.cli.mxl:main"
@@ -67,9 +70,19 @@ include = ["maxwelllink*", "mxl_drivers*"]
 
 [tool.setuptools.package-data]
 "maxwelllink" = ["_workspace_payload/*", "_workspace_payload/**/*"]
-"maxwelllink.mxl_drivers.lammps" = ["fix_maxwelllink.*", "README.md"]
+"maxwelllink.mxl_drivers.lammps" = ["fix_maxwelllink*.*", "README.md"]
 
 [project.optional-dependencies]
+# Optional UCX transport support. MaxwellLink imports UCX bindings lazily when
+# SocketHubUCX is requested, because the upstream pip packages are CUDA- and
+# platform-specific rather than a single universal `ucxx` wheel.
+ucx = []
+ucx-cu12 = [
+  "ucxx-cu12>=0.48; platform_system == 'Linux'",
+]
+ucx-cu13 = [
+  "ucxx-cu13>=0.48; platform_system == 'Linux'",
+]
 dev = [
   "pytest>=7",
   "black>=24.3",
