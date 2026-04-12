@@ -180,6 +180,7 @@ async def run_driver_ucx_async(
     """
 
     del timeout
+    _scrub_inherited_transport_env()
     ucx = ucx_module or load_ucx_module()
     init_ucx_module(ucx, ucx_options)
 
@@ -342,13 +343,29 @@ def mxl_driver_ucx_main():
 
 def _clean_env_for_ucx_subprocess():
     """
-    Return a copy of the environment with MPI launcher variables removed.
+    Return a copy of the environment with inherited launcher variables removed.
 
-    Unlike the socket launcher helper, this intentionally preserves ``UCX_*``
-    and ``FI_*`` variables so transport tuning survives into the driver process.
+    The UCX driver is usually spawned as a plain local subprocess rather than
+    under an MPI launcher. Inheriting the parent shell's ``MPI_*``/``OMPI_*``
+    metadata or ``UCX_*``/``FI_*`` transport pins can force UCX onto a device
+    that is not present on the current host, which breaks endpoint creation
+    before the MaxwellLink protocol starts.
+
+    Set ``MXL_UCX_KEEP_TRANSPORT_ENV=1`` to preserve ``UCX_*`` and ``FI_*``
+    variables for advanced tuning. The older
+    ``MXL_DRIVER_UCX_KEEP_TRANSPORT_ENV=1`` alias is also recognized.
     """
 
     env = os.environ.copy()
+    keep_transport_env = (
+        env.get(
+            "MXL_UCX_KEEP_TRANSPORT_ENV",
+            env.get("MXL_DRIVER_UCX_KEEP_TRANSPORT_ENV", ""),
+        )
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
     prefixes = (
         "PMI_",
         "PMIX_",
@@ -360,6 +377,8 @@ def _clean_env_for_ucx_subprocess():
         "SLURM_",
         "PMI",
     )
+    if not keep_transport_env:
+        prefixes = prefixes + ("FI_", "UCX_")
     for k in list(env.keys()):
         for p in prefixes:
             if k.startswith(p):
@@ -368,6 +387,20 @@ def _clean_env_for_ucx_subprocess():
     for k in ("PMI_FD", "PMI_PORT", "PMI_ID", "PMI_RANK", "PMI_SIZE"):
         env.pop(k, None)
     return env
+
+
+def _scrub_inherited_transport_env() -> None:
+    """
+    Remove inherited launcher/transport variables from the current process.
+
+    This mirrors :func:`_clean_env_for_ucx_subprocess` so direct invocations of
+    ``mxl_driver_ucx`` behave like the launcher helper before UCX initializes.
+    """
+
+    cleaned_env = _clean_env_for_ucx_subprocess()
+    for key in list(os.environ.keys()):
+        if key not in cleaned_env:
+            os.environ.pop(key, None)
 
 
 def launch_driver_ucx(

@@ -16,7 +16,9 @@ internally using UCX active messages.
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
+import os
 import socket
 import threading
 import time
@@ -43,6 +45,34 @@ from .ucx_protocol import (
 
 _INBOX_EMPTY = object()
 _INBOX_EOF = object()
+
+
+def _scrub_inherited_transport_env() -> None:
+    """
+    Remove inherited transport pinning before initializing a local UCX listener.
+
+    When MaxwellLink is launched from an HPC login shell, environment variables
+    such as ``UCX_NET_DEVICES`` may point at a NIC that does not exist on the
+    current host. That is valid for a batch node but breaks local loopback UCX
+    listeners. Set ``MXL_UCX_KEEP_TRANSPORT_ENV=1`` to preserve the inherited
+    UCX/FI settings.
+    """
+
+    keep_transport_env = (
+        os.environ.get(
+            "MXL_UCX_KEEP_TRANSPORT_ENV",
+            os.environ.get("MXL_DRIVER_UCX_KEEP_TRANSPORT_ENV", ""),
+        )
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+    if keep_transport_env:
+        return
+
+    for key in list(os.environ.keys()):
+        if key.startswith(("UCX_", "FI_")):
+            os.environ.pop(key, None)
 
 
 @dataclass
@@ -76,7 +106,7 @@ class _UCXClientState:
         Optional per-client metadata.
     """
 
-    endpoint: object
+    endpoint: Optional[object]
     address: str
     molecule_id: int
     inbox: asyncio.Queue
@@ -153,8 +183,10 @@ class SocketHubUCX:
         self._loop = None
         self._loop_thread = None
         self._loop_ready = threading.Event()
+        self._serve_tasks: set[asyncio.Task] = set()
 
         if am_master():
+            _scrub_inherited_transport_env()
             self._ucx = self._ucx or load_ucx_module()
             self._loop = asyncio.new_event_loop()
             self._loop_thread = threading.Thread(
@@ -240,7 +272,7 @@ class SocketHubUCX:
         """
 
         init_ucx_module(self._ucx, self._ucx_options)
-        callback = self._serve_client
+        callback = self._serve_client_entry
         try:
             self._listener = self._ucx.create_listener(callback, self.port)
         except TypeError:
@@ -313,6 +345,9 @@ class SocketHubUCX:
         endpoint : object
             UCX endpoint object.
         """
+
+        if endpoint is None:
+            return
 
         for method_name in ("close", "abort"):
             method = getattr(endpoint, method_name, None)
@@ -440,7 +475,28 @@ class SocketHubUCX:
             st.inbox.put_nowait(_INBOX_EOF)
         except Exception:
             pass
-        await self._close_endpoint(st.endpoint)
+        endpoint = st.endpoint
+        st.endpoint = None
+        await self._close_endpoint(endpoint)
+
+    async def _serve_client_entry(self, endpoint):
+        """
+        Track one accepted-client task until it exits.
+
+        Parameters
+        ----------
+        endpoint : object
+            Accepted UCX endpoint.
+        """
+
+        task = asyncio.current_task()
+        if task is not None:
+            self._serve_tasks.add(task)
+        try:
+            await self._serve_client(endpoint)
+        finally:
+            if task is not None:
+                self._serve_tasks.discard(task)
 
     async def _serve_client(self, endpoint):
         """
@@ -923,8 +979,10 @@ class SocketHubUCX:
 
         self._stop = True
 
-        if self._listener is not None:
-            close = getattr(self._listener, "close", None)
+        listener = self._listener
+        self._listener = None
+        if listener is not None:
+            close = getattr(listener, "close", None)
             if callable(close):
                 result = close()
                 if inspect.isawaitable(result):
@@ -933,7 +991,26 @@ class SocketHubUCX:
         await self._graceful_shutdown_async(wait=max(2.0, 10.0 * self.latency))
 
         for st in self._unique_client_states():
-            await self._close_endpoint(st.endpoint)
+            endpoint = st.endpoint
+            st.endpoint = None
+            await self._close_endpoint(endpoint)
+
+        pending_tasks = [
+            task
+            for task in list(self._serve_tasks)
+            if task is not asyncio.current_task()
+        ]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+        with self._lock:
+            self.clients.clear()
+            self.addrmap.clear()
+            self._inflight = None
+            for molid in list(self.bound.keys()):
+                self.bound[molid] = None
+
+        gc.collect()
 
         reset_ucx_module(self._ucx)
 

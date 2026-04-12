@@ -2,10 +2,15 @@ import asyncio
 import inspect
 import json
 import queue
+import sys
 import threading
+from pathlib import Path
 
 import numpy as np
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from maxwelllink.mxl_drivers.python.mxl_driver_ucx import run_driver_ucx_async
 from maxwelllink.mxl_drivers.python.models.dummy_model import DummyModel
@@ -302,3 +307,49 @@ def test_sockethub_ucx_reconnect_recovers_frozen_barrier():
     finally:
         hub.stop()
         replacement_thread.join_and_raise()
+
+
+def test_sockethub_ucx_stop_releases_transport_refs(monkeypatch):
+    fake_ucx = FakeUCXModule()
+    hub = SocketHubUCX(
+        host="127.0.0.1",
+        port=0,
+        timeout=2.0,
+        latency=1e-4,
+        _ucx_module=fake_ucx,
+    )
+
+    driver_thread = _AsyncThread(
+        lambda: run_driver_ucx_async(
+            address=hub.host,
+            port=hub.port,
+            driver=EchoModel(scale=1.0, tag="cleanup"),
+            ucx_module=fake_ucx,
+        )
+    )
+
+    try:
+        mid = hub.register_molecule_return_id()
+        init_payload = {mid: {"molecule_id": mid, "dt_au": 0.25}}
+
+        driver_thread.start()
+        assert hub.wait_until_bound(init_payload, require_init=True, timeout=2.0)
+
+        states = hub._unique_client_states()
+        assert states
+        assert any(st.endpoint is not None for st in states)
+
+        def _assert_reset(_ucx):
+            assert hub._listener is None
+            assert hub.clients == {}
+            assert hub.addrmap == {}
+            assert hub._inflight is None
+            assert not hub._serve_tasks
+            assert all(st.endpoint is None for st in states)
+            assert all(st is None for st in hub.bound.values())
+
+        monkeypatch.setattr("maxwelllink.sockets.ucx_hub.reset_ucx_module", _assert_reset)
+
+        hub.stop()
+    finally:
+        driver_thread.join_and_raise()
