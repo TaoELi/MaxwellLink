@@ -29,6 +29,8 @@ def gaussian_pulse(
     amplitude_au: float = 1.0,
     t0_au: float = 0.0,
     sigma_au: float = 10.0,
+    t_start_au: float = 0.0,
+    t_end_au: float = 1e10,
 ) -> Callable[[float], float]:
     r"""
     Return a Gaussian pulse drive.
@@ -45,6 +47,10 @@ def gaussian_pulse(
         Temporal center of the pulse in atomic units.
     sigma_au : float, default: 10.0
         Temporal sigma in atomic units.
+    t_start_au : float, default: 0.0
+        Time before which the pulse is zero (atomic units).
+    t_end_au : float, default: 1e10
+        Time after which the pulse is zero (atomic units).
 
     Returns
     -------
@@ -54,8 +60,12 @@ def gaussian_pulse(
     amplitude = float(amplitude_au)
     sigma = float(sigma_au)
     t0 = float(t0_au)
+    t_start = float(t_start_au)
+    t_end = float(t_end_au)
 
     def _drive(t_au: float) -> float:
+        if t_au < t_start or t_au > t_end:
+            return 0.0
         x = (float(t_au) - t0) / sigma
         return amplitude * math.exp(-0.5 * x * x)
 
@@ -68,6 +78,8 @@ def gaussian_enveloped_cosine(
     sigma_au: float = 10.0,
     omega_au: float = 0.1,
     phase_rad: float = 0.0,
+    t_start_au: float = 0.0,
+    t_end_au: float = 1e10,
 ) -> Callable[[float], float]:
     r"""
     Return a Gaussian-enveloped cosine drive.
@@ -89,6 +101,10 @@ def gaussian_enveloped_cosine(
         Angular frequency of the cosine wave in atomic units.
     phase_rad : float, default: 0.0
         Phase of the cosine wave (radians).
+    t_start_au : float, default: 0.0
+        Time before which the pulse is zero (atomic units).
+    t_end_au : float, default: 1e10
+        Time after which the pulse is zero (atomic units).
 
     Returns
     -------
@@ -101,8 +117,12 @@ def gaussian_enveloped_cosine(
     t0 = float(t0_au)
     omega = float(omega_au)
     phase = float(phase_rad)
+    t_start = float(t_start_au)
+    t_end = float(t_end_au)
 
     def _drive(t_au: float) -> float:
+        if t_au < t_start or t_au > t_end:
+            return 0.0
         t = float(t_au) - t0
         envelope = math.exp(-0.5 * (t / sigma) ** 2)
         return amplitude * envelope * math.cos(omega * t + phase)
@@ -114,6 +134,8 @@ def cosine_drive(
     amplitude_au: float = 1.0,
     omega_au: float = 0.1,
     phase_rad: float = 0.0,
+    t_start_au: float = 0.0,
+    t_end_au: float = 1e10,
 ) -> Callable[[float], float]:
     r"""
     Return a continuous cosine drive.
@@ -130,7 +152,10 @@ def cosine_drive(
         Angular frequency in atomic units.
     phase_rad : float, default: 0.0
         Phase offset in radians.
-
+    t_start_au : float, default: 0.0
+        Time before which the drive is zero (atomic units).
+    t_end_au : float, default: 1e10
+        Time after which the drive is zero (atomic units).
     Returns
     -------
     callable
@@ -140,8 +165,12 @@ def cosine_drive(
     amplitude = float(amplitude_au)
     omega = float(omega_au)
     phase = float(phase_rad)
+    t_start = float(t_start_au)
+    t_end = float(t_end_au)
 
     def _drive(t_au: float) -> float:
+        if t_au < t_start or t_au > t_end:
+            return 0.0
         return amplitude * math.cos(omega * float(t_au) + phase)
 
     return _drive
