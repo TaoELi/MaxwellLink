@@ -297,6 +297,8 @@ class MultipleModeSimulation(DummyEMSimulation):
         self.ftilde_k = ftilde_k
         self.varepsilon_k = self.coupling_strength * self.omega_k / np.min(self.omega_k)
 
+        self.x_grid_1d = x_grid_1d
+        self.y_grid_1d = y_grid_1d
         abc_x, abc_y = None, None
         self.abc_cutoff = float(abc_cutoff)
         if self.abc_cutoff != 0.00 : 
@@ -341,8 +343,8 @@ class MultipleModeSimulation(DummyEMSimulation):
             self.abc_x = abc_x
             self.abc_y = abc_y
 
-        print(f"Applying Absorbing Boundary Condition : {False if (abc_x is None) and (abc_y is None) else True}")
-
+        self.if_abc = (abc_x is not None) and (abc_y is not None)
+        print(f"Applying Absorbing Boundary Condition : {self.if_abc}, cutoff: {self.abc_cutoff}")
         self.time = 0.0
 
         if qc_initial is None:
@@ -620,6 +622,10 @@ class MultipleModeSimulation(DummyEMSimulation):
 
         # 1. update momentum to half step
         pc_half = self.pc + 0.5 * self.dt * self.acceleration
+        # apply absorbing boundary condition to the cavity field if enabled
+        if self.if_abc: 
+            pc_half[:,0] = self.pc[:,0] @ self.abc_x
+            pc_half[:,1] = self.pc[:,1] @ self.abc_y
 
         # 2. update position to full step
         qc_prev = self.qc.copy()
@@ -655,6 +661,11 @@ class MultipleModeSimulation(DummyEMSimulation):
         self.pc = pc_half + 0.5 * self.dt * acceleration
 
         self.pc *= np.exp(-self.damping * self.dt)
+
+        # apply absorbing boundary condition to the cavity field if enabled
+        if self.if_abc: 
+            self.pc[:,0] = self.pc[:,0] @ self.abc_x
+            self.pc[:,1] = self.pc[:,1] @ self.abc_y
 
         # 4. update acceleration and time
         self.time += self.dt
