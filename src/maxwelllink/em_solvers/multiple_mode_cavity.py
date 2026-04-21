@@ -385,6 +385,7 @@ class MultipleModeSimulation(DummyEMSimulation):
             self.drive_history = []
             self.molecule_response_history = []
             self.energy_history = []
+            self.effective_efield_history = []
 
     # ------------------------------------------------------------------
     # Core helpers
@@ -678,6 +679,7 @@ class MultipleModeSimulation(DummyEMSimulation):
             self.drive_history.append(self._evaluate_drive(self.time))
             self.molecule_response_history.append(self.dmudt.copy())
             self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
+            self.effective_efield_history.append(self._calc_effective_efield(self.qc, self.dipole))
         
     # ------------------------------------------------------------------
     # Public API
