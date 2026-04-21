@@ -27,7 +27,7 @@ __all__ = [
     "meep_units_helper",
     "Molecule",
     "SingleModeSimulation",
-    "MultipleModeSimulation",
+    "MultiModeSimulation",
     "Vector3",
     "LaserDrivenSimulation",
 ]
@@ -101,10 +101,10 @@ def __getattr__(name):
     
         return locals()[name]   
     if name in {
-        "MultipleModeSimulation",
+        "MultiModeSimulation",
     }:
-        from .em_solvers.multiple_mode_cavity import (
-            MultipleModeSimulation,
+        from .em_solvers.multimode_cavity import (
+            MultiModeSimulation,
         )
 
         return locals()[name]

@@ -21,7 +21,7 @@ from ..units import FS_TO_AU
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
 
 
-class MultipleModeUnits(DummyEMUnits):
+class MultiModeUnits(DummyEMUnits):
     """
     EM units for multiple-mode cavity simulations (1:1 to atomic units).
     """
@@ -30,7 +30,7 @@ class MultipleModeUnits(DummyEMUnits):
         super().__init__()
 
 
-class MoleculeMultipleModeWrapper(MoleculeDummyWrapper):
+class MoleculeMultiModeWrapper(MoleculeDummyWrapper):
     """
     Wrapper that adapts a ``Molecule`` to MultipleModeSimulation, handling units, sources, and IO.
     """
@@ -97,7 +97,7 @@ class MoleculeMultipleModeWrapper(MoleculeDummyWrapper):
             self.additional_data_history.append(extra)
 
 
-class MultipleModeSimulation(DummyEMSimulation):
+class MultiModeSimulation(DummyEMSimulation):
     r"""
     Damped harmonic oscillator coupled to MaxwellLink molecules.
 
@@ -151,6 +151,8 @@ class MultipleModeSimulation(DummyEMSimulation):
         n_mode_x: int = 1,
         n_mode_y: int = 1,
         abc_cutoff: float = 0.0,
+        excited_grid_list: Optional[list] = None,
+        molecule_pulse_drive: Optional[Union[float, Callable[[float], float]]] = None,
     ):
         r"""
         Parameters
@@ -239,8 +241,8 @@ class MultipleModeSimulation(DummyEMSimulation):
             self.drive = lambda _t, c=const: c
 
         molecules = list(molecules or [])
-        self.wrappers: List[MoleculeMultipleModeWrapper] = [
-            MoleculeMultipleModeWrapper(molecule=m, dt_au=self.dt) for m in molecules
+        self.wrappers: List[MoleculeMultiModeWrapper] = [
+            MoleculeMultiModeWrapper(molecule=m, dt_au=self.dt) for m in molecules
         ]
         self.socket_wrappers = [w for w in self.wrappers if w.mode == "socket"]
         self.non_socket_wrappers = [w for w in self.wrappers if w.mode == "non-socket"]
@@ -346,6 +348,7 @@ class MultipleModeSimulation(DummyEMSimulation):
         self.if_abc = (abc_x is not None) and (abc_y is not None)
         print(f"Applying Absorbing Boundary Condition : {self.if_abc}, cutoff: {self.abc_cutoff}")
         self.time = 0.0
+        self.excited_list = excited_grid_list if excited_grid_list is not None else []
 
         if qc_initial is None:
             qc_initial = np.zeros((n_mode, 3), dtype=float)
