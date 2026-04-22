@@ -139,10 +139,6 @@ class MultiModeSimulation(DummyEMSimulation):
         pc_initial: Optional[list] = None,
         mu_initial: Optional[list] = None,
         dmudt_initial: Optional[list] = None,
-        record_history: bool = True,
-        record_to_disk: bool = False,
-        disk_address: Optional[str] = None,
-        max_steps: Optional[int] = None,
         include_dse: bool = True,
         molecule_half_step: bool = False,
         shift_dipole_baseline: bool = False,
@@ -185,15 +181,6 @@ class MultiModeSimulation(DummyEMSimulation):
             Initial total molecular dipole vector (a.u.).
         dmudt_initial : list, default: [0.0, 0.0, 0.0]
             Initial time derivative of the total molecular dipole vector (a.u.).
-        record_history : bool, default: True
-            Record time, field, velocity, drive, and molecular response histories.
-        record_to_disk : bool, default: False
-            Whether to save the history data to disk in HDF5 format. If False, the history data will be stored in memory.
-        disk_address : str, optional
-            File path for saving history data when ``record_to_disk`` is True.
-        max_steps : int, optional
-            Upper bound for the on-disk history length when ``record_to_disk`` is
-            True. If ``None``, the HDF5 datasets grow dynamically.
         include_dse : bool, default: True
             Include dipole self-energy term in the simulation.
         molecule_half_step : bool, default: True
@@ -324,8 +311,8 @@ class MultiModeSimulation(DummyEMSimulation):
         print("omega_k in cm-1", self.omega_k * 219474.63)
         
         # construct renormalized cavity mode function for each molecular grid point
-        n_mode = n_mode_x * n_mode_y * 1
-        ftilde_k = np.zeros((n_mode, self.n_grid, 3), dtype=float)
+        self.n_mode = n_mode_x * n_mode_y
+        ftilde_k = np.zeros((self.n_mode, self.n_grid, 3), dtype=float)
         for i in range(self.n_grid):
             x, y = x_grid_2d[i], y_grid_2d[i]
             ftilde_k[:, i, 0] = (2.0 * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y))
@@ -386,9 +373,9 @@ class MultiModeSimulation(DummyEMSimulation):
         self.excited_list = excited_grid_list if excited_grid_list is not None else []
 
         if qc_initial is None:
-            qc_initial = np.zeros((n_mode, 3), dtype=float)
+            qc_initial = np.zeros((self.n_mode, 3), dtype=float)
         if pc_initial is None:
-            pc_initial = np.zeros((n_mode, 3), dtype=float)
+            pc_initial = np.zeros((self.n_mode, 3), dtype=float)
         if mu_initial is None:
             mu_initial = np.zeros((self.n_grid, 3), dtype=float)
         if dmudt_initial is None:
@@ -400,7 +387,7 @@ class MultiModeSimulation(DummyEMSimulation):
         self.dipole_prev = self.dipole.copy()
         self.dmudt = dmudt_initial * self.axis
         self.dmudt_prev = self.dmudt.copy()
-        self.acceleration = np.zeros((n_mode, 3), dtype=float)
+        self.acceleration = np.zeros((self.n_mode, 3), dtype=float)
 
         self.include_dse = bool(include_dse)
         self.molecule_half_step = bool(molecule_half_step)
@@ -414,38 +401,6 @@ class MultiModeSimulation(DummyEMSimulation):
             print(
                 "[SingleModeCavity] Shifted dipole baseline by:", self.dipole_baseline
             )
-
-        self.record_history = bool(record_history)
-        self.record_to_disk = bool(record_to_disk)
-        self.disk_address = disk_address
-        if self.record_history:
-            if self.record_to_disk and self.disk_address is not None:
-                if max_steps is None:
-                    self.max_steps = None
-                else:
-                    self.max_steps = int(max_steps)
-                    if self.max_steps < 0:
-                        raise ValueError("max_steps must be non-negative or None.")
-                history_maxshape = None
-                if self.max_steps is not None and self.max_steps > 0:
-                    history_maxshape = self.max_steps + 1
-                self.h5file = h5py.File(self.disk_address, "w")
-                self.h5file.create_dataset("time", (0,), maxshape=(history_maxshape,), dtype=float)
-                self.h5file.create_dataset("qc", (0, n_mode, 3), maxshape=(history_maxshape, n_mode, 3), dtype=float)
-                self.h5file.create_dataset("pc", (0, n_mode, 3), maxshape=(history_maxshape, n_mode, 3), dtype=float)
-                self.h5file.create_dataset("drive", (0,), maxshape=(history_maxshape,), dtype=float)
-                self.h5file.create_dataset("energy", (0,), maxshape=(history_maxshape,), dtype=float)
-                self.h5file.create_dataset("effective_efield", (0, self.n_grid, 3), maxshape=(history_maxshape, self.n_grid, 3), dtype=float)
-            elif self.record_to_disk and self.disk_address is None:
-                raise ValueError("disk_address must be provided when record_to_disk is True.")
-            else:
-                self.time_history = []
-                self.qc_history = []
-                self.pc_history = []
-                self.drive_history = []
-                self.molecule_response_history = []
-                self.energy_history = []
-                self.effective_efield_history = []
 
     # ------------------------------------------------------------------
     # Core helpers
@@ -468,25 +423,6 @@ class MultiModeSimulation(DummyEMSimulation):
             return float(self.drive(time_au))
         except TypeError:
             return float(self.drive)
-
-    def _append_history_to_disk(self):
-        """
-        Append the current state to the on-disk HDF5 history datasets.
-        """
-
-        idx = self.h5file["time"].shape[0]
-        next_size = idx + 1
-
-        for name in ("time", "qc", "pc", "drive", "energy", "effective_efield"):
-            self.h5file[name].resize(next_size, axis=0)
-
-        effective_efield = self._calc_effective_efield(self.qc, self.dipole)
-        self.h5file["time"][idx] = self.time
-        self.h5file["qc"][idx, :, :] = self.qc
-        self.h5file["pc"][idx, :, :] = self.pc
-        self.h5file["drive"][idx] = self._evaluate_drive(self.time)
-        self.h5file["energy"][idx] = self._calc_energy(self.pc, self.qc, self.dipole)
-        self.h5file["effective_efield"][idx, :, :] = effective_efield
 
     def _ensure_socket_connections(self):
         if not self.socket_wrappers:
@@ -708,7 +644,7 @@ class MultiModeSimulation(DummyEMSimulation):
         # print("In Function, Total Dipole velocity (dmu/dt):", dmudt)
         return dipole, dmudt
 
-    def _step_dipole_gauge(self):
+    def _step_dipole_gauge(self, savedata: bool = True):
         """
         Advance the simulation by one time step under the dipole gauge.
         """
@@ -764,31 +700,59 @@ class MultiModeSimulation(DummyEMSimulation):
         self.time += self.dt
         self.acceleration = acceleration.copy()
 
-        if self.record_history:
-            if self.record_to_disk:
-                self._append_history_to_disk()
-            else:
-                self.time_history.append(self.time)
-                self.qc_history.append(self.qc.copy())
-                self.pc_history.append(self.pc.copy())
-                self.drive_history.append(self._evaluate_drive(self.time))
-                self.molecule_response_history.append(self.dmudt.copy())
-                self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
-                self.effective_efield_history.append(self._calc_effective_efield(self.qc, self.dipole))
+        if savedata:
+            if self.record_history:
+                if self.record_to_disk:
+                    self._append_history_to_disk()
+                else:
+                    self.time_history.append(self.time)
+                    self.qc_history.append(self.qc.copy())
+                    self.pc_history.append(self.pc.copy())
+                    self.drive_history.append(self._evaluate_drive(self.time))
+                    self.molecule_response_history.append(self.dmudt.copy())
+                    self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
+                    self.effective_efield_history.append(self._calc_effective_efield(self.qc, self.dipole))
         
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def step(self):
+    def step(self, savedata: bool = True):
         """
         Advance the simulation by one time step.
         """
         if self.gauge == "dipole":
-            self._step_dipole_gauge()
+            self._step_dipole_gauge(savedata=savedata)
         else:
             raise ValueError("gauge must be either 'dipole' or 'velocity'.")
 
-    def run(self, until: Optional[float] = None, steps: Optional[int] = None):
+    def _append_history_to_disk(self):
+        """
+        Append the current state to the on-disk HDF5 history datasets.
+        """
+
+        idx = self.h5file["time"].shape[0]
+        next_size = idx + 1
+
+        for name in ("time", "qc", "pc", "drive", "energy", "effective_efield"):
+            self.h5file[name].resize(next_size, axis=0)
+
+        effective_efield = self._calc_effective_efield(self.qc, self.dipole)
+        self.h5file["time"][idx] = self.time
+        self.h5file["qc"][idx, :, :] = self.qc
+        self.h5file["pc"][idx, :, :] = self.pc
+        self.h5file["drive"][idx] = self._evaluate_drive(self.time)
+        self.h5file["energy"][idx] = self._calc_energy(self.pc, self.qc, self.dipole)
+        self.h5file["effective_efield"][idx, :, :] = effective_efield
+
+    def run(self, 
+            until: Optional[float] = None, 
+            steps: Optional[int] = None,
+            record_history: bool = True,
+            record_to_disk: bool = False,
+            disk_address: Optional[str] = None,
+            max_steps: Optional[int] = None,
+            record_every_steps: int = 0,
+            ):
         """
         Run the simulation for a specified duration or number of steps.
 
@@ -797,8 +761,51 @@ class MultiModeSimulation(DummyEMSimulation):
         until : float, optional
             Total simulation time (a.u.). ``steps`` must be ``None``.
         steps : int, optional
-            Number of steps to execute. ``until`` must be ``None``.
+            Number of steps to execute. ``until`` must be ``None``,
+        record_history : bool, default: True
+            Record time, field, velocity, drive, and molecular response histories.
+        record_to_disk : bool, default: False
+            Whether to save the history data to disk in HDF5 format. If False, the history data will be stored in memory.
+        disk_address : str, optional
+            File path for saving history data when ``record_to_disk`` is True.
+        max_steps : int, optional
+            Upper bound for the on-disk history length when ``record_to_disk`` is
+            True. If ``None``, the HDF5 datasets grow dynamically.
+        record_every_steps : int, default: 0
+            Number of steps to record data every ``record_every_steps`` steps.
         """
+
+        self.record_history = bool(record_history)
+        self.record_to_disk = bool(record_to_disk)
+        self.disk_address = disk_address
+        if self.record_history:
+            if self.record_to_disk and self.disk_address is not None:
+                if max_steps is None:
+                    self.max_steps = None
+                else:
+                    self.max_steps = int(max_steps)
+                    if self.max_steps < 0:
+                        raise ValueError("max_steps must be non-negative or None.")
+                history_maxshape = None
+                if self.max_steps is not None and self.max_steps > 0:
+                    history_maxshape = self.max_steps + 1
+                self.h5file = h5py.File(self.disk_address, "w")
+                self.h5file.create_dataset("time", (0,), maxshape=(history_maxshape,), dtype=float)
+                self.h5file.create_dataset("qc", (0, self.n_mode, 3), maxshape=(history_maxshape, self.n_mode, 3), dtype=float)
+                self.h5file.create_dataset("pc", (0, self.n_mode, 3), maxshape=(history_maxshape, self.n_mode, 3), dtype=float)
+                self.h5file.create_dataset("drive", (0,), maxshape=(history_maxshape,), dtype=float)
+                self.h5file.create_dataset("energy", (0,), maxshape=(history_maxshape,), dtype=float)
+                self.h5file.create_dataset("effective_efield", (0, self.n_grid, 3), maxshape=(history_maxshape, self.n_grid, 3), dtype=float)
+            elif self.record_to_disk and self.disk_address is None:
+                raise ValueError("disk_address must be provided when record_to_disk is True.")
+            else:
+                self.time_history = []
+                self.qc_history = []
+                self.pc_history = []
+                self.drive_history = []
+                self.molecule_response_history = []
+                self.energy_history = []
+                self.effective_efield_history = []
 
         if (until is None) == (steps is None):
             raise ValueError("Specify exactly one of 'until' or 'steps'.")
@@ -808,10 +815,18 @@ class MultiModeSimulation(DummyEMSimulation):
                 return
             steps = int(np.ceil((until - self.time) / self.dt))
 
+        if record_every_steps < 0 or isinstance(record_every_steps, int) == False:
+            raise ValueError("record_every_steps must be a non-negative integer.")
+
         start_time = time.perf_counter()
         previous_time = start_time
         for idx in range(int(steps)):
-            self.step()
+
+            if record_every_steps >= 2:
+                if idx % record_every_steps == 0 : self.step(savedata=True)
+                else : self.step(savedata=False)
+            else : self.step(savedata=False)
+
             if (idx + 1) % 1000 == 0:
 
                 current_time = time.perf_counter()
