@@ -1,8 +1,8 @@
 """
-Multiple-mode cavity electrodynamics for MaxwellLink.
+Multimode cavity electrodynamics for MaxwellLink.
 
 This module defines a lightweight cavity simulator that treats the EM field as
-one damped harmonic oscillator coupled to MaxwellLink molecules. The simulation
+multiple damped harmonic oscillators coupled to MaxwellLink molecules. The simulation
 runs entirely in atomic units and can operate with both socket-connected and
 embedded (non-socket) molecular drivers.
 """
@@ -23,7 +23,7 @@ from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
 
 class MultiModeUnits(DummyEMUnits):
     """
-    EM units for multiple-mode cavity simulations (1:1 to atomic units).
+    EM units for multimode cavity simulations (1:1 to atomic units).
     """
 
     def __init__(self):
@@ -32,12 +32,12 @@ class MultiModeUnits(DummyEMUnits):
 
 class MoleculeMultiModeWrapper(MoleculeDummyWrapper):
     """
-    Wrapper that adapts a ``Molecule`` to MultipleModeSimulation, handling units, sources, and IO.
+    Wrapper that adapts a ``Molecule`` to MultiModeSimulation, handling units, sources, and IO.
     """
 
     def __init__(self, molecule: Molecule, dt_au: float):
         """
-        Initialize the MultipleMode molecule wrapper.
+        Initialize the MultiMode molecule wrapper.
 
         Parameters
         ----------
@@ -99,7 +99,7 @@ class MoleculeMultiModeWrapper(MoleculeDummyWrapper):
 
 class MultiModeSimulation(DummyEMSimulation):
     r"""
-    Damped harmonic oscillator coupled to MaxwellLink molecules.
+    Damped harmonic oscillators coupled to MaxwellLink molecules.
 
     Under the dipole gauge, the total light-matter Hamiltonian is
 
@@ -117,10 +117,9 @@ class MultiModeSimulation(DummyEMSimulation):
 
     .. math::
 
-       E(t) = -\sum_{k\lambda} \varepsilon_{k\lambda} q_{k\lambda, \rm c}(t) - \frac{\varepsilon_{k\lambda}^2}{\omega_{k\lambda, \rm c}^2} \sum_i \mu_i(t) \cdot f_{k\lambda}(r_i),
+       E(t) = -\sum_{k\lambda} (\varepsilon_{k\lambda} q_{k\lambda, \rm c}(t) - \frac{\varepsilon_{k\lambda}^2}{\omega_{k\lambda, \rm c}^2} \sum_i \mu_i(t) \cdot f_{k\lambda}(r_i))\cdot f_{k\lambda}(r_i),
 
-    where :math:`\varepsilon_{k\lambda}` is ``coupling_strength`` and the sum runs over the selected
-    molecular axis of all molecules. The second term in the electric field accounts for the dipole self-energy term if enabled.
+    where :math:`\varepsilon_{k\lambda}` is effective coupling strength for different photon modes, :math:`f_{k\lambda}(r_i)` is the cavity mode function evaluated at the position of the r_i.
 
     All quantities are in atomic units.
     """
@@ -207,6 +206,12 @@ class MultiModeSimulation(DummyEMSimulation):
             Number of cavity modes along y-axis.
         abc_cutoff : float, default: 0.0
             Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If 0.0, no absorbing boundary condition is applied. If > 0.0, the grid points within the cutoff distance from the boundaries will be smoothly damped to suppress unphysical reflections of the EM field at the boundaries.
+        excited_grid_list : list, optional
+            List of grid point indices that are excited by the molecule pulse. The excitation is applied by adding the molecule pulse drive to the effective electric field at these grid points.
+        molecule_pulse_drive : float or callable, optional
+            Constant molecule pulse drive or function ``molecule_pulse_drive(t_au)`` that determines the strength of the molecule pulse applied to the excited grid points.
+        molecule_pulse_axis : str, default: "y"
+            pulse axis for the molecule pulse.
         """
 
         super().__init__(hub=hub, molecules=molecules)
@@ -596,11 +601,17 @@ class MultiModeSimulation(DummyEMSimulation):
             Sum of molecular dipole moment along the coupling axis.
         """
         # Non-socket molecules
-        #for wrapper in self.non_socket_wrappers:
-        #    wrapper.propagate(efield_vec)
-        #    amp = wrapper.calc_amp_vector() * wrapper.rescaling_factor
-        #    wrapper.last_amp = amp
-        #    wrapper.append_additional_data(time_au=self.time)
+        for wrapper in self.non_socket_wrappers:
+            if self.excited_list is not [] :
+                efield_vec_excited = np.zeros_like(efield_vec)
+                if wrapper.molecule_id in self.excited_list:
+                    efield_vec_excited[wrapper.molecule_id, :] = self.molecule_pulse(self.time) * self.pulse_axis
+                efield_vec += efield_vec_excited
+
+            wrapper.propagate(efield_vec[wrapper.molecule_id,:])
+            amp = wrapper.calc_amp_vector() * wrapper.rescaling_factor
+            wrapper.last_amp = amp
+            wrapper.append_additional_data(time_au=self.time)
         
         # Socket molecules
         if self.socket_wrappers:
