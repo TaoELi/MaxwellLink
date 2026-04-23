@@ -93,10 +93,9 @@ class MoleculeMultiModeWrapper(MoleculeDummyWrapper):
         if extra:
             self.additional_data_history.append(extra)
 
-
-class MultiModeSimulation(DummyEMSimulation):
+class FabryPerotCavities():
     r"""
-    Damped harmonic oscillator coupled to MaxwellLink molecules.
+    Damped harmonic oscillators coupled to MaxwellLink molecules.
 
     Under the dipole gauge, the total light-matter Hamiltonian is
 
@@ -114,37 +113,26 @@ class MultiModeSimulation(DummyEMSimulation):
 
     .. math::
 
-       E(t) = -\sum_{k\lambda} \varepsilon_{k\lambda} q_{k\lambda, \rm c}(t) - \frac{\varepsilon_{k\lambda}^2}{\omega_{k\lambda, \rm c}^2} \sum_i \mu_i(t) \cdot f_{k\lambda}(r_i),
+       E(t) = -\sum_{k\lambda} (\varepsilon_{k\lambda} q_{k\lambda, \rm c}(t) - \frac{\varepsilon_{k\lambda}^2}{\omega_{k\lambda, \rm c}^2} \sum_i \mu_i(t) \cdot f_{k\lambda}(r_i))\cdot f_{k\lambda}(r_i),
 
-    where :math:`\varepsilon_{k\lambda}` is ``coupling_strength`` and the sum runs over the selected
-    molecular axis of all molecules. The second term in the electric field accounts for the dipole self-energy term if enabled.
+    where :math:`\varepsilon_{k\lambda}` is effective coupling strength for different photon modes, :math:`f_{k\lambda}(r_i)` is the cavity mode function evaluated at the position of the r_i.
 
     All quantities are in atomic units.
     """
 
     def __init__(
         self,
-        dt_au: float,
-        frequency_au: float,
-        damping_au: float,
-        molecules: Optional[Iterable[Molecule]] = None,
-        drive: Optional[Union[float, Callable[[float], float]]] = None,
+        frequency: float = None,
+        frequency_au: float = None,   
+        damping_au: float = 0.0,
         coupling_strength: float = 1.0,
         coupling_axis: str = "xy",
-        hub: Optional[SocketHub] = None,
-        qc_initial: Optional[list] = None,
-        pc_initial: Optional[list] = None,
-        mu_initial: Optional[list] = None,
-        dmudt_initial: Optional[list] = None,
-        record_history: bool = True,
-        include_dse: bool = True,
-        molecule_half_step: bool = False,
-        shift_dipole_baseline: bool = False,
-        gauge="dipole",
         x_grid_1d: Optional[list] = None,
         y_grid_1d: Optional[list] = None,
-        delta_omega_x_au: float = 0.0,
-        delta_omega_y_au: float = 0.0,
+        delta_omega_x: float = None,
+        delta_omega_x_au: float = None,
+        delta_omega_y: float = None,
+        delta_omega_y_au: float = None,
         n_mode_x: int = 1,
         n_mode_y: int = 1,
         abc_cutoff: float = 0.0,
@@ -155,47 +143,26 @@ class MultiModeSimulation(DummyEMSimulation):
         r"""
         Parameters
         ----------
-        dt_au : float
-            Simulation time step in atomic units.
+        frequency : float
+            Cavity angular frequency :math:`\omega_{\rm c}` (cm^-1).
         frequency_au : float
             Cavity angular frequency :math:`\omega_{\rm c}` (a.u.).
         damping_au : float
             Damping constant :math:`\kappa` (a.u.).
-        molecules : iterable of Molecule, optional
-            Molecules coupled to the cavity.
-        drive : float or callable, optional
-            Constant drive term or function ``drive(t_au)``.
         coupling_strength : float, default: 1.0
             Prefactor :math:`\varepsilon`.
         coupling_axis : str, default: "xy"
             Component(s) of the molecular dipole used for coupling.
-        hub : :class:`~maxwelllink.sockets.sockets.SocketHub`, optional
-            Socket hub shared by all socket-mode molecules.
-        qc_initial : list, default: [0.0, 0.0, 0.0]
-            Initial cavity field coordinate (a.u.).
-        pc_initial : list, default: [0.0, 0.0, 0.0]
-            Initial cavity field momentum (a.u.).
-        mu_initial : list, default: [0.0, 0.0, 0.0]
-            Initial total molecular dipole vector (a.u.).
-        dmudt_initial : list, default: [0.0, 0.0, 0.0]
-            Initial time derivative of the total molecular dipole vector (a.u.).
-        record_history : bool, default: True
-            Record time, field, velocity, drive, and molecular response histories.
-        include_dse : bool, default: True
-            Include dipole self-energy term in the simulation.
-        molecule_half_step : bool, default: True
-            Whether to further evaluate molecular info for another half time step.
-        shift_dipole_baseline : bool, default: False
-            Whether to shift all dipole values using the initial dipole value, so initial dipole value is changed to zero.
-            Setting this to True can facilitate simulating strong coupling systems with large permanent dipoles.
-        gauge : str, default: "dipole"
-            Gauge choice for light-matter coupling: "dipole".
         x_grid_1d : list, optional
             1D grid points for molecular bath coordinates along x-axis, in units of cavity length Lx. If None, defaults to [0.5] (single point at the center).
         y_grid_1d : list, optional
             1D grid points for molecular bath coordinates along y-axis, in units of cavity length Ly. If None, defaults to [0.5] (single point at the center).
-        delta_omega_x_au : float, default: 0.0
+        delta_omega_x : float, default: 0.0
             Frequency spacing along x-axis for cavity modes, in atomic units. The cavity mode frequencies are calculated as :math:`\omega_{k} = \sqrt{\omega_{\rm c}^2 + (l_x \Delta\omega_x)^2 + (l_y \Delta\omega_y)^2}` where :math:`l_x, l_y` are the mode indices determined by ``n_mode_x`` and ``n_mode_y``.
+        delta_omega_x_au : float, default: 0.0
+            Frequency spacing along x-axis for cavity modes, in atomic units.
+        delta_omega_y : float, default: 0.0
+            Frequency spacing along y-axis for cavity modes, in cm^-1.
         delta_omega_y_au : float, default: 0.0
             Frequency spacing along y-axis for cavity modes, in atomic units.
         n_mode_x : int, default: 1
@@ -204,22 +171,38 @@ class MultiModeSimulation(DummyEMSimulation):
             Number of cavity modes along y-axis.
         abc_cutoff : float, default: 0.0
             Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If 0.0, no absorbing boundary condition is applied. If > 0.0, the grid points within the cutoff distance from the boundaries will be smoothly damped to suppress unphysical reflections of the EM field at the boundaries.
+        excited_grid_list : list, optional
+            List of grid point indices that are excited by the molecule pulse. The excitation is applied by adding the molecule pulse drive to the effective electric field at these grid points.
+        molecule_pulse_drive : float or callable, optional
+            Constant molecule pulse drive or function ``molecule_pulse_drive(t_au)`` that determines the strength of the molecule pulse applied to the excited grid points.
+        molecule_pulse_axis : str, default: "y"
+            pulse axis for the molecule pulse.
         """
+        if frequency is None and frequency_au is None:
+            raise ValueError("Either frequency or frequency_au must be provided.")
+        if frequency_au is None: 
+            self.frequency_au = float(frequency) / AU_TO_CM_INV
+        else: 
+            self.frequency_au = float(frequency_au)
 
-        super().__init__(hub=hub, molecules=molecules)
+        if delta_omega_x is None and delta_omega_x_au is None:
+            raise ValueError("Either delta_omega_x or delta_omega_x_au must be provided.")
+        if delta_omega_x_au is None: 
+            self.delta_omega_x_au = float(delta_omega_x) / AU_TO_CM_INV
+        else: 
+            self.delta_omega_x_au = float(delta_omega_x_au)
 
-        self.dt = float(dt_au)
-        if self.dt <= 0.0:
-            raise ValueError("dt_au must be positive.")
-        self.frequency = float(frequency_au)
+        if delta_omega_y is None and delta_omega_y_au is None:
+            raise ValueError("Either delta_omega_y or delta_omega_y_au must be provided.")
+        if delta_omega_y_au is None: 
+            self.delta_omega_y_au = float(delta_omega_y) / AU_TO_CM_INV
+        else: 
+            self.delta_omega_y_au = float(delta_omega_y_au)
+
         self.damping = float(damping_au)
         self.coupling_strength = float(coupling_strength)
+
         self.axis = np.array([False, False, False], dtype=bool)
-
-        self.gauge = gauge.lower()
-        if self.gauge not in ["dipole"]:
-            raise ValueError("gauge must be 'dipole'.")
-
         if "x" in coupling_axis.lower():
             self.axis[0] = True
         if "y" in coupling_axis.lower():
@@ -247,40 +230,6 @@ class MultiModeSimulation(DummyEMSimulation):
                 "At least one pulse axis (x, y, or z) must be specified."
             )
 
-        self.drive = drive if drive is not None else (lambda _: 0.0)
-        if isinstance(self.drive, (int, float)):
-            const = float(self.drive)
-            self.drive = lambda _t, c=const: c
-
-        molecules = list(molecules or [])
-        self.wrappers: List[MoleculeMultiModeWrapper] = [
-            MoleculeMultiModeWrapper(molecule=m, dt_au=self.dt) for m in molecules
-        ]
-        self.socket_wrappers = [w for w in self.wrappers if w.mode == "socket"]
-        self.non_socket_wrappers = [w for w in self.wrappers if w.mode == "non-socket"]
-
-        if self.socket_wrappers:
-            hubs = {w.hub for w in self.socket_wrappers if w.hub is not None}
-            if hub is not None:
-                hubs.add(hub)
-            if len(hubs) > 1:
-                raise ValueError(
-                    "All socket-mode molecules must share the same SocketHub."
-                )
-            self.hub: SocketHub = hub or self.socket_wrappers[0].hub
-            if self.hub is None:
-                raise ValueError("Socket-mode molecules require a SocketHub instance.")
-        else:
-            self.hub = None
-
-        # Assign IDs and initialize non-socket drivers
-        # By default, SocketHub assigns IDs starting from 0, so we start
-        # non-socket IDs after all socket ones.
-        next_id = len(self.socket_wrappers)
-        for wrapper in self.non_socket_wrappers:
-            wrapper.initialize_driver(next_id)
-            next_id += 1
-
        # generate 2D grid points of molecular bath coords in units of Lx, Ly
         x_grid_2d, y_grid_2d = np.meshgrid(x_grid_1d, y_grid_1d)
         x_grid_2d = np.reshape(x_grid_2d, -1)
@@ -295,14 +244,14 @@ class MultiModeSimulation(DummyEMSimulation):
         ky_grid_2d = np.reshape(ky_grid_2d, -1)
 
         # construct cavity mode frequency array for all photon dimensions
-        omega_parallel = np.reshape(((kx_grid_2d / np.pi * delta_omega_x_au) ** 2 + (ky_grid_2d / np.pi * delta_omega_y_au) ** 2) ** 0.5, -1)
-        print("omega_parallel in cm-1", omega_parallel * 219474.63)
-        self.omega_k = (self.frequency**2 + omega_parallel**2) ** 0.5
-        print("omega_k in cm-1", self.omega_k * 219474.63)
+        omega_parallel = np.reshape(((kx_grid_2d / np.pi * self.delta_omega_x_au) ** 2 + (ky_grid_2d / np.pi * self.delta_omega_y_au) ** 2) ** 0.5, -1)
+        print("omega_parallel in cm-1", omega_parallel * AU_TO_CM_INV)
+        self.omega_k = (self.frequency_au**2 + omega_parallel**2) ** 0.5
+        print("omega_k in cm-1", self.omega_k * AU_TO_CM_INV)
         
         # construct renormalized cavity mode function for each molecular grid point
-        n_mode = n_mode_x * n_mode_y * 1
-        ftilde_k = np.zeros((n_mode, self.n_grid, 3), dtype=float)
+        self.n_mode = n_mode_x * n_mode_y
+        ftilde_k = np.zeros((self.n_mode, self.n_grid, 3), dtype=float)
         for i in range(self.n_grid):
             x, y = x_grid_2d[i], y_grid_2d[i]
             ftilde_k[:, i, 0] = (2.0 * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y))
@@ -359,13 +308,128 @@ class MultiModeSimulation(DummyEMSimulation):
 
         self.if_abc = (abc_x is not None) and (abc_y is not None)
         print(f"Applying Absorbing Boundary Condition : {self.if_abc}, cutoff: {self.abc_cutoff}")
-        self.time = 0.0
+
         self.excited_list = excited_grid_list if excited_grid_list is not None else []
+        self.molecule_pulse = molecule_pulse_drive if molecule_pulse_drive is not None else (lambda _: 0.0)
+        if isinstance(self.molecule_pulse, (int, float)):
+            const = float(self.molecule_pulse)
+            self.molecule_pulse = lambda _t, c=const: c
+        
+
+class MultiModeSimulation(DummyEMSimulation):
+    r"""
+    Mesoscale cavities coupled to MaxwellLink molecules.
+
+    All quantities are in atomic units.
+    """
+
+    def __getattr__(self, name):
+        if self.cavity_geometry is not None and hasattr(self.cavity_geometry, name):
+            return getattr(self.cavity_geometry, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def __init__(
+        self,
+        dt_au: float = None,
+        dt_fs: float = None,
+        molecules: Optional[Iterable[Molecule]] = None,
+        drive: Optional[Union[float, Callable[[float], float]]] = None,
+        hub: Optional[SocketHub] = None,
+        qc_initial: Optional[list] = None,
+        pc_initial: Optional[list] = None,
+        mu_initial: Optional[list] = None,
+        dmudt_initial: Optional[list] = None,
+        include_dse: bool = True,
+        molecule_half_step: bool = False,
+        shift_dipole_baseline: bool = False,
+        gauge="dipole",
+        cavity_geometry: Optional[object] = None,
+    ):
+        r"""
+        Parameters
+        ----------
+        dt_au : float
+            Simulation time step in atomic units.
+        dt_fs : float
+            Simulation time step in femtoseconds. If both dt_au and dt_fs are provided, dt_au will be used.
+        molecules : iterable of Molecule, optional
+            Molecules coupled to the cavity.
+        drive : float or callable, optional
+            Constant drive term or function ``drive(t_au)``.
+        hub : :class:`~maxwelllink.sockets.sockets.SocketHub`, optional
+            Socket hub shared by all socket-mode molecules.
+        qc_initial : list, default: [0.0, 0.0, 0.0]
+            Initial cavity field coordinate (a.u.).
+        pc_initial : list, default: [0.0, 0.0, 0.0]
+            Initial cavity field momentum (a.u.).
+        mu_initial : list, default: [0.0, 0.0, 0.0]
+            Initial total molecular dipole vector (a.u.).
+        dmudt_initial : list, default: [0.0, 0.0, 0.0]
+            Initial time derivative of the total molecular dipole vector (a.u.).
+        include_dse : bool, default: True
+            Include dipole self-energy term in the simulation.
+        molecule_half_step : bool, default: True
+            Whether to further evaluate molecular info for another half time step.
+        shift_dipole_baseline : bool, default: False
+            Whether to shift all dipole values using the initial dipole value, so initial dipole value is changed to zero.
+            Setting this to True can facilitate simulating strong coupling systems with large permanent dipoles.
+        gauge : str, default: "dipole"
+            Gauge choice for light-matter coupling: "dipole".
+        """
+
+        super().__init__(hub=hub, molecules=molecules)
+
+        if dt_au is None and dt_fs is None:
+            raise ValueError("Either dt_au or dt_fs must be provided.")
+        self.dt = float(dt_au) if dt_au is not None else float(dt_fs) * FS_TO_AU
+        if self.dt <= 0.0:
+            raise ValueError("dt_au must be positive.")
+
+        self.gauge = gauge.lower()
+        if self.gauge not in ["dipole"]:
+            raise ValueError("gauge must be 'dipole'.")
+        
+        self.drive = drive if drive is not None else (lambda _: 0.0)
+        if isinstance(self.drive, (int, float)):
+            const = float(self.drive)
+            self.drive = lambda _t, c=const: c
+
+        molecules = list(molecules or [])
+        self.wrappers: List[MoleculeMultiModeWrapper] = [
+            MoleculeMultiModeWrapper(molecule=m, dt_au=self.dt) for m in molecules
+        ]
+        self.socket_wrappers = [w for w in self.wrappers if w.mode == "socket"]
+        self.non_socket_wrappers = [w for w in self.wrappers if w.mode == "non-socket"]
+
+        if self.socket_wrappers:
+            hubs = {w.hub for w in self.socket_wrappers if w.hub is not None}
+            if hub is not None:
+                hubs.add(hub)
+            if len(hubs) > 1:
+                raise ValueError(
+                    "All socket-mode molecules must share the same SocketHub."
+                )
+            self.hub: SocketHub = hub or self.socket_wrappers[0].hub
+            if self.hub is None:
+                raise ValueError("Socket-mode molecules require a SocketHub instance.")
+        else:
+            self.hub = None
+
+        # Assign IDs and initialize non-socket drivers
+        # By default, SocketHub assigns IDs starting from 0, so we start
+        # non-socket IDs after all socket ones.
+        next_id = len(self.socket_wrappers)
+        for wrapper in self.non_socket_wrappers:
+            wrapper.initialize_driver(next_id)
+            next_id += 1
+
+        self.time = 0.0
+        self.cavity_geometry = cavity_geometry
 
         if qc_initial is None:
-            qc_initial = np.zeros((n_mode, 3), dtype=float)
+            qc_initial = np.zeros((self.n_mode, 3), dtype=float)
         if pc_initial is None:
-            pc_initial = np.zeros((n_mode, 3), dtype=float)
+            pc_initial = np.zeros((self.n_mode, 3), dtype=float)
         if mu_initial is None:
             mu_initial = np.zeros((self.n_grid, 3), dtype=float)
         if dmudt_initial is None:
@@ -377,17 +441,11 @@ class MultiModeSimulation(DummyEMSimulation):
         self.dipole_prev = self.dipole.copy()
         self.dmudt = dmudt_initial * self.axis
         self.dmudt_prev = self.dmudt.copy()
-        self.acceleration = np.zeros((n_mode, 3), dtype=float)
+        self.acceleration = np.zeros((self.n_mode, 3), dtype=float)
 
         self.include_dse = bool(include_dse)
         self.molecule_half_step = bool(molecule_half_step)
         self.shift_dipole_baseline = bool(shift_dipole_baseline)
-
-        self.excited_list = excited_grid_list if excited_grid_list is not None else []
-        self.molecule_pulse = molecule_pulse_drive if molecule_pulse_drive is not None else (lambda _: 0.0)
-        if isinstance(self.molecule_pulse, (int, float)):
-            const = float(self.molecule_pulse)
-            self.molecule_pulse = lambda _t, c=const: c
 
         if self.shift_dipole_baseline:
             # shift all dipole values using the initial dipole value, so initial dipole value is zero
@@ -395,18 +453,8 @@ class MultiModeSimulation(DummyEMSimulation):
             self.dipole -= self.dipole_baseline
             self.dipole_prev = self.dipole.copy()
             print(
-                "[SingleModeCavity] Shifted dipole baseline by:", self.dipole_baseline
+                "[MultiModeCavity] Shifted dipole baseline by:", self.dipole_baseline
             )
-
-        self.record_history = bool(record_history)
-        if self.record_history:
-            self.time_history = []
-            self.qc_history = []
-            self.pc_history = []
-            self.drive_history = []
-            self.molecule_response_history = []
-            self.energy_history = []
-            self.effective_efield_history = []
 
     # ------------------------------------------------------------------
     # Core helpers
@@ -616,7 +664,7 @@ class MultiModeSimulation(DummyEMSimulation):
                     if wrapper.molecule_id in self.excited_list:
                         efield_vec_excited[wrapper.molecule_id, :] = self.molecule_pulse(self.time) * self.pulse_axis
                 efield_vec += efield_vec_excited
-                
+
             responses = self._collect_socket_responses(efield_vec) 
             for wrapper in self.socket_wrappers:
                 payload = responses.get(wrapper.molecule_id)
@@ -650,7 +698,7 @@ class MultiModeSimulation(DummyEMSimulation):
         # print("In Function, Total Dipole velocity (dmu/dt):", dmudt)
         return dipole, dmudt
 
-    def _step_dipole_gauge(self):
+    def _step_dipole_gauge(self, savedata: bool = True):
         """
         Advance the simulation by one time step under the dipole gauge.
         """
@@ -706,28 +754,74 @@ class MultiModeSimulation(DummyEMSimulation):
         self.time += self.dt
         self.acceleration = acceleration.copy()
 
-        if self.record_history:
-            self.time_history.append(self.time)
-            self.qc_history.append(self.qc.copy())
-            self.pc_history.append(self.pc.copy())
-            self.drive_history.append(self._evaluate_drive(self.time))
-            self.molecule_response_history.append(self.dmudt.copy())
-            self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
-            self.effective_efield_history.append(self._calc_effective_efield(self.qc, self.dipole))
+        if savedata:
+            if self.record_history:
+                if self.record_to_disk:
+                    self._append_history_to_disk()
+                else:
+                    if "time" in self.record_list:
+                        self.time_history.append(self.time)
+                    if "qc" in self.record_list:
+                        self.qc_history.append(self.qc.copy())
+                    if "pc" in self.record_list:
+                        self.pc_history.append(self.pc.copy())
+                    if "drive" in self.record_list:
+                        self.drive_history.append(self._evaluate_drive(self.time))
+                    if "molecule_response" in self.record_list:
+                        self.molecule_response_history.append(self.dmudt.copy())
+                    if "energy" in self.record_list:
+                        self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
+                    if "effective_efield" in self.record_list:
+                        self.effective_efield_history.append(self._calc_effective_efield(self.qc, self.dipole))
         
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def step(self):
+    def step(self, savedata: bool = True):
         """
         Advance the simulation by one time step.
         """
         if self.gauge == "dipole":
-            self._step_dipole_gauge()
+            self._step_dipole_gauge(savedata=savedata)
         else:
             raise ValueError("gauge must be either 'dipole' or 'velocity'.")
 
-    def run(self, until: Optional[float] = None, steps: Optional[int] = None):
+    def _append_history_to_disk(self):
+        """
+        Append the current state to the on-disk HDF5 history datasets.
+        """
+
+        idx = self.h5file["time"].shape[0]
+        next_size = idx + 1
+
+        for name in self.record_list:
+            self.h5file[name].resize(next_size, axis=0)
+
+        if "time" in self.record_list:
+            self.h5file["time"][idx] = self.time
+        if "qc" in self.record_list:
+            self.h5file["qc"][idx, :, :] = self.qc.copy()
+        if "pc" in self.record_list:
+            self.h5file["pc"][idx, :, :] = self.pc.copy()
+        if "drive" in self.record_list:
+            self.h5file["drive"][idx] = self._evaluate_drive(self.time)
+        if "energy" in self.record_list:
+            self.h5file["energy"][idx] = self._calc_energy(self.pc, self.qc, self.dipole)
+        if "effective_efield" in self.record_list:
+            self.h5file["effective_efield"][idx, :, :] = self._calc_effective_efield(self.qc, self.dipole)
+        if "molecule_response" in self.record_list:
+            self.h5file["molecule_response"][idx, :, :] = self.dmudt.copy()
+
+    def run(self, 
+            until: Optional[float] = None, 
+            steps: Optional[int] = None,
+            record_history: bool = True,
+            record_to_disk: bool = False,
+            disk_address: Optional[str] = None,
+            max_steps: Optional[int] = None,
+            record_every_steps: int = 1,
+            record_list: Optional[list] = None,
+            ):
         """
         Run the simulation for a specified duration or number of steps.
 
@@ -736,8 +830,94 @@ class MultiModeSimulation(DummyEMSimulation):
         until : float, optional
             Total simulation time (a.u.). ``steps`` must be ``None``.
         steps : int, optional
-            Number of steps to execute. ``until`` must be ``None``.
+            Number of steps to execute. ``until`` must be ``None``,
+        record_history : bool, default: True
+            Record time, field, velocity, drive, and molecular response histories.
+        record_to_disk : bool, default: False
+            Whether to save the history data to disk in HDF5 format. If False, the history data will be stored in memory.
+        disk_address : str, optional
+            File path for saving history data when ``record_to_disk`` is True.
+        max_steps : int, optional
+            Upper bound for the on-disk history length when ``record_to_disk`` is
+            True. If ``None``, the HDF5 datasets grow dynamically.
+        record_every_steps : int, default: 1
+            Number of steps to record data every ``record_every_steps`` steps.
+        record_list : list of str, optional
+            List of specific data fields to record. Possible values include "time", "qc", "pc", "drive", "energy", "effective_efield", "molecule_response". If "all", all fields will be recorded. If None, none will be recorded.
         """
+
+        self.record_history = bool(record_history)
+        self.record_to_disk = bool(record_to_disk)
+        self.disk_address = disk_address
+
+        not_record = (record_list == []) or (record_list is None)
+        if not_record :
+            self.record_history = False
+            self.record_to_disk = False
+            
+        if isinstance(record_list, list) == False and (not_record == False) :
+            raise ValueError("record_list must be a list or None.")
+
+        if not_record :
+            self.record_list = []
+        else :
+            for item in record_list:
+                if item not in ["all", "time", "qc", "pc", "drive", "energy", "effective_efield", "molecule_response"]:
+                    raise ValueError(f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'drive', 'energy', 'effective_efield', 'molecule_response'.")
+
+            if "time" not in record_list:
+                raise ValueError("time must be included in record_list for proper history recording.")
+            
+            if record_list == ["all"]: 
+                self.record_list = ["time", "qc", "pc", "drive", "energy", "effective_efield", "molecule_response"]
+            else : 
+                self.record_list = record_list
+        
+        print(f"Recording history: {self.record_history}, to disk: {self.record_to_disk}, fields: {record_list if not not_record else 'none'}")
+
+        if self.record_history:
+            if self.record_to_disk and self.disk_address is not None:
+                if max_steps is None:
+                    self.max_steps = None
+                else:
+                    self.max_steps = int(max_steps)
+                    if self.max_steps < 0:
+                        raise ValueError("max_steps must be non-negative or None.")
+                history_maxshape = None
+                if self.max_steps is not None and self.max_steps > 0:
+                    history_maxshape = self.max_steps + 1
+                self.h5file = h5py.File(self.disk_address, "w")
+                if "time" in self.record_list:
+                    self.h5file.create_dataset("time", (0,), maxshape=(history_maxshape,), dtype=float)
+                if "qc" in self.record_list:
+                    self.h5file.create_dataset("qc", (0, self.n_mode, 3), maxshape=(history_maxshape, self.n_mode, 3), dtype=float)
+                if "pc" in self.record_list:
+                    self.h5file.create_dataset("pc", (0, self.n_mode, 3), maxshape=(history_maxshape, self.n_mode, 3), dtype=float)
+                if "drive" in self.record_list:
+                    self.h5file.create_dataset("drive", (0,), maxshape=(history_maxshape,), dtype=float)
+                if "energy" in self.record_list:
+                    self.h5file.create_dataset("energy", (0,), maxshape=(history_maxshape,), dtype=float)
+                if "effective_efield" in self.record_list:
+                    self.h5file.create_dataset("effective_efield", (0, self.n_grid, 3), maxshape=(history_maxshape, self.n_grid, 3), dtype=float)
+                if "molecule_response" in self.record_list:
+                    self.h5file.create_dataset("molecule_response", (0, self.n_grid, 3), maxshape=(history_maxshape, self.n_grid, 3), dtype=float)
+            elif self.record_to_disk and self.disk_address is None:
+                raise ValueError("disk_address must be provided when record_to_disk is True.")
+            else:
+                if "time" in self.record_list:
+                    self.time_history = []
+                if "qc" in self.record_list:
+                    self.qc_history = []
+                if "pc" in self.record_list:
+                    self.pc_history = []
+                if "drive" in self.record_list:
+                    self.drive_history = []
+                if "energy" in self.record_list:
+                    self.energy_history = []
+                if "effective_efield" in self.record_list:
+                    self.effective_efield_history = []
+                if "molecule_response" in self.record_list:
+                    self.molecule_response_history = []
 
         if (until is None) == (steps is None):
             raise ValueError("Specify exactly one of 'until' or 'steps'.")
@@ -747,10 +927,18 @@ class MultiModeSimulation(DummyEMSimulation):
                 return
             steps = int(np.ceil((until - self.time) / self.dt))
 
+        if record_every_steps < 1 or isinstance(record_every_steps, int) == False:
+            raise ValueError("record_every_steps must be a positive integer.")
+
         start_time = time.perf_counter()
         previous_time = start_time
         for idx in range(int(steps)):
-            self.step()
+
+            if record_every_steps >= 2:
+                if idx % record_every_steps == 0 : self.step(savedata=True)
+                else : self.step(savedata=False)
+            else : self.step(savedata=False)
+
             if (idx + 1) % 1000 == 0:
 
                 current_time = time.perf_counter()
@@ -760,7 +948,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 elapsed = current_time - start_time
                 remaining = (elapsed / (idx + 1)) * (steps - (idx + 1))
                 print(
-                    f"[MultipleModeCavity] Completed {idx + 1}/{steps} [{(idx + 1) / steps * 100:.1f}%] steps, time/step: {avg_time_per_step:.2e} seconds, remaining time: {remaining:.2f} seconds."
+                    f"[MultiModeCavity] Completed {idx + 1}/{steps} [{(idx + 1) / steps * 100:.1f}%] steps, time/step: {avg_time_per_step:.2e} seconds, remaining time: {remaining:.2f} seconds."
                 )
 
         # close the hub
