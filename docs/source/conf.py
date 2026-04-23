@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 # --- Project info ---
 project = "MaxwellLink"
 author = "Tao E. Li"
+copyright = "TEL Research Group 2026"
 try:
     release = pkg_version("maxwelllink")
     version = ".".join(release.split(".")[:2])
