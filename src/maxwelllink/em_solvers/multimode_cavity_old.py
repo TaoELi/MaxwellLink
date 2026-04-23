@@ -115,7 +115,7 @@ class FabryPerotCavities():
 
        E(t) = -\sum_{k\lambda} (\varepsilon_{k\lambda} q_{k\lambda, \rm c}(t) - \frac{\varepsilon_{k\lambda}^2}{\omega_{k\lambda, \rm c}^2} \sum_i \mu_i(t) \cdot f_{k\lambda}(r_i))\cdot f_{k\lambda}(r_i),
 
-    where :math:`\varepsilon_{k\lambda}` is effective coupling strength for different photon modes, :math:`f_{k\lambda}(r_i)` is the cavity mode function evaluated at the position of the r_i.
+    where :math:`\varepsilon_{k\lambda}` is effective coupling strength for different photon modes, :math:`f_{k\lambda}(r_i)` is the cavity mode function evaluated at the position of the r_i. The second term in the electric field accounts for the dipole self-energy term if enabled.
 
     All quantities are in atomic units.
     """
