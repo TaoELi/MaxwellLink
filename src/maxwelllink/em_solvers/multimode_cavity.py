@@ -736,13 +736,20 @@ class MultiModeSimulation(DummyEMSimulation):
                 if self.record_to_disk:
                     self._append_history_to_disk()
                 else:
-                    self.time_history.append(self.time)
-                    self.qc_history.append(self.qc.copy())
-                    self.pc_history.append(self.pc.copy())
-                    self.drive_history.append(self._evaluate_drive(self.time))
-                    self.molecule_response_history.append(self.dmudt.copy())
-                    self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
-                    self.effective_efield_history.append(self._calc_effective_efield(self.qc, self.dipole))
+                    if "time" in self.record_list:
+                        self.time_history.append(self.time)
+                    if "qc" in self.record_list:
+                        self.qc_history.append(self.qc.copy())
+                    if "pc" in self.record_list:
+                        self.pc_history.append(self.pc.copy())
+                    if "drive" in self.record_list:
+                        self.drive_history.append(self._evaluate_drive(self.time))
+                    if "molecule_response" in self.record_list:
+                        self.molecule_response_history.append(self.dmudt.copy())
+                    if "energy" in self.record_list:
+                        self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
+                    if "effective_efield" in self.record_list:
+                        self.effective_efield_history.append(self._calc_effective_efield(self.qc, self.dipole))
         
     # ------------------------------------------------------------------
     # Public API
@@ -764,16 +771,23 @@ class MultiModeSimulation(DummyEMSimulation):
         idx = self.h5file["time"].shape[0]
         next_size = idx + 1
 
-        for name in ("time", "qc", "pc", "drive", "energy", "effective_efield"):
+        for name in self.record_list:
             self.h5file[name].resize(next_size, axis=0)
 
-        effective_efield = self._calc_effective_efield(self.qc, self.dipole)
-        self.h5file["time"][idx] = self.time
-        self.h5file["qc"][idx, :, :] = self.qc
-        self.h5file["pc"][idx, :, :] = self.pc
-        self.h5file["drive"][idx] = self._evaluate_drive(self.time)
-        self.h5file["energy"][idx] = self._calc_energy(self.pc, self.qc, self.dipole)
-        self.h5file["effective_efield"][idx, :, :] = effective_efield
+        if "time" in self.record_list:
+            self.h5file["time"][idx] = self.time
+        if "qc" in self.record_list:
+            self.h5file["qc"][idx, :, :] = self.qc.copy()
+        if "pc" in self.record_list:
+            self.h5file["pc"][idx, :, :] = self.pc.copy()
+        if "drive" in self.record_list:
+            self.h5file["drive"][idx] = self._evaluate_drive(self.time)
+        if "energy" in self.record_list:
+            self.h5file["energy"][idx] = self._calc_energy(self.pc, self.qc, self.dipole)
+        if "effective_efield" in self.record_list:
+            self.h5file["effective_efield"][idx, :, :] = self._calc_effective_efield(self.qc, self.dipole)
+        if "molecule_response" in self.record_list:
+            self.h5file["molecule_response"][idx, :, :] = self.dmudt.copy()
 
     def run(self, 
             until: Optional[float] = None, 
@@ -782,7 +796,8 @@ class MultiModeSimulation(DummyEMSimulation):
             record_to_disk: bool = False,
             disk_address: Optional[str] = None,
             max_steps: Optional[int] = None,
-            record_every_steps: int = 0,
+            record_every_steps: int = 1,
+            record_list: Optional[list] = None,
             ):
         """
         Run the simulation for a specified duration or number of steps.
@@ -802,13 +817,41 @@ class MultiModeSimulation(DummyEMSimulation):
         max_steps : int, optional
             Upper bound for the on-disk history length when ``record_to_disk`` is
             True. If ``None``, the HDF5 datasets grow dynamically.
-        record_every_steps : int, default: 0
+        record_every_steps : int, default: 1
             Number of steps to record data every ``record_every_steps`` steps.
+        record_list : list of str, optional
+            List of specific data fields to record. Possible values include "time", "qc", "pc", "drive", "energy", "effective_efield", "molecule_response". If "all", all fields will be recorded. If None, none will be recorded.
         """
 
         self.record_history = bool(record_history)
         self.record_to_disk = bool(record_to_disk)
         self.disk_address = disk_address
+
+        not_record = (record_list == []) or (record_list is None)
+        if not_record :
+            self.record_history = False
+            self.record_to_disk = False
+            
+        if isinstance(record_list, list) == False and (not_record == False) :
+            raise ValueError("record_list must be a list or None.")
+
+        if not_record :
+            self.record_list = []
+        else :
+            for item in record_list:
+                if item not in ["all", "time", "qc", "pc", "drive", "energy", "effective_efield", "molecule_response"]:
+                    raise ValueError(f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'drive', 'energy', 'effective_efield', 'molecule_response'.")
+
+            if "time" not in record_list:
+                raise ValueError("time must be included in record_list for proper history recording.")
+            
+            if record_list == ["all"]: 
+                self.record_list = ["time", "qc", "pc", "drive", "energy", "effective_efield", "molecule_response"]
+            else : 
+                self.record_list = record_list
+        
+        print(f"Recording history: {self.record_history}, to disk: {self.record_to_disk}, fields: {record_list if not not_record else 'none'}")
+
         if self.record_history:
             if self.record_to_disk and self.disk_address is not None:
                 if max_steps is None:
@@ -821,22 +864,37 @@ class MultiModeSimulation(DummyEMSimulation):
                 if self.max_steps is not None and self.max_steps > 0:
                     history_maxshape = self.max_steps + 1
                 self.h5file = h5py.File(self.disk_address, "w")
-                self.h5file.create_dataset("time", (0,), maxshape=(history_maxshape,), dtype=float)
-                self.h5file.create_dataset("qc", (0, self.n_mode, 3), maxshape=(history_maxshape, self.n_mode, 3), dtype=float)
-                self.h5file.create_dataset("pc", (0, self.n_mode, 3), maxshape=(history_maxshape, self.n_mode, 3), dtype=float)
-                self.h5file.create_dataset("drive", (0,), maxshape=(history_maxshape,), dtype=float)
-                self.h5file.create_dataset("energy", (0,), maxshape=(history_maxshape,), dtype=float)
-                self.h5file.create_dataset("effective_efield", (0, self.n_grid, 3), maxshape=(history_maxshape, self.n_grid, 3), dtype=float)
+                if "time" in self.record_list:
+                    self.h5file.create_dataset("time", (0,), maxshape=(history_maxshape,), dtype=float)
+                if "qc" in self.record_list:
+                    self.h5file.create_dataset("qc", (0, self.n_mode, 3), maxshape=(history_maxshape, self.n_mode, 3), dtype=float)
+                if "pc" in self.record_list:
+                    self.h5file.create_dataset("pc", (0, self.n_mode, 3), maxshape=(history_maxshape, self.n_mode, 3), dtype=float)
+                if "drive" in self.record_list:
+                    self.h5file.create_dataset("drive", (0,), maxshape=(history_maxshape,), dtype=float)
+                if "energy" in self.record_list:
+                    self.h5file.create_dataset("energy", (0,), maxshape=(history_maxshape,), dtype=float)
+                if "effective_efield" in self.record_list:
+                    self.h5file.create_dataset("effective_efield", (0, self.n_grid, 3), maxshape=(history_maxshape, self.n_grid, 3), dtype=float)
+                if "molecule_response" in self.record_list:
+                    self.h5file.create_dataset("molecule_response", (0, self.n_grid, 3), maxshape=(history_maxshape, self.n_grid, 3), dtype=float)
             elif self.record_to_disk and self.disk_address is None:
                 raise ValueError("disk_address must be provided when record_to_disk is True.")
             else:
-                self.time_history = []
-                self.qc_history = []
-                self.pc_history = []
-                self.drive_history = []
-                self.molecule_response_history = []
-                self.energy_history = []
-                self.effective_efield_history = []
+                if "time" in self.record_list:
+                    self.time_history = []
+                if "qc" in self.record_list:
+                    self.qc_history = []
+                if "pc" in self.record_list:
+                    self.pc_history = []
+                if "drive" in self.record_list:
+                    self.drive_history = []
+                if "energy" in self.record_list:
+                    self.energy_history = []
+                if "effective_efield" in self.record_list:
+                    self.effective_efield_history = []
+                if "molecule_response" in self.record_list:
+                    self.molecule_response_history = []
 
         if (until is None) == (steps is None):
             raise ValueError("Specify exactly one of 'until' or 'steps'.")
@@ -846,8 +904,8 @@ class MultiModeSimulation(DummyEMSimulation):
                 return
             steps = int(np.ceil((until - self.time) / self.dt))
 
-        if record_every_steps < 0 or isinstance(record_every_steps, int) == False:
-            raise ValueError("record_every_steps must be a non-negative integer.")
+        if record_every_steps < 1 or isinstance(record_every_steps, int) == False:
+            raise ValueError("record_every_steps must be a positive integer.")
 
         start_time = time.perf_counter()
         previous_time = start_time
