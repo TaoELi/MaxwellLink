@@ -918,6 +918,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 raise ValueError("disk_folder_address must be provided when record_to_disk is True.")
             
             else:
+                
                 if "time" in self.record_list:
                     self.time_history = []
                 if "qc" in self.record_list:
