@@ -870,9 +870,6 @@ class MultiModeSimulation(DummyEMSimulation):
             for item in record_list:
                 if item not in ["all", "time", "qc", "pc", "drive", "energy", "effective_efield", "molecule_response", "molecule_dipole"]:
                     raise ValueError(f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'drive', 'energy', 'effective_efield', 'molecule_response', 'molecule_dipole'.")
-
-            if "time" not in record_list:
-                raise ValueError("time must be included in record_list for proper history recording.")
             
             if record_list == ["all"]: 
                 self.record_list = ["time", "qc", "pc", "drive", "energy", "effective_efield", "molecule_response", "molecule_dipole"]
