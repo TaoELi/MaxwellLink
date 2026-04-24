@@ -754,11 +754,11 @@ class MultiModeSimulation(DummyEMSimulation):
         self.time += self.dt
         self.acceleration = acceleration.copy()
 
-        if savedata :
+        record_idx = step_idx // self.record_every_steps
+
+        if savedata and (record_idx <= self.record_max_steps) :
 
             if self.record_to_disk :
-                
-                record_idx = step_idx // self.record_every_steps
 
                 if "time" in self.record_list:
                     self.memmaps["time"][record_idx, 0] = self.time
@@ -877,7 +877,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 self.record_list = record_list
 
         if record_max_steps is None:
-            self.record_max_steps = steps // self.record_every_steps + 1
+            self.record_max_steps = steps // self.record_every_steps
         else:
             self.record_max_steps = int(record_max_steps)
             if self.record_max_steps < 0:
