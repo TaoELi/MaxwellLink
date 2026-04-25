@@ -754,6 +754,13 @@ class MultiModeSimulation(DummyEMSimulation):
         self.time += self.dt
         self.acceleration = acceleration.copy()
 
+        self._record_history(savedata=savedata, step_idx=step_idx)
+
+    def _record_history(self, savedata: bool = True, step_idx: Optional[int] = None):
+        '''
+        Record the history of the simulation at the current time step.
+        '''
+
         record_idx = step_idx // self.record_every_steps
 
         if savedata and (record_idx <= self.record_max_steps) :
@@ -1007,7 +1014,17 @@ class MultiModeSimulation(DummyEMSimulation):
                     f"[MultiModeCavity] Completed {idx + 1}/{steps} [{(idx + 1) / steps * 100:.1f}%] steps, time/step: {avg_time_per_step:.2e} seconds, remaining time: {remaining:.2f} seconds."
                 )
 
-        # final flush for memmaps
+        self.storage_finalization()
+        
+        # close the hub
+        if self.hub is not None:
+            if am_master():
+                self.hub.stop()
+
+    def storage_finalization(self):
+        '''
+        Finalize storage for recording simulation history.        
+        '''
 
         if self.record_history:
 
@@ -1030,8 +1047,3 @@ class MultiModeSimulation(DummyEMSimulation):
                 data_for_npz.clear()
                 shutil.rmtree(self.temp_dir)
                 print(f"[MultiModeCavity] Temporary files at {self.temp_dir} deleted.")
-        
-        # close the hub
-        if self.hub is not None:
-            if am_master():
-                self.hub.stop()
