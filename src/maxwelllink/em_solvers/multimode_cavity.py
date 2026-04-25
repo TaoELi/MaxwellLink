@@ -10,7 +10,7 @@ embedded (non-socket) molecular drivers.
 from __future__ import annotations
 
 import json
-import os, shutil
+import os, shutil, h5py
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Union
 import time
 
@@ -766,28 +766,53 @@ class MultiModeSimulation(DummyEMSimulation):
         if savedata and (record_idx <= self.record_max_steps) :
 
             if self.record_to_disk :
+                
+                if self.file_format == "npz": 
 
-                if "time" in self.record_list:
-                    self.memmaps["time"][record_idx, 0] = self.time
-                if "qc" in self.record_list:
-                    self.memmaps["qc"][record_idx,:,:] = self.qc.copy()
-                if "pc" in self.record_list:
-                    self.memmaps["pc"][record_idx,:,:] = self.pc.copy()
-                if "drive" in self.record_list:
-                    self.memmaps["drive"][record_idx, 0] = self._evaluate_drive(self.time)
-                if "energy" in self.record_list:
-                    self.memmaps["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
-                if "effective_efield" in self.record_list:
-                    self.memmaps["effective_efield"][record_idx,:,:] = self._calc_effective_efield(self.qc, self.dipole)
-                if "molecule_response" in self.record_list:
-                    self.memmaps["molecule_response"][record_idx,:,:] = self.dmudt.copy()
-                if "molecule_dipole" in self.record_list:
-                    self.memmaps["molecule_dipole"][record_idx,:,:] = self.dipole.copy()
+                    if "time" in self.record_list:
+                        self.memmaps["time"][record_idx, 0] = self.time
+                    if "qc" in self.record_list:
+                        self.memmaps["qc"][record_idx,:,:] = self.qc.copy()
+                    if "pc" in self.record_list:
+                        self.memmaps["pc"][record_idx,:,:] = self.pc.copy()
+                    if "drive" in self.record_list:
+                        self.memmaps["drive"][record_idx, 0] = self._evaluate_drive(self.time)
+                    if "energy" in self.record_list:
+                        self.memmaps["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
+                    if "effective_efield" in self.record_list:
+                        self.memmaps["effective_efield"][record_idx,:,:] = self._calc_effective_efield(self.qc, self.dipole)
+                    if "molecule_response" in self.record_list:
+                        self.memmaps["molecule_response"][record_idx,:,:] = self.dmudt.copy()
+                    if "molecule_dipole" in self.record_list:
+                        self.memmaps["molecule_dipole"][record_idx,:,:] = self.dipole.copy()
 
-                if record_idx % 1000 == 0:
-                    for mm in self.memmaps.values():
-                        mm.flush()
-                    print(f"[MultiModeCavity] Flushed history data to disk at step {step_idx}.")
+                    if record_idx % 1000 == 0:
+                        for mm in self.memmaps.values():
+                            mm.flush()
+                        print(f"[MultiModeCavity] Flushed history data to {self.filename} at step {step_idx}.")
+                
+                else : # h5 format
+
+                    if "time" in self.record_list:
+                        self.h5_file["time"][record_idx, 0] = self.time
+                    if "qc" in self.record_list:
+                        self.h5_file["qc"][record_idx,:,:] = self.qc.copy()
+                    if "pc" in self.record_list:
+                        self.h5_file["pc"][record_idx,:,:] = self.pc.copy()
+                    if "drive" in self.record_list:
+                        self.h5_file["drive"][record_idx, 0] = self._evaluate_drive(self.time)
+                    if "energy" in self.record_list:
+                        self.h5_file["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
+                    if "effective_efield" in self.record_list:
+                        self.h5_file["effective_efield"][record_idx,:,:] = self._calc_effective_efield(self.qc, self.dipole)
+                    if "molecule_response" in self.record_list:
+                        self.h5_file["molecule_response"][record_idx,:,:] = self.dmudt.copy()
+                    if "molecule_dipole" in self.record_list:
+                        self.h5_file["molecule_dipole"][record_idx,:,:] = self.dipole.copy()
+
+                    if record_idx % 1000 == 0:
+                        self.h5_file.flush()
+                        print(f"[MultiModeCavity] Flushed history data to {self.filename} at step {step_idx}.")
 
             else :
                 if "time" in self.record_list:
@@ -882,9 +907,9 @@ class MultiModeSimulation(DummyEMSimulation):
         print(f"[MultiModeCavity] Recording history: {self.record_history}, to disk: {self.record_to_disk}, record_every_steps: {self.record_every_steps}, record_max_steps: {self.record_max_steps}, fields: {record_list if not not_record else 'none'}")
         
         if self.record_history:
-
+            
             if self.record_to_disk and disk_folder_address is not None:
-                    
+
                 self.dim_dict = {"time": 1,
                     "qc": self.qc.shape, 
                     "pc": self.pc.shape, 
@@ -894,22 +919,34 @@ class MultiModeSimulation(DummyEMSimulation):
                     "molecule_response": self.dmudt.shape, 
                     "molecule_dipole": self.dmudt.shape}
 
-                TEMP_DIR = os.path.join(disk_folder_address, "temp_memmap")
-                self.temp_dir = TEMP_DIR
-                if os.path.exists(TEMP_DIR):
-                    print(f"[MultiModeCavity] Temporary directory {TEMP_DIR} already exists. Deleting and recreating it.")
-                    shutil.rmtree(TEMP_DIR)
-                os.makedirs(TEMP_DIR, exist_ok=True)
-                self.memmaps = {}
-                self.temp_files = {}
+                if self.file_format == "npz": 
 
-                for name in self.record_list:
-                    dim = self.dim_dict[name]
-                    filename = os.path.join(TEMP_DIR, f"temp_{name}.bin")
-                    self.temp_files[name] = filename
-                    full_shape = (self.record_max_steps,) + (dim if isinstance(dim, tuple) else (dim,))
-                    memmap_obj = np.memmap(filename, dtype=np.float64, mode='w+', shape=full_shape)
-                    self.memmaps[name] = memmap_obj
+                    TEMP_DIR = os.path.join(disk_folder_address, "temp_memmap")
+                    self.temp_dir = TEMP_DIR
+                    if os.path.exists(TEMP_DIR):
+                        print(f"[MultiModeCavity] Temporary directory {TEMP_DIR} already exists. Deleting and recreating it.")
+                        shutil.rmtree(TEMP_DIR)
+                    os.makedirs(TEMP_DIR, exist_ok=True)
+                    self.memmaps = {}
+                    self.temp_files = {}
+
+                    for name in self.record_list:
+                        dim = self.dim_dict[name]
+                        filename = os.path.join(TEMP_DIR, f"temp_{name}.bin")
+                        self.temp_files[name] = filename
+                        full_shape = (self.record_max_steps,) + (dim if isinstance(dim, tuple) else (dim,))
+                        memmap_obj = np.memmap(filename, dtype=np.float64, mode='w+', shape=full_shape)
+                        self.memmaps[name] = memmap_obj
+                
+                else : # h5 format
+                    
+                    assert self.file_format == "h5"
+                    self.h5_file = h5py.File(os.path.join(disk_folder_address, self.filename), 'w')
+                    self.datasets = {}
+                    for name in self.record_list:
+                        dim = self.dim_dict[name]
+                        shape = (self.record_max_steps,) + (dim if isinstance(dim, tuple) else (dim,))
+                        self.datasets[name] = self.h5_file.create_dataset(name, shape=shape, dtype=np.float64, maxshape=shape)
 
             elif self.record_to_disk and self.disk_folder_address is None:
                 raise ValueError("disk_folder_address must be provided when record_to_disk is True.")
@@ -1029,21 +1066,28 @@ class MultiModeSimulation(DummyEMSimulation):
         if self.record_history:
 
             if self.record_to_disk and self.disk_folder_address is not None :
+                
+                if self.file_format == "npz":
 
-                for mm in self.memmaps.values():
-                    mm.flush()
+                    for mm in self.memmaps.values():
+                        mm.flush()
 
-                data_for_npz = {}
-                for name in self.record_list:
-                    dim = self.dim_dict[name]
-                    full_shape = (self.record_max_steps,) + (dim if isinstance(dim, tuple) else (dim,))
-                    filename = self.temp_files[name]
-                    mmap_ro = np.memmap(filename, dtype=np.float64, mode='r', shape=full_shape)
-                    data_for_npz[name] = mmap_ro
+                    data_for_npz = {}
+                    for name in self.record_list:
+                        dim = self.dim_dict[name]
+                        full_shape = (self.record_max_steps,) + (dim if isinstance(dim, tuple) else (dim,))
+                        filename = self.temp_files[name]
+                        mmap_ro = np.memmap(filename, dtype=np.float64, mode='r', shape=full_shape)
+                        data_for_npz[name] = mmap_ro
 
-                npz_path = os.path.join(self.disk_folder_address, self.filename)
-                np.savez_compressed(npz_path, **data_for_npz)
-                print(f"[MultiModeCavity] Results saved to {npz_path}")
-                data_for_npz.clear()
-                shutil.rmtree(self.temp_dir)
-                print(f"[MultiModeCavity] Temporary files at {self.temp_dir} deleted.")
+                    npz_path = os.path.join(self.disk_folder_address, self.filename)
+                    np.savez_compressed(npz_path, **data_for_npz)
+                    print(f"[MultiModeCavity] Results saved to {npz_path}")
+                    data_for_npz.clear()
+                    shutil.rmtree(self.temp_dir)
+                    print(f"[MultiModeCavity] Temporary files at {self.temp_dir} deleted.")
+
+                else : # h5 format
+                    
+                    self.h5_file.close()
+                    print(f"[MultiModeCavity] Results saved to {os.path.join(self.disk_folder_address, self.filename)}")
