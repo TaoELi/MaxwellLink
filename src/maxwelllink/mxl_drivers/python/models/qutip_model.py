@@ -210,7 +210,8 @@ def _build_model_tls(
     rho0 = (
         (1.0 - pe) * (g * g.dag())
         + pe * (e * e.dag())
-        + np.sqrt(pe * (1.0 - pe)) * ((g * e.dag()) * np.exp(1j * e_phase) + (e * g.dag()) * np.exp(-1j * e_phase))
+        + np.sqrt(pe * (1.0 - pe))
+        * ((g * e.dag()) * np.exp(1j * e_phase) + (e * g.dag()) * np.exp(-1j * e_phase))
     )
 
     return dict(H0=H0, mu_ops=mu_ops, c_ops=c_ops, rho0=rho0)

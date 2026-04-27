@@ -98,8 +98,8 @@ def __getattr__(name):
         from .em_solvers.single_mode_cavity import (
             SingleModeSimulation,
         )
-    
-        return locals()[name]   
+
+        return locals()[name]
     if name in {
         "MultiModeSimulation",
     }:

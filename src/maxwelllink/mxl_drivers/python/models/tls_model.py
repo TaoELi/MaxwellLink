@@ -93,7 +93,9 @@ class TLSModel(DummyModel):
         self.C = np.array([[1], [0]], dtype=np.complex128)
         self.rho = np.dot(self.C, self.C.conj().transpose())
         # reset the initial population
-        self._reset_tls_population(excited_population=self.pe_initial, coherence_phase=self.e_phase_initial)
+        self._reset_tls_population(
+            excited_population=self.pe_initial, coherence_phase=self.e_phase_initial
+        )
         # optional, checking whether the driver can be paused and resumed properly
         self.restarted = False
 
@@ -137,7 +139,9 @@ class TLSModel(DummyModel):
 
     # ------------ internal functions -------------
 
-    def _reset_tls_population(self, excited_population: float = 0.0, coherence_phase: float = 0.0):
+    def _reset_tls_population(
+        self, excited_population: float = 0.0, coherence_phase: float = 0.0
+    ):
         """
         Reset the TLS population to a specified excited state population in a pure
         state.
@@ -158,7 +162,10 @@ class TLSModel(DummyModel):
         if excited_population < 0 or excited_population > 1:
             raise ValueError("Excited population must be between 0 and 1.")
         self.C = np.array(
-            [[(1 - excited_population) ** 0.5], [excited_population**0.5 * np.exp(1j * coherence_phase)]],
+            [
+                [(1 - excited_population) ** 0.5],
+                [excited_population**0.5 * np.exp(1j * coherence_phase)],
+            ],
             dtype=np.complex128,
         )
         self.rho = np.dot(self.C, self.C.conj().transpose())
