@@ -46,5 +46,12 @@ Advanced Features
 
    notebook/advanced_features_polarization_type.ipynb
 
+Additional Molecular Drivers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Users can also explore different features of **MaxwellLink** via ``vibe simulations``.  See :doc:`../agent_skills` for more details. 
+.. toctree::
+   :maxdepth: 1
+
+   notebook/dftbplus.ipynb
+
+Users can also explore different features of **MaxwellLink** via ``vibe simulations``.  See :doc:`../agent_skills` for more details.
