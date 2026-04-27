@@ -93,7 +93,6 @@ TCP mode:
      MaxwellLinkSocket = {
        Host = "localhost"
        Port = 31415
-       MoleculeId = 0
        ResetDipole = Yes
      }
    }
@@ -108,7 +107,6 @@ Unix socket mode:
      IonDynamics = Yes
      MaxwellLinkSocket = {
        File = "dftbplus_h2o"
-       MoleculeId = 0
        ResetDipole = Yes
      }
    }
