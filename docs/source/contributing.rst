@@ -134,10 +134,12 @@ Connecting to External C++/Fortran Drivers
 ------------------------------------------
 
 External MD or quantum codes written in C++/Fortran can communicate with MaxwellLink through
-the socket protocol. The LAMMPS driver (``fix_maxwelllink.cpp``) serves as a
+the socket protocol. The LAMMPS driver (``fix_maxwelllink.cpp`` in ``src/maxwelllink/mxl_drivers/lammps/``) serves as a
 production-ready reference for implementation. Experienced developers
 can modify the LAMMPS driver to connect production-level codes to MaxwellLink.
 
+Particularly, to connect a new socket driver, we do not need to modify any code in **MaxwellLink** . All we need to do 
+is to implement a light-weighted socket communication protocol in the external code.
 
 
 Implementing a New EM Solver
