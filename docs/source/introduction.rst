@@ -49,8 +49,8 @@ Included molecular drivers
 
 - **Model systems** 
 
-  - a lightweight TLS driver.
-  - a `QuTiP <https://qutip.org>`_ interface for custom Hamiltonians with optional Lindblad terms.
+  - A lightweight TLS driver.
+  - A `QuTiP <https://qutip.org>`_ interface for custom Hamiltonians with optional Lindblad terms.
 
 - **First-principles nonadiabatic quantum dynamics** 
 
