@@ -51,9 +51,12 @@ ElectronDynamics = {
     SpinType = singlet
   }
   FieldStrength [v/a] = 0.00
+  IonDynamics = Yes
+  MovedAtoms = 1:2
+  InitialTemperature [Kelvin] = 0.0
   MaxwellLinkSocket = {
     File = "__MXL_SOCKET__"
-    ResetDipole = No
+    ResetDipole = Yes
   }
 }
 
