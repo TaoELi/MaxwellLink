@@ -40,3 +40,13 @@ All Python drivers run via `mxl_driver --model <id> --param "k1=v1, ..."` (socke
 - Hub must be reachable from the LAMMPS process; ensure atoms carry charges.
 - Common SLURM pattern: driver job reads `tcp_host_port_info.txt` (written by main job) and runs `srun lmp_mxl -in in.lmp`.
 - Preferred scaffold template for HPC: `skills/mxl-project-scaffold/assets/templates/slurm-meep-lammps-tcp`.
+
+## DFTB+ `MaxwellLinkSocket` (`dftbplus`)
+- Use: real-time Ehrenfest TDDFTB via the MaxwellLink-aware DFTB+ fork. Socket-only (external Fortran binary, no embedded mode). Dep: DFTB+ built with `-DWITH_SOCKETS=ON` from `git@github.com:TEL-Research/dftbplus.git`; Slater-Koster `.skf` files.
+- In `dftb_in.hsd`, inside `ElectronDynamics`:
+  - TCP: `MaxwellLinkSocket = { Host = "localhost"; Port = 31415; ResetDipole = Yes }`
+  - UNIX: `MaxwellLinkSocket = { File = "<name>"; MoleculeId = 0; ResetDipole = Yes }` (relative names → `/tmp/socketmxl_<name>`).
+- `ElectronDynamics/TimeStep [au]` must equal the EM-side `dt_au`; set `IonDynamics = Yes` to enable Ehrenfest nuclear motion.
+- Launch as a separate process: `dftb+ > dftbplus.out` (set `DFTBPLUS_BIN` if not on PATH).
+- HPC pattern mirrors LAMMPS: main job writes `tcp_host_port_info.txt`, driver job patches a template `.hsd` and runs `dftb+`.
+- Reference inputs: `tutorials/dftbplus_input/`; full docs: `docs/source/drivers/dftbplus.rst`.

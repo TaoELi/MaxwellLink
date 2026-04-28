@@ -30,6 +30,7 @@ description: This skill should be used when users ask how to set up, choose, or 
   - Psi4 RT-Ehrenfest: `skills/mxl-driver-psi4-rtehrenfest/SKILL.md`
   - ASE: `skills/mxl-driver-ase/SKILL.md`
   - LAMMPS `fix mxl`: `skills/mxl-driver-lammps/SKILL.md`
+  - DFTB+ `MaxwellLinkSocket`: `skills/mxl-driver-dftbplus/SKILL.md`
 - Operations:
   - CLI workspace management (`mxl init/clean/hpc`): `skills/mxl-cli/SKILL.md`
   - SLURM/HPC: `skills/mxl-hpc-slurm/SKILL.md`
