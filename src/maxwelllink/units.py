@@ -29,7 +29,7 @@ BOHR_PER_ANG = 1.889726124565062
 FORCE_PER_EFIELD_AU_EV_PER_ANG = 51.422067476
 AMU_TO_AU = 1822.888486209  # 1 amu in atomic units
 
-def unit_conversion(from_unit, to_unit='au'):
+def unit(from_unit, to_unit='au'):
     """Return the conversion factor from one unit to another."""
 
     from_unit = str(from_unit).upper()
