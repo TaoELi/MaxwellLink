@@ -18,7 +18,7 @@ import numpy as np
 
 from ..molecule import Molecule
 from ..sockets import SocketHub, am_master
-from ..units import FS_TO_AU, AU_TO_CM_INV, AU_TO_K
+from ..units import AU_TO_FS, FS_TO_AU, AU_TO_CM_INV, AU_TO_K
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
 
 
@@ -123,7 +123,6 @@ class FabryPerotCavities():
     def __init__(
         self,
         frequency_au: float = None,   
-        damping_au: float = 0.0,
         coupling_strength: float = 1.0,
         coupling_axis: str = "xy",
         x_grid_1d: Optional[list] = None,
@@ -142,8 +141,6 @@ class FabryPerotCavities():
         ----------
         frequency_au : float
             Cavity angular frequency :math:`\omega_{\rm c}` (a.u.).
-        damping_au : float
-            Damping constant :math:`\kappa` (a.u.).
         coupling_strength : float, default: 1.0
             Prefactor :math:`\varepsilon`.
         coupling_axis : str, default: "xy"
@@ -181,7 +178,6 @@ class FabryPerotCavities():
             raise ValueError("delta_omega_y_au must be provided.")
         self.delta_omega_y_au = float(delta_omega_y_au)
 
-        self.damping = float(damping_au)
         self.coupling_strength = float(coupling_strength)
 
         self.axis = np.array([False, False, False], dtype=bool)
@@ -313,6 +309,7 @@ class MultiModeSimulation(DummyEMSimulation):
     def __init__(
         self,
         dt_au: float = None,
+        damping_au: float = 0.0,
         molecules: Optional[Iterable[Molecule]] = None,
         drive: Optional[Union[float, Callable[[float], float]]] = None,
         hub: Optional[SocketHub] = None,
@@ -322,6 +319,8 @@ class MultiModeSimulation(DummyEMSimulation):
         random_seed: Optional[int] = None,
         mu_initial: Optional[np.ndarray] = None,
         dmudt_initial: Optional[np.ndarray] = None,
+        NVT_T_au: Optional[float] = None,
+        langevin_tau_au: Optional[float] = None,
         include_dse: bool = True,
         molecule_half_step: bool = False,
         shift_dipole_baseline: bool = False,
@@ -333,6 +332,8 @@ class MultiModeSimulation(DummyEMSimulation):
         ----------
         dt_au : float
             Simulation time step in atomic units.
+        damping_au : float
+            Damping constant :math:`\kappa` (a.u.).
         molecules : iterable of Molecule, optional
             Molecules coupled to the cavity.
         drive : float or callable, optional
@@ -352,6 +353,10 @@ class MultiModeSimulation(DummyEMSimulation):
             Initial total molecular dipole vector (a.u.).
         dmudt_initial : np.ndarray, default: None
             Initial time derivative of the total molecular dipole vector (a.u.).
+        NVT_T_au : float, optional
+            Temperature for NVT thermostat applied to cavity modes, in atomic units. If None, system will be propagated under NVE ensemble.
+        langevin_tau_au : float, optional
+            Characteristic time for Langevin thermostat applied to cavity modes, in atomic units. If None, no Langevin thermostat is applied.
         include_dse : bool, default: True
             Include dipole self-energy term in the simulation.
         molecule_half_step : bool, default: True
@@ -370,7 +375,7 @@ class MultiModeSimulation(DummyEMSimulation):
         elif dt_au <= 0.0:
             raise ValueError("dt_au must be positive.")
         self.dt = float(dt_au)
-
+        self.damping = float(damping_au)
         self.gauge = gauge.lower()
         if self.gauge not in ["dipole"]:
             raise ValueError("gauge must be 'dipole'.")
@@ -436,6 +441,25 @@ class MultiModeSimulation(DummyEMSimulation):
         self.dmudt_prev = self.dmudt.copy()
         self.acceleration = np.zeros((self.n_mode, 3), dtype=float)
 
+        if NVT_T_au is not None:
+
+            if NVT_T_au <= 0.0:
+                raise ValueError("NVT_T_au must be positive if provided.")
+            self.NVT_T_au = NVT_T_au
+
+            if langevin_tau_au is not None: 
+                if langevin_tau_au <= 0.0:
+                    raise ValueError("langevin_tau_au must be positive if provided.")
+                self.langevin_tau_au = langevin_tau_au
+                self.T_l = np.exp(-self.dt / self.langevin_tau_au)
+                self.S_l = np.sqrt(self.NVT_T_au * (1.0 - self.T_l**2))
+                self.rng = np.random.default_rng()
+            else :
+                raise ValueError("langevin_tau_au must be provided when NVT_T_au is provided to specify the characteristic time for Langevin thermostat.")
+            
+            self.if_NVT = True
+            print(f"[MultiModeSimulation] NVT thermostat enabled with T = {self.NVT_T_au*AU_TO_K} K = {self.NVT_T_au} a.u., Langevin tau = {self.langevin_tau_au*AU_TO_FS} fs = {self.langevin_tau_au} a.u.")
+
         self.include_dse = bool(include_dse)
         self.molecule_half_step = bool(molecule_half_step)
         self.shift_dipole_baseline = bool(shift_dipole_baseline)
@@ -473,7 +497,7 @@ class MultiModeSimulation(DummyEMSimulation):
         
         print(f"[MultiModeCavity] Initializing cavity mode momenta with Maxwell-Boltzmann distribution at T = {T_au*AU_TO_K} K = {T_au} a.u.")
         p_mb  = np.random.normal(0, np.sqrt(T_au), size=(self.n_mode, 3))
-        p_mb -= np.mean(p_mb, axis=0)  # zero total momentum
+        p_mb -= np.mean(p_mb, axis=0)  # remove any net momentum to ensure total momentum is zero
         T_cur = np.sum(p_mb**2) / (3 * (self.n_mode - 1))
         scaling_factor = np.sqrt(T_au / T_cur)
         return p_mb * scaling_factor
@@ -759,6 +783,11 @@ class MultiModeSimulation(DummyEMSimulation):
             self.pc[:,1] = self.pc[:,1] @ self.abc_y
 
         self.pc *= np.exp(-self.damping * self.dt)
+
+        # apply Langevin thermostat to the cavity mode momenta if enabled
+        if self.if_NVT:
+            random_kick = self.rng.normal(0, self.S_l, size=self.pc.shape)
+            self.pc = self.pc * self.T_l + random_kick
 
         # 4. update acceleration and time
         self.time += self.dt
