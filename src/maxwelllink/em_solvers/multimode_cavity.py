@@ -331,7 +331,6 @@ class MultiModeSimulation(DummyEMSimulation):
     def __init__(
         self,
         dt_au: float = None,
-        dt_fs: float = None,
         molecules: Optional[Iterable[Molecule]] = None,
         drive: Optional[Union[float, Callable[[float], float]]] = None,
         hub: Optional[SocketHub] = None,
@@ -350,8 +349,6 @@ class MultiModeSimulation(DummyEMSimulation):
         ----------
         dt_au : float
             Simulation time step in atomic units.
-        dt_fs : float
-            Simulation time step in femtoseconds. If both dt_au and dt_fs are provided, dt_au will be used.
         molecules : iterable of Molecule, optional
             Molecules coupled to the cavity.
         drive : float or callable, optional
@@ -379,11 +376,11 @@ class MultiModeSimulation(DummyEMSimulation):
 
         super().__init__(hub=hub, molecules=molecules)
 
-        if dt_au is None and dt_fs is None:
-            raise ValueError("Either dt_au or dt_fs must be provided.")
-        self.dt = float(dt_au) if dt_au is not None else float(dt_fs) * FS_TO_AU
-        if self.dt <= 0.0:
+        if dt_au is None:
+            raise ValueError("dt_au must be provided.")
+        elif dt_au <= 0.0:
             raise ValueError("dt_au must be positive.")
+        self.dt = float(dt_au)
 
         self.gauge = gauge.lower()
         if self.gauge not in ["dipole"]:
