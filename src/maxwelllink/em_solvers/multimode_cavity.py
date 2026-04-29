@@ -18,7 +18,7 @@ import numpy as np
 
 from ..molecule import Molecule
 from ..sockets import SocketHub, am_master
-from ..units import FS_TO_AU, AU_TO_CM_INV
+from ..units import FS_TO_AU, AU_TO_CM_INV, AU_TO_K
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
 
 
@@ -424,6 +424,8 @@ class MultiModeSimulation(DummyEMSimulation):
         if T_initial_au is not None: 
             if T_initial_au <= 0.0:
                 raise ValueError("Initial temperature must be positive.")
+            if np.any(pc_initial != 0.0):
+                print("[MultiModeSimulation] Warning: pc_initial is provided and will be overridden by Maxwell-Boltzmann initialization.")
             pc_initial = self._Maxwell_Boltzmann_initialize(T_initial_au, seed=random_seed)
 
         self.qc = qc_initial * self.axis
@@ -469,6 +471,7 @@ class MultiModeSimulation(DummyEMSimulation):
             print("[MultiModeCavity] Warning: Only one mode present. Initializing with zero momenta.")
             return np.zeros((self.n_mode, 3))
         
+        print(f"[MultiModeCavity] Initializing cavity mode momenta with Maxwell-Boltzmann distribution at T = {T_au*AU_TO_K} K = {T_au} a.u.")
         p_mb  = np.random.normal(0, np.sqrt(T_au), size=(self.n_mode, 3))
         p_mb -= np.mean(p_mb, axis=0)  # zero total momentum
         T_cur = np.sum(p_mb**2) / (3 * (self.n_mode - 1))
