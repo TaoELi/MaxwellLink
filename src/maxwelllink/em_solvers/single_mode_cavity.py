@@ -305,6 +305,7 @@ class SingleModeSimulation(DummyEMSimulation):
         self.dipole_lookahead = self.dipole.copy()
         self.has_dipole_lookahead = False
         self.acceleration = np.zeros(3, dtype=float)
+        self.if_NVT = False
 
         if NVT_T_au is not None:
 
