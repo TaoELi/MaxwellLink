@@ -9,8 +9,7 @@ See the following reference for the underlying theory:
 
 .. admonition:: Reference
    
-   TE Li. Mesoscale Molecular Simulations of Fabry–Pérot Vibrational Strong Coupling. `J. Chem. Theory Comput. 20, 7016–7031 (2024) <https://doi.org/10.1021/acs.jctc.4c00349
->`_.
+   TE Li. Mesoscale Molecular Simulations of Fabry–Pérot Vibrational Strong Coupling. `J. Chem. Theory Comput. 20, 7016–7031 (2024) <https://doi.org/10.1021/acs.jctc.4c00349>`_.
 
 
 
