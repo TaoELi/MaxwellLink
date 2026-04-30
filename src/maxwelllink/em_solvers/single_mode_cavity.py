@@ -302,6 +302,8 @@ class SingleModeSimulation(DummyEMSimulation):
         self.dipole_prev = self.dipole.copy()
         self.dmudt = np.array(dmudt_initial, dtype=float) * self.axis
         self.dmudt_prev = self.dmudt.copy()
+        self.dipole_lookahead = self.dipole.copy()
+        self.has_dipole_lookahead = False
         self.acceleration = np.zeros(3, dtype=float)
 
         if NVT_T_au is not None:
@@ -577,6 +579,50 @@ class SingleModeSimulation(DummyEMSimulation):
         # print("In Function, Total Dipole velocity (dmu/dt):", dmudt)
         return dipole, dmudt
 
+    def _calc_dipole_lookahead_vec(self):
+        """
+        Reconstruct the next force-time dipole from returned VV dipole data.
+
+        Drivers may report ``mu`` at both half a time step after force
+        evaluation (``mux_au``/``muy_au``/``muz_au``) and at the force
+        evaluation time itself (``mux_m_au``/``muy_m_au``/``muz_m_au``). For
+        velocity Verlet position dipoles, ``2 * mu_half - mu_force`` is the
+        drifted dipole at the next force-evaluation time, before the next
+        E-field kick is known.
+        """
+
+        half_keys = ("mux_au", "muy_au", "muz_au")
+        force_keys = ("mux_m_au", "muy_m_au", "muz_m_au")
+        dipole_vec = np.zeros(3, dtype=float)
+        has_half_step_shift = False
+
+        if not self.wrappers:
+            return dipole_vec, False
+
+        for wrapper in self.wrappers:
+            if not wrapper.additional_data_history:
+                return dipole_vec, False
+
+            latest_data = wrapper.additional_data_history[-1]
+            if not all(k in latest_data for k in half_keys + force_keys):
+                return dipole_vec, False
+
+            rescaling_factor = 1.0
+            if wrapper.rescaling_factor is not None:
+                rescaling_factor = float(wrapper.rescaling_factor)
+
+            mu_half = np.array([latest_data[k] for k in half_keys], dtype=float)
+            mu_force = np.array([latest_data[k] for k in force_keys], dtype=float)
+            has_half_step_shift = has_half_step_shift or not np.array_equal(
+                mu_half, mu_force
+            )
+            dipole_vec += (2.0 * mu_half - mu_force) * rescaling_factor
+
+        if self.shift_dipole_baseline:
+            dipole_vec -= self.dipole_baseline
+
+        return dipole_vec * self.axis, has_half_step_shift
+
     def _step_dipole_gauge(self):
         """
         Advance the simulation by one time step under the dipole gauge.
@@ -593,9 +639,16 @@ class SingleModeSimulation(DummyEMSimulation):
         # this interpolation is not very accurate
         # dipole = self.dipole + 0.5 * self.dt * (1.5 * self.dmudt - 0.5 * self.dmudt_prev)
         # the following expression is accurate to the order of dt^4
-        dipole = self.dipole_prev + self.dt * (
-            9.0 / 8.0 * self.dmudt + 3.0 / 8.0 * self.dmudt_prev
-        )
+        if (
+            self.include_dse
+            and self.has_dipole_lookahead
+            and not self.molecule_half_step
+        ):
+            dipole = self.dipole_lookahead.copy()
+        else:
+            dipole = self.dipole_prev + self.dt * (
+                9.0 / 8.0 * self.dmudt + 3.0 / 8.0 * self.dmudt_prev
+            )
 
         efield_vec = self._calc_effective_efield(
             qc_prev + 0.5 * self.dt * pc_half, dipole
@@ -607,6 +660,9 @@ class SingleModeSimulation(DummyEMSimulation):
 
         # the value for n+1/2 time step
         self.dipole, self.dmudt = self._step_molecules(efield_vec)
+        self.dipole_lookahead, self.has_dipole_lookahead = (
+            self._calc_dipole_lookahead_vec()
+        )
 
         # extrapolate to n+1 time step (ONLY NEEDED FOR VELOCITY VERLET MOLECULE PROPAGATION)
         if self.molecule_half_step:

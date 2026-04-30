@@ -210,6 +210,12 @@ class SHOModel(DummyModel):
         data["mux_au"] = self.dipole_vec[0] if self.dipole_vec is not None else 0.0
         data["muy_au"] = self.dipole_vec[1] if self.dipole_vec is not None else 0.0
         data["muz_au"] = self.dipole_vec[2] if self.dipole_vec is not None else 0.0
+        data["mux_m_au"] = 0.0
+        data["muy_m_au"] = 0.0
+        data["muz_m_au"] = 0.0
+        data[["mux_m_au", "muy_m_au", "muz_m_au"][self.orientation_idx]] = (
+            self.dipole_moment * self.q
+        )
         data["p_au"] = self.p
         data["q_au"] = self.q
         return data

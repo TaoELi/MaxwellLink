@@ -59,6 +59,7 @@ class FixMaxwellLink : public Fix {
   double dmu_dt_global_prev[3];
   double mu_local[3];
   double mu_global[3];
+  double mu_global_force[3];
   double mu_global_midpoint[3];
   double mu_global_prev[3];
 
