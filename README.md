@@ -23,16 +23,17 @@ The latest version of **MaxwellLink** (v0.3) ships with [**AI Agent Skills**](ht
 - **Embracing state-of-the-art ecosystems** in both computational electrodynamics and quantum chemistry, extending the boundary of light-matter simulations.
 - **Unified Python interfaces** for socket-connected and embedded molecular drivers in light-matter simulations.
 - **EM dynamics** from simple to complex systems, supporting
-  - Full-feature [MEEP FDTD](https://meep.readthedocs.io/en/latest/),
-  - Single-mode cavity, and
-  - Arbitrary laser driven dynamics. 
+  - full-feature [MEEP FDTD](https://meep.readthedocs.io/en/latest/),
+  - single-mode cavity, 
+  - multimode Fabry-Perot cavity, and
+  - arbitrary laser driven dynamics. 
 - **Heterogeneous molecular theories** in one simulation, including 
-  - two-level systems,
+  - two-level systems and simple harmonic oscillators,
   - [QuTiP](https://qutip.org/) model Hamiltonians, 
   - in-house RT-TDDFT/Ehrenfest dynamics using [Psi4](https://psicode.org/) integrals, 
   - [ASE](https://wiki.fysik.dtu.dk/ase/) classical dynamics, 
-  - modified [LAMMPS](https://www.lammps.org/) for classical MD via `fix mxl`, 
-  - modified [DFTB+](https://github.com/TEL-Research/dftbplus) for tight-binding real-time Ehrenfest dynamics.
+  - direction socket connection to modified [LAMMPS](https://www.lammps.org/) for classical MD via `fix mxl`, 
+  - direction socket connection to modified [DFTB+](https://github.com/TEL-Research/dftbplus) for tight-binding BOMD/real-time Ehrenfest dynamics.
 - **Extensible code structure** to add custom EM solvers or molecular drivers with minimal effort.
 - **Embedded AI Agent Skills** to allow users to chat within, e.g., [Visual Code IDE + Codex](https://taoeli.github.io/MaxwellLink/agent_skills.html), to directly generate desired input files and even run jobs on both local machines and HPC systems.
 

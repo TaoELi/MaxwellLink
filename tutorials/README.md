@@ -19,6 +19,10 @@ The sections below group tutorials by the employed electromagnetic solver.
 - [Collective, heterogeneous coupling of QuTiP + RT-TDDFT HCN molecules](./05_singlemode_many_drivers.ipynb)
 - [Vibrational strong coupling with liquid water: Unix socket](./06_singlemode_vsc.ipynb)
 
+## Multimode Cavity
+
+- [Dispersion relation for vibrational strong coupling in Fabry-Perot cavity](./11_multimode_sho.ipynb)
+
 ## MEEP FDTD
 
 - [Spontaneous emission of TLS: TCP socket](./07_meep_tls_spontaneous_emission.ipynb)

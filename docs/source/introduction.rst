@@ -41,6 +41,7 @@ Included EM solvers
 - **Single-mode cavity** – a simple 1D cavity mode solver with support for
   damping and external driving fields, useful for rapid prototyping and debugging
   of simplified quantum optics and polaritonics models.
+- **Multi-mode cavity** – a more complex multi-mode Fabry-Perot cavity solver.
 - **Laser driven dynamics** – a driver that applies arbitrary user-defined classical electric fields
   without back-action from the molecular system, useful for pump-probe and strong-field simulations.
 
@@ -50,6 +51,7 @@ Included molecular drivers
 - **Model systems** 
 
   - A lightweight TLS driver.
+  - A lightweight simple harmonic oscillator (SHO) driver.
   - A `QuTiP <https://qutip.org>`_ interface for custom Hamiltonians with optional Lindblad terms.
 
 - **First-principles nonadiabatic quantum dynamics** 
@@ -61,6 +63,7 @@ Included molecular drivers
 
   - ASE drivers that wrap any `ASE <https://ase-lib.org/index.html>`_ calculator (including `Psi4 <https://psicode.org/>`_, `ORCA <https://www.faccts.de/orca/>`_, `DFTB+ <https://www.dftbplus.org/>`_).
   - Direct socket connection to `LAMMPS <https://www.lammps.org/>`_ using ``fix mxl``.
+  - Direct socket connection to **Born-Oppenheimer Molecular Dynamics** using a modified `DFTB+ <https://github.com/TEL-Research/dftbplus>`_ code.
 
 Learning path
 ~~~~~~~~~~~~~~~

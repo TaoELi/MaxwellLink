@@ -10,8 +10,9 @@ through the ``mxl_driver`` console script (socket mode) or directly via
 Python-based Drivers for Testing and Debugging
 ------------------------------------------------
 
-The light-weight two-level system (TLS) driver and the simple harmonic oscillator (SHO) driver are designed for testing and debugging 
- the simulation of electronic or nuclear dynamics, respectively.
+
+The light-weight two-level system (TLS) driver and the simple harmonic oscillator (SHO) driver are designed for testing and debugging the simulation of electronic or nuclear dynamics, respectively.
+
 
 .. toctree::
    :maxdepth: 1

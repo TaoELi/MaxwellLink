@@ -35,6 +35,13 @@ Single-Mode Cavity
    notebook/05_singlemode_many_drivers.ipynb
    notebook/06_singlemode_vsc.ipynb
 
+Multimode Cavity
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. toctree::
+   :maxdepth: 1
+
+   notebook/11_multimode_sho.ipynb
 
 MEEP FDTD
 ~~~~~~~~~~~~~~~~~~~~~~~~

@@ -5,7 +5,13 @@ The :mod:`maxwelllink.em_solvers.multimode_cavity` module implements a Fabry-Pé
 collection of damped harmonic oscillators (photon modes) coupled to a
 spatially distributed molecular grid points, each representing a distinct molecular simulation cell.
 
-See `the mesoscale CavMD paper <https://pubs.acs.org/doi/abs/10.1021/acs.jctc.4c00349>`_ for the underlying theory.
+See the following reference for the underlying theory:
+
+.. admonition:: Reference
+   
+   TE Li. Mesoscale Molecular Simulations of Fabry–Pérot Vibrational Strong Coupling. `J. Chem. Theory Comput. 20, 7016–7031 (2024) <https://doi.org/10.1021/acs.jctc.4c00349
+>`_.
+
 
 
 .. note::
@@ -289,19 +295,17 @@ These arguments are passed to
 Returned data
 -------------
 
-Calling :class:`~maxwelllink.em_solvers.multimode_cavity.MultiModeSimulation`
-with ``record_history=True`` populates the following attributes (or the
-equivalent disk-backed arrays when ``record_to_disk=True`` and a
-``npz``/``h5`` file is supplied):
+Calling `simu`=:class:`~maxwelllink.em_solvers.multimode_cavity.MultiModeSimulation`
+with ``record_history=True`` populates the following attributes:
 
-- :attr:`MultiModeSimulation.time_history` – time stamps in atomic units.
-- :attr:`MultiModeSimulation.qc_history` – cavity-mode coordinates with shape ``(n_record, n_mode, 3)``.
-- :attr:`MultiModeSimulation.pc_history` – cavity-mode momenta with shape ``(n_record, n_mode, 3)``.
-- :attr:`MultiModeSimulation.drive_history` – external drive values.
-- :attr:`MultiModeSimulation.energy_history` – total energy of the cavity and coupled molecules.
-- :attr:`MultiModeSimulation.effective_efield_history` – effective electric field at each molecular grid point with shape ``(n_record, n_grid, 3)``.
-- :attr:`MultiModeSimulation.molecule_response_history` – :math:`\partial_t\boldsymbol{\mu}` summed along ``coupling_axis`` for every grid point.
-- :attr:`MultiModeSimulation.molecule_dipole_history` – total molecular dipole at every grid point with shape ``(n_record, n_grid, 3)``.
+- :attr:`simu.time_history` – time stamps in atomic units.
+- :attr:`simu.qc_history` – cavity-mode coordinates with shape ``(n_record, n_mode, 3)``.
+- :attr:`simu.pc_history` – cavity-mode momenta with shape ``(n_record, n_mode, 3)``.
+- :attr:`simu.drive_history` – external drive values.
+- :attr:`simu.energy_history` – total energy of the cavity and coupled molecules.
+- :attr:`simu.effective_efield_history` – effective electric field at each molecular grid point with shape ``(n_record, n_grid, 3)``.
+- :attr:`simu.molecule_response_history` – :math:`\partial_t\boldsymbol{\mu}` summed along ``coupling_axis`` for every grid point.
+- :attr:`simu.molecule_dipole_history` – total molecular dipole at every grid point with shape ``(n_record, n_grid, 3)``.
 
 Each :class:`~maxwelllink.molecule.molecule.Molecule` keeps
 :attr:`~maxwelllink.molecule.molecule.Molecule.additional_data_history`, which
