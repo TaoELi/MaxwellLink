@@ -25,7 +25,7 @@ Key capabilities
   drivers running in the same process or across networked nodes via **TCP sockets**.
 - Mix **heterogeneous molecular theories** within a single EM simulation, spanning
   simple two-level systems (TLSs) and QuTiP model Hamiltonians, to Psi4-based
-  RT-TDDFT/Ehrenfest dynamics, and ASE- or LAMMPS-powered molecular mechanics.
+  RT-TDDFT/Ehrenfest dynamics, ASE- or LAMMPS-powered molecular mechanics, and more.
 - Tolerate driver pauses or restarts — the ``SocketHub`` automatically waits for
   reconnections before resuming a simulation step.
 - Operate under **MPI**: only the master rank in the EM simulation speaks to the drivers 
@@ -47,14 +47,20 @@ Included EM solvers
 Included molecular drivers
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **Model systems** – a lightweight TLS driver and a `QuTiP <https://qutip.org>`_ interface for custom
-  Hamiltonians with optional Lindblad terms.
-- **First-principles nonadiabatic quantum dynamics** – RT-TDDFT and
-  RT-TDDFT-Ehrenfest drivers implemented using `Psi4 <https://psicode.org/>`_ integrals.
-- **Classical or first-principles molecular mechanics** – ASE drivers that wrap any
-  `ASE <https://ase-lib.org/index.html>`_ calculator (including `Psi4 <https://psicode.org/>`_,
-  `ORCA <https://www.faccts.de/orca/>`_, `DFTB+ <https://www.dftbplus.org/>`_) and a `LAMMPS <https://www.lammps.org/>`_ plugin using
-  ``fix mxl``.
+- **Model systems** 
+
+  - A lightweight TLS driver.
+  - A `QuTiP <https://qutip.org>`_ interface for custom Hamiltonians with optional Lindblad terms.
+
+- **First-principles nonadiabatic quantum dynamics** 
+
+  - RT-TDDFT and RT-TDDFT-Ehrenfest dynamics using `Psi4 <https://psicode.org/>`_ integrals as a built-in reference implementation.
+  - Direct socket connection to RT-TDDFTB Ehrenfest dynamics using a modified `DFTB+ <https://github.com/TEL-Research/dftbplus>`_ code.
+
+- **Classical or first-principles Born-Oppenheimer molecular mechanics** 
+
+  - ASE drivers that wrap any `ASE <https://ase-lib.org/index.html>`_ calculator (including `Psi4 <https://psicode.org/>`_, `ORCA <https://www.faccts.de/orca/>`_, `DFTB+ <https://www.dftbplus.org/>`_).
+  - Direct socket connection to `LAMMPS <https://www.lammps.org/>`_ using ``fix mxl``.
 
 Learning path
 ~~~~~~~~~~~~~~~

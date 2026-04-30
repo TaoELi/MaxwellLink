@@ -1,5 +1,7 @@
 from importlib.metadata import version, PackageNotFoundError
 
+from maxwelllink.mxl_drivers.python.models.sho_model import SHOModel
+
 try:
     __version__ = version("maxwelllink")
 except PackageNotFoundError:
@@ -22,6 +24,7 @@ __all__ = [
     "QuTiPModel",
     "ASEModel",
     "TLSModel",
+    "SHOModel",
     # v2 features
     "MeepSimulation",
     "meep_units_helper",
@@ -99,8 +102,8 @@ def __getattr__(name):
         from .em_solvers.single_mode_cavity import (
             SingleModeSimulation,
         )
-    
-        return locals()[name]   
+
+        return locals()[name]
     if name in {
         "MultiModeSimulation",
     }:
@@ -163,4 +166,8 @@ def __getattr__(name):
         from .mxl_drivers.python.models.tls_model import TLSModel
 
         return TLSModel
+    if name == "SHOModel":
+        from .mxl_drivers.python.models.sho_model import SHOModel
+
+        return SHOModel
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -142,6 +142,7 @@ def _build_model_tls(
     mu12=187,
     orientation=2,
     pe_initial=0.0,
+    e_phase_initial=0.0,
     gamma_relax=0.0,
     gamma_dephase=0.0,
 ):
@@ -166,6 +167,8 @@ def _build_model_tls(
         Orientation of the dipole moment; can be ``0`` (x), ``1`` (y), or ``2`` (z).
     pe_initial : float, default: 0.0
         Initial population in the excited state.
+    e_phase_initial : float, default: 0.0
+        Initial phase of the coherence between the ground and excited states in radians.
     gamma_relax : float, default: 0.0
         Relaxation rate (a.u.).
     gamma_dephase : float, default: 0.0
@@ -203,10 +206,12 @@ def _build_model_tls(
 
     # initial state (density matrix form of a coherent state)
     pe = pe_initial
+    e_phase = e_phase_initial
     rho0 = (
         (1.0 - pe) * (g * g.dag())
         + pe * (e * e.dag())
-        + np.sqrt(pe * (1.0 - pe)) * (g * e.dag() + e * g.dag())
+        + np.sqrt(pe * (1.0 - pe))
+        * ((g * e.dag()) * np.exp(1j * e_phase) + (e * g.dag()) * np.exp(-1j * e_phase))
     )
 
     return dict(H0=H0, mu_ops=mu_ops, c_ops=c_ops, rho0=rho0)
@@ -222,7 +227,7 @@ class QuTiPModel(DummyModel):
     Two options for constructing the N-level quantum model are provided:
 
     - **Preset TLS** via a simple CLI parameter, e.g.:
-      ``--param "preset=tls,preset_kwargs=omega=0.242,mu12=187,orientation=2,pe_initial=1e-4"``
+      ``--param "preset=tls,preset_kwargs=omega=0.242,mu12=187,orientation=2,pe_initial=1e-4,e_phase_initial=0.0"``
     - **Fully custom model** via:
       ``--param "module=/path/spec.py,kwargs=..."``
 
@@ -268,13 +273,13 @@ class QuTiPModel(DummyModel):
             Preset model name, e.g. ``'tls'``. Default is ``'tls'``.
         preset_kwargs : str
             Comma-separated ``key=value`` pairs for the preset, such as
-            ``preset_kwargs=omega=0.242,mu12=187,orientation=2,pe=1e-4``.
+            ``preset_kwargs=omega=0.242,mu12=187,orientation=2,pe_initial=1e-4,e_phase_initial=0.0``.
             All key value pairs not recognized will be treated as preset parameters.
         module : str or None, default: None
             Path to a Python file defining ``build_model(**kwargs)``.
         kwargs : str
             Comma-separated ``key=value`` pairs for the user module, such as
-            ``kwargs=omega=0.242,mu12=187,orientation=2,pe=1e-4``.
+            ``kwargs=omega=0.242,mu12=187,orientation=2,pe_initial=1e-4,e_phase_initial=0.0``.
             All key value pairs not recognized will be treated as user module
             parameters if ``module`` is not ``None``.
         fd_dmudt : bool, default: False
@@ -304,6 +309,7 @@ class QuTiPModel(DummyModel):
             "mu12",
             "orientation",
             "pe_initial",
+            "e_phase_initial",
             "gamma_relax",
             "gamma_dephase",
         }

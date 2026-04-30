@@ -251,3 +251,6 @@ projects/experiments.schema.json
 tests/test_agents/*/
 tests/test_agents/prompts_local_extended.txt
 *.DS_Store
+tutorials/dftbplus_runs
+tutorials/dftbplus_bomd_dipder_runs/
+tutorials/dftbplus_bomd_dipole_derivatives.ipynb

@@ -15,51 +15,54 @@ except:
     from dummy_model import DummyModel
 
 
-class TLSModel(DummyModel):
+class SHOModel(DummyModel):
     """
-    A two-level system (TLS) quantum dynamics model.
+    A simple harmonic oscillator (SHO) classical molecular dynamics model.
 
-    This class implements a simple two-level system model for quantum dynamics,
-    which can be integrated with the MaxwellLink framework. The TLS model is
-    characterized by its transition frequency, dipole moment, and orientation of
-    the dipole moment.
+    This class implements a SHO model for classical molecular dynamics,
+    which can be integrated with the MaxwellLink framework. The SHO model is
+    characterized by its frequency, dipole moment, and orientation of
+    the dipole moment. The velocity verlet algorithm is used for integration.
+
+    The Hamiltonian for this SHO is given by:
+    :math:`H = \\frac{1}{2} m \\omega^2 q^2 + \\frac{1}{2m} p^2 - \\mu_{0} q \\cdot E`
 
     Notes
     -----
     Implementing this class is mostly for demonstration purposes. Users who want
-    to enjoy model quantum system calculations should use **QuTiPModel** instead,
-    which provides a very general and robust implementation of an arbitrary model
-    Hamiltonian (with Lindbladian dissipation) based on the **QuTiP** library.
+    to enjoy advanced classical molecular dynamics simulations should use 
+    the **LAMMPS** or **DFTB+** socket driver, or the **ASE** python driver instead.
     """
 
     def __init__(
         self,
-        omega: float = 2.4188843e-1,  # 1.0 in MEEP units with [T]=0.1 fs
-        mu12: float = 1.870819866e2,  # 0.1 in MEEP units with [T]=0.1 fs
+        omega: float = 2.4188843e-1,
+        mu0: float = 1.870819866e2,
         orientation: int = 2,
-        pe_initial: float = 0.0,
-        e_phase_initial: float = 0.0,
+        p_initial: float = 0.0,
+        q_initial: float = 0.0,
         checkpoint: bool = False,
         restart: bool = False,
         verbose: bool = False,
     ):
         """
-        Initialize the necessary parameters for the TLS quantum dynamics model.
+        Initialize the necessary parameters for the SHO classical molecular dynamics model.
 
         Parameters
         ----------
         omega : float, default: 2.4188843e-1
             Transition frequency in atomic units (a.u.). Default is ``2.4188843e-1``
             a.u. (``1.0`` in MEEP units with ``[T]=0.1 fs``).
-        mu12 : float, default: 1.870819866e2
-            Dipole moment in atomic units (a.u.). Default is ``1.870819866e2`` a.u.
-            (``0.1`` in MEEP units with ``[T]=0.1 fs``).
+        mu0 : float, default: 1.870819866e2
+            Dipole-coordinate coupling prefactor in atomic units (a.u.). The
+            instantaneous dipole is :math:`\\mu(t) = \\mu_{0}\\, q(t)`. Default
+            is ``1.870819866e2`` a.u. (``0.1`` in MEEP units with ``[T]=0.1 fs``).
         orientation : int, default: 2
             Orientation of the dipole moment; can be ``0`` (x), ``1`` (y), or ``2`` (z).
-        pe_initial : float, default: 0.0
-            Initial population in the excited state.
-        e_phase_initial : float, default: 0.0
-            Initial phase of the coherence between the ground and excited states in radians.
+        p_initial : float, default: 0.0
+            Initial momentum of the oscillator.
+        q_initial : float, default: 0.0
+            Initial position of the oscillator.
         checkpoint : bool, default: False
             Whether to enable checkpointing.
         restart : bool, default: False
@@ -71,31 +74,19 @@ class TLSModel(DummyModel):
         # Initialize the base class (DummyModel)
         super().__init__(verbose, checkpoint, restart)
 
-        # Initialize TLS-specific parameters
+        # Initialize SHO-specific parameters
         self.omega = omega  # transition frequency in a.u.
-        self.dipole_moment = mu12  # dipole moment in a.u.
+        self.dipole_moment = mu0  # dipole-coordinate coupling prefactor mu0 in a.u.
         self.orientation = orientation  # orientation of the dipole moment
         self.orientation_idx = int(orientation)
         if self.orientation_idx < 0 or self.orientation_idx > 2:
             raise ValueError("Orientation must be 0 (x), 1 (y), or 2 (z).")
 
-        self.pe_initial = pe_initial  # initial population in the excited state
-        self.e_phase_initial = e_phase_initial  # initial phase of the coherence
-        # set the Hamiltonian and density matrix for the TLS molecule
-        self.Hs = np.array([[0, 0], [0, self.omega]], dtype=np.complex128)
-        self.SIGMAX = np.array([[0, 1], [1, 0]], dtype=np.complex128)
+        self.p = p_initial  # initial momentum of the oscillator
+        self.q = q_initial  # initial position of the oscillator
+        self.acceleration = 0.0 # acceleration of the oscillator
+        self.p_half = 0.0  # half time step momentum of the oscillator
 
-        # expHs uses dt, which is 0.0 at construction of the base class (DummyModel)
-        # Therefore, we need to update it in the initialize() method.
-        self.expHs = expm(-1j * self.dt * self.Hs / 2.0)
-
-        # initial wavefunction and density matrix as ground state
-        self.C = np.array([[1], [0]], dtype=np.complex128)
-        self.rho = np.dot(self.C, self.C.conj().transpose())
-        # reset the initial population
-        self._reset_tls_population(
-            excited_population=self.pe_initial, coherence_phase=self.e_phase_initial
-        )
         # optional, checking whether the driver can be paused and resumed properly
         self.restarted = False
 
@@ -107,8 +98,8 @@ class TLSModel(DummyModel):
 
     def initialize(self, dt_new, molecule_id):
         """
-        Set the time step and molecule ID for this quantum dynamics model, and provide
-        additional initialization for the TLS.
+        Set the time step and molecule ID for this SHO model, and provide
+        additional initialization for the SHO.
 
         Parameters
         ----------
@@ -122,14 +113,7 @@ class TLSModel(DummyModel):
         self.molecule_id = int(molecule_id)
 
         # Prepare checkpoint filename
-        self.checkpoint_filename = "tls_checkpoint_id_%d.npz" % self.molecule_id
-
-        # Rebuild expHs with new dt sent from SocketHub
-        self.expHs = expm(-1j * self.dt * self.Hs / 2.0)
-        print(
-            "init TLSModel with dt = %.6f a.u., molecule ID = %d"
-            % (self.dt, self.molecule_id)
-        )
+        self.checkpoint_filename = "sho_checkpoint_id_%d.npz" % self.molecule_id
 
         # Consider whether to restart from a checkpoint. We do this here because this function
         # is called in the driver during the INIT stage of the socket communication.
@@ -137,44 +121,11 @@ class TLSModel(DummyModel):
             self._reset_from_checkpoint(self.molecule_id)
             self.restarted = True
 
-    # ------------ internal functions -------------
-
-    def _reset_tls_population(
-        self, excited_population: float = 0.0, coherence_phase: float = 0.0
-    ):
-        """
-        Reset the TLS population to a specified excited state population in a pure
-        state.
-
-        Notes
-        -----
-        This function name starts with an underscore to indicate that it is intended
-        for internal use.
-
-        Parameters
-        ----------
-        excited_population : float, default: 0.0
-            Initial population in the excited state.
-        coherence_phase : float, default: 0.0
-            Initial phase of the coherence between the ground and excited states in radians.
-        """
-
-        if excited_population < 0 or excited_population > 1:
-            raise ValueError("Excited population must be between 0 and 1.")
-        self.C = np.array(
-            [
-                [(1 - excited_population) ** 0.5],
-                [excited_population**0.5 * np.exp(1j * coherence_phase)],
-            ],
-            dtype=np.complex128,
-        )
-        self.rho = np.dot(self.C, self.C.conj().transpose())
-
     # -------------- one FDTD step under E-field --------------
 
     def propagate(self, effective_efield_vec):
         """
-        Propagate the quantum molecular dynamics given the effective electric field
+        Propagate the SHO classical molecular dynamics given the effective electric field
         vector.
 
         Parameters
@@ -189,21 +140,31 @@ class TLSModel(DummyModel):
             )
         int_ep = effective_efield_vec[self.orientation_idx] * self.dipole_moment
 
-        # update the density matrix for one time step
-        U = np.dot(
-            self.expHs, np.dot(expm((1j * self.dt * int_ep) * self.SIGMAX), self.expHs)
-        )
-        self.rho = np.dot(np.dot(U, self.rho), U.conj().transpose())
+        # update the position and momentum for one time step using velocity verlet 
+        # p updated to half time step
+        self.p += 0.5 * self.acceleration * self.dt
+        # q updated to full time step
+        self.q += self.p * self.dt
+        # force evaluation time [the same time as the E-field time]
+        self.acceleration = -self.omega**2 * self.q + int_ep
+        # p also updated to the full time step, the same as the E-field time
+        self.p += 0.5 * self.acceleration * self.dt
+
+        # we expect to return dmu/dt at half a time step after the E-field time
+        self.p_half = self.p + 0.5 * self.acceleration * self.dt
+        # we also expect to return mu at half a time step after the E-field time
+        self.q_half = self.q + 0.5 * self.p_half * self.dt
 
         # update current time in a.u.
         self.t += self.dt
 
-        dipole = self.dipole_moment * 2.0 * np.real(self.rho[0, 1])
+        # store the information for returning back to the SocketHub
+        dipole = self.dipole_moment * self.q_half
         dip_vec = np.zeros(3)
         dip_vec[self.orientation_idx] = dipole
 
         self.dipole_vec = dip_vec
-        self.energy = np.trace(np.dot(self.Hs, self.rho)).real
+        self.energy = 0.5 * self.omega**2 * self.q_half**2 + 0.5 * self.p_half**2
 
     def calc_amp_vector(self):
         """
@@ -217,8 +178,8 @@ class TLSModel(DummyModel):
             :math:`[\\mathrm{d}\\mu_x/\\mathrm{d}t,\\ \\mathrm{d}\\mu_y/\\mathrm{d}t,\\ \\mathrm{d}\\mu_z/\\mathrm{d}t]`.
         """
 
-        # analytical expression for dmu/dt in a TLS
-        amp = -2.0 * self.omega * np.imag(self.rho[0, 1]) * self.dipole_moment
+        # analytical expression for dmu/dt in a SHO
+        amp = self.p_half * self.dipole_moment
         amp_vec = np.zeros(3)
         amp_vec[self.orientation_idx] = amp
         if self.verbose:
@@ -249,10 +210,8 @@ class TLSModel(DummyModel):
         data["mux_au"] = self.dipole_vec[0] if self.dipole_vec is not None else 0.0
         data["muy_au"] = self.dipole_vec[1] if self.dipole_vec is not None else 0.0
         data["muz_au"] = self.dipole_vec[2] if self.dipole_vec is not None else 0.0
-        data["Pe"] = self.rho[1, 1].real
-        data["Pg"] = self.rho[0, 0].real
-        data["Pge_real"] = np.real(self.rho[0, 1])
-        data["Pge_imag"] = np.imag(self.rho[0, 1])
+        data["p_au"] = self.p
+        data["q_au"] = self.q
         return data
 
     def _dump_to_checkpoint(self):
@@ -264,7 +223,7 @@ class TLSModel(DummyModel):
         ``self.checkpoint_filename`` includes ``molid`` at ``self.initialize()``.
         """
 
-        np.savez(self.checkpoint_filename, density_matrix=self.rho, time=self.t)
+        np.savez(self.checkpoint_filename, time=self.t, p=self.p, q=self.q, acceleration=self.acceleration)
 
     def _reset_from_checkpoint(self):
         """
@@ -279,7 +238,9 @@ class TLSModel(DummyModel):
             )
         else:
             data = np.load(self.checkpoint_filename)
-            self.rho = np.asarray(data["density_matrix"], dtype=np.complex128)
+            self.p = float(data["p"])
+            self.q = float(data["q"])
+            self.acceleration = float(data["acceleration"])
             self.t = float(data["time"])
 
     def _snapshot(self):
@@ -294,6 +255,9 @@ class TLSModel(DummyModel):
 
         snapshot = {
             "time": self.t,
+            "p": self.p,
+            "q": self.q,
+            "acceleration": self.acceleration,
             "density_matrix": self.rho.copy(),
         }
         return snapshot
@@ -309,4 +273,7 @@ class TLSModel(DummyModel):
         """
 
         self.t = snapshot["time"]
+        self.p = snapshot["p"]
+        self.q = snapshot["q"]
+        self.acceleration = snapshot["acceleration"]
         self.rho = snapshot["density_matrix"]

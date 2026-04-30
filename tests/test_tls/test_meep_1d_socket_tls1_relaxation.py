@@ -500,7 +500,7 @@ def test_1d_1tls_relaxation_point_dipole_matches_analytical_via_socket_v2(
         if mp.am_master():
             driver_argv = _resolve_driver_path() + shlex.split(
                 f"--model tls --port {port} "
-                '--param "omega=0.242, mu12=187, orientation=2, pe_initial=0.1" '
+                '--param "omega=0.242, mu12=187, orientation=2, pe_initial=0.1, e_phase_initial=0.1" '
             )
             # Use a fresh, non-blocking subprocess; inherit env/stdio for easy debugging
             proc = subprocess.Popen(driver_argv)

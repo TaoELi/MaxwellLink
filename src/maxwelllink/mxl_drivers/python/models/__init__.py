@@ -12,6 +12,7 @@ from typing import Callable, Dict
 
 __all__ = [
     "DummyModel",
+    "SHOModel",
     "TLSModel",
     "QuTiPModel",
     "RTTDDFTModel",
@@ -46,6 +47,10 @@ def __getattr__(name: str):
         from .dummy_model import DummyModel
 
         return DummyModel
+    if name == "SHOModel":
+        from .sho_model import SHOModel
+
+        return SHOModel
     if name == "TLSModel":
         from .tls_model import TLSModel
 
@@ -126,6 +131,7 @@ def _factory(cls_path: str) -> Callable:
 # --- Public registry used by mxl_driver.py; all entries are LAZY factories ---
 __drivers__: Dict[str, Callable] = {
     "dummy": _factory(".dummy_model:DummyModel"),
+    "sho": _factory(".sho_model:SHOModel"),
     "tls": _factory(".tls_model:TLSModel"),
     "qutip": _factory(".qutip_model:QuTiPModel"),
     "rttddft": _factory(".rttddft_model:RTTDDFTModel"),

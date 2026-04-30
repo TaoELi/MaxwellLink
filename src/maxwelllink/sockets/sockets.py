@@ -466,9 +466,7 @@ def _pack_init(sock: socket.socket, init_dict: dict):
 _FIELDDATA_HDR = _pad12(FIELDDATA)
 _GETSOURCE_HDR = _pad12(GETSOURCE)
 _EYE3_BYTES = bytes(
-    memoryview(
-        np.ascontiguousarray(np.eye(3, dtype=DT_FLOAT))
-    ).cast("B")
+    memoryview(np.ascontiguousarray(np.eye(3, dtype=DT_FLOAT))).cast("B")
 )
 _NAT1_BYTES = _INT32.pack(1)
 
@@ -494,17 +492,15 @@ def _build_step_request(efield_au) -> bytes:
         A single buffer suitable for one ``sock.sendall`` call.
     """
 
-    vec = np.ascontiguousarray(
-        np.asarray(efield_au, dtype=DT_FLOAT).reshape(3)
-    )
+    vec = np.ascontiguousarray(np.asarray(efield_au, dtype=DT_FLOAT).reshape(3))
     vec_bytes = bytes(memoryview(vec).cast("B"))
     return b"".join(
         (
             _FIELDDATA_HDR,
-            _EYE3_BYTES,   # cell (identity; unused by EM drivers)
-            _EYE3_BYTES,   # invcell (identity; unused by EM drivers)
-            _NAT1_BYTES,   # nat = 1
-            vec_bytes,     # positions payload = [Ex, Ey, Ez]
+            _EYE3_BYTES,  # cell (identity; unused by EM drivers)
+            _EYE3_BYTES,  # invcell (identity; unused by EM drivers)
+            _NAT1_BYTES,  # nat = 1
+            vec_bytes,  # positions payload = [Ex, Ey, Ez]
             _GETSOURCE_HDR,
         )
     )
@@ -542,8 +538,8 @@ _SEND_TEMPLATE = (
 assert len(_SEND_TEMPLATE) == _SEND_TOTAL_LEN
 
 _REPLY_FIXED_LEN = 12 + 8 + 4 + 24 + 72 + 4  # = 124
-_REPLY_NAT_OFFSET = 12 + 8                   # = 20
-_REPLY_FORCES_OFFSET = 12 + 8 + 4            # = 24
+_REPLY_NAT_OFFSET = 12 + 8  # = 20
+_REPLY_FORCES_OFFSET = 12 + 8 + 4  # = 24
 _REPLY_EXTRA_LEN_OFFSET = 12 + 8 + 4 + 24 + 72  # = 120
 
 _STRUCT_3D = struct.Struct("<3d")
@@ -860,9 +856,7 @@ class SocketHub:
             # Already registered under this fd — swap the data payload.
             try:
                 self._selector.unregister(sock)
-                self._selector.register(
-                    sock, selectors.EVENT_READ, data=int(molid)
-                )
+                self._selector.register(sock, selectors.EVENT_READ, data=int(molid))
             except (KeyError, ValueError, OSError):
                 pass
         except OSError:
@@ -886,9 +880,7 @@ class SocketHub:
         except (KeyError, ValueError, OSError):
             pass
 
-    def _mark_dead(
-        self, st: _ClientState, molid: Optional[int], reason: str
-    ) -> None:
+    def _mark_dead(self, st: _ClientState, molid: Optional[int], reason: str) -> None:
         """
         Mark a client dead, unregister it from the selector, and clear binding.
 
@@ -914,9 +906,7 @@ class SocketHub:
         if molid is not None and molid >= 0:
             with self._lock:
                 if self.bound.get(molid) is st:
-                    self._log(
-                        f"DISCONNECTED ({reason}): mol {molid} from {st.address}"
-                    )
+                    self._log(f"DISCONNECTED ({reason}): mol {molid} from {st.address}")
                     self.bound[molid] = None
 
     def _dispatch_field(
@@ -1004,9 +994,7 @@ class SocketHub:
         # EM protocol contract: drivers always send nat=1.
         nat = _STRUCT_I.unpack_from(mv, _REPLY_NAT_OFFSET)[0]
         if nat != 1:
-            raise _SocketClosed(
-                f"EM fast-path expected nat=1, got nat={nat}"
-            )
+            raise _SocketClosed(f"EM fast-path expected nat=1, got nat={nat}")
 
         fx, fy, fz = _STRUCT_3D.unpack_from(mv, _REPLY_FORCES_OFFSET)
         extra_len = _STRUCT_I.unpack_from(mv, _REPLY_EXTRA_LEN_OFFSET)[0]
@@ -1079,9 +1067,7 @@ class SocketHub:
         """
 
         pending_ids = [
-            int(mid)
-            for mid in init_payloads.keys()
-            if self.bound.get(int(mid)) is None
+            int(mid) for mid in init_payloads.keys() if self.bound.get(int(mid)) is None
         ]
         if not pending_ids:
             return
@@ -1294,8 +1280,7 @@ class SocketHub:
             if not self.all_bound(wants, require_init=True):
                 init_payloads = {
                     int(mid): (
-                        requests.get(mid, {}).get("init")
-                        or {"molecule_id": int(mid)}
+                        requests.get(mid, {}).get("init") or {"molecule_id": int(mid)}
                     )
                     for mid in wants
                 }

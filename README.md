@@ -12,7 +12,7 @@
 </p>
 
 
-**MaxwellLink** is a free and open-source framework for self-consistent light–matter simulations. It connects electromagnetic solvers, such as [MEEP FDTD](https://meep.readthedocs.io/en/latest/) or the built-in single-mode cavity, to a wide range of molecular drivers, from multilevel open quantum systems to (nonadiabatic) first-principles molecular dynamics.
+**MaxwellLink** is a free and open-source framework for self-consistent light–matter simulations. It connects electromagnetic solvers, such as [MEEP FDTD](https://meep.readthedocs.io/en/latest/) or the built-in normal-mode cavity and laser driven dynamics, to a wide range of molecular drivers, from multilevel open quantum systems to (nonadiabatic) first-principles molecular dynamics.
 
 This code supports both exploratory demonstrations and production-scale calculations. In particular, its socket-based architecture allows large-scale self-consistent light–matter simulations to run efficiently across multiple HPC nodes.
 
@@ -22,7 +22,17 @@ The latest version of **MaxwellLink** (v0.3) ships with [**AI Agent Skills**](ht
 
 - **Embracing state-of-the-art ecosystems** in both computational electrodynamics and quantum chemistry, extending the boundary of light-matter simulations.
 - **Unified Python interfaces** for socket-connected and embedded molecular drivers in light-matter simulations.
-- **Heterogeneous molecular theories** including TLS, [QuTiP](https://qutip.org/) model Hamiltonians, in-house RT-TDDFT/Ehrenfest dynamics using [Psi4](https://psicode.org/) integrals, [ASE](https://wiki.fysik.dtu.dk/ase/) classical dynamics, and modified [LAMMPS](https://www.lammps.org/) via `fix mxl`, all in one simulation.
+- **EM dynamics** from simple to complex systems, supporting
+  - Full-feature [MEEP FDTD](https://meep.readthedocs.io/en/latest/),
+  - Single-mode cavity, and
+  - Arbitrary laser driven dynamics. 
+- **Heterogeneous molecular theories** in one simulation, including 
+  - two-level systems,
+  - [QuTiP](https://qutip.org/) model Hamiltonians, 
+  - in-house RT-TDDFT/Ehrenfest dynamics using [Psi4](https://psicode.org/) integrals, 
+  - [ASE](https://wiki.fysik.dtu.dk/ase/) classical dynamics, 
+  - modified [LAMMPS](https://www.lammps.org/) for classical MD via `fix mxl`, 
+  - modified [DFTB+](https://github.com/TEL-Research/dftbplus) for tight-binding real-time Ehrenfest dynamics.
 - **Extensible code structure** to add custom EM solvers or molecular drivers with minimal effort.
 - **Embedded AI Agent Skills** to allow users to chat within, e.g., [Visual Code IDE + Codex](https://taoeli.github.io/MaxwellLink/agent_skills.html), to directly generate desired input files and even run jobs on both local machines and HPC systems.
 
@@ -35,6 +45,14 @@ pip install maxwelllink
 ```
 
 Optional drivers ([MEEP FDTD](https://meep.readthedocs.io/en/latest/), [QuTiP](https://qutip.org/), [Psi4](https://psicode.org/), [ASE](https://wiki.fysik.dtu.dk/ase/), [LAMMPS](https://www.lammps.org/)) can be added by following the instructions in the [documentation](https://taoeli.github.io/MaxwellLink/overview.html).
+
+## Documentation
+
+Visit the [documentation](https://taoeli.github.io/MaxwellLink/overview.html) for installation details, tutorials, API reference, and guidelines on extending **MaxwellLink**.
+
+## Tutorials
+
+The jupyter notebook tutorials are located at [tutorials/](./tutorials/). Users may also view the tutorials rendered at the [documentation website](https://taoeli.github.io/MaxwellLink/tutorials/index.html).
 
 ## Running simulations with AI Agents
 
@@ -55,15 +73,6 @@ If your machine supports SLURM job management (such as HPCs), run the following 
 ```bash
 mxl hpc
 ```
-
-
-## Documentation
-
-Visit the [documentation](https://taoeli.github.io/MaxwellLink/overview.html) for installation details, tutorials, API reference, and guidelines on extending **MaxwellLink**.
-
-## Tutorials
-
-The jupyter notebook tutorials are located at [tutorials/](./tutorials/). Users may also view the tutorials rendered at the [documentation website](https://taoeli.github.io/MaxwellLink/tutorials/index.html).
 
 ## Citation
 

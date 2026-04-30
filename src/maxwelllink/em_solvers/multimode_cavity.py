@@ -254,8 +254,8 @@ class FabryPerotCavity():
         self.n_grid = np.size(x_grid_2d)
 
         # generate 2D grid points of kx, ky in units of 1/Lx, 1/Ly
-        kx_grid_1d = (np.pi * np.array([i + 1.0 for i in range(n_mode_x)]))
-        ky_grid_1d = (np.pi * np.array([i + 1.0 for i in range(n_mode_y)]))
+        kx_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_x)])
+        ky_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_y)])
         kx_grid_2d, ky_grid_2d = np.meshgrid(kx_grid_1d, ky_grid_1d)
         kx_grid_2d = np.reshape(kx_grid_2d, -1)
         ky_grid_2d = np.reshape(ky_grid_2d, -1)
@@ -271,8 +271,8 @@ class FabryPerotCavity():
         ftilde_k = np.zeros((self.n_mode, self.n_grid, 3), dtype=float)
         for i in range(self.n_grid):
             x, y = x_grid_2d[i], y_grid_2d[i]
-            ftilde_k[:, i, 0] = (2.0 * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y))
-            ftilde_k[:, i, 1] = (2.0 * np.sin(kx_grid_2d * x) * np.cos(ky_grid_2d * y))
+            ftilde_k[:, i, 0] = 2.0 * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y)
+            ftilde_k[:, i, 1] = 2.0 * np.sin(kx_grid_2d * x) * np.cos(ky_grid_2d * y)
 
         self.ftilde_k = ftilde_k
         self.varepsilon_k = self.coupling_strength * self.omega_k / np.min(self.omega_k)
@@ -281,14 +281,15 @@ class FabryPerotCavity():
         self.y_grid_1d = y_grid_1d
         abc_x, abc_y = None, None
         self.abc_cutoff = float(abc_cutoff)
-        if self.abc_cutoff != 0.00 : 
+        if self.abc_cutoff != 0.00:
 
             r01 = self.abc_cutoff
             r10 = 1 - self.abc_cutoff
 
             def abc(grid_1d, r01=0.05, r10=0.95):
 
-                if len(grid_1d) < 3 : return np.ones_like(grid_1d)
+                if len(grid_1d) < 3:
+                    return np.ones_like(grid_1d)
 
                 grid_1d = np.array(grid_1d)
                 r00, r11 = grid_1d[0], grid_1d[-1]
@@ -296,30 +297,43 @@ class FabryPerotCavity():
                 S = np.zeros_like(grid_1d)
                 middle = np.where((grid_1d < r10) & (grid_1d > r01))[0]
                 S[middle] = 1
-                
+
                 l_side = np.where((grid_1d < r01) & (grid_1d > r00))[0]
                 r_side = np.where((grid_1d < r11) & (grid_1d > r10))[0]
 
                 def smooth(x, l, r, p):
                     frac = (l - r) / (l - x) + (r - l) / (x - r)
-                    if p : return 1 / (1 + np.exp(-frac))
-                    else : return 1 / (1 + np.exp(frac))
-                
-                l_value = np.array([smooth(i, l=r00, r=r01, p=False) for i in grid_1d[l_side]])
-                r_value = np.array([smooth(i, l=r10, r=r11, p=True) for i in grid_1d[r_side]])
+                    if p:
+                        return 1 / (1 + np.exp(-frac))
+                    else:
+                        return 1 / (1 + np.exp(frac))
+
+                l_value = np.array(
+                    [smooth(i, l=r00, r=r01, p=False) for i in grid_1d[l_side]]
+                )
+                r_value = np.array(
+                    [smooth(i, l=r10, r=r11, p=True) for i in grid_1d[r_side]]
+                )
                 S[l_side] = l_value
                 S[r_side] = r_value
 
                 return S
-            
+
             self.smooth_x = abc(self.x_grid_1d, r01=r01, r10=r10)
             self.smooth_y = abc(self.y_grid_1d, r01=r01, r10=r10)
-            self.smooth_x_2d, self.smooth_y_2d = np.meshgrid(self.smooth_x, self.smooth_y)
+            self.smooth_x_2d, self.smooth_y_2d = np.meshgrid(
+                self.smooth_x, self.smooth_y
+            )
             self.smooth_2d = self.smooth_x_2d * self.smooth_y_2d
             self.smooth_2d = np.diag(np.reshape(self.smooth_2d, -1))
             from scipy.linalg import pinv
-            abc_x = self.ftilde_k[:,:,0] @ self.smooth_2d @ pinv(self.ftilde_k[:,:,0])
-            abc_y = self.ftilde_k[:,:,1] @ self.smooth_2d @ pinv(self.ftilde_k[:,:,1])
+
+            abc_x = (
+                self.ftilde_k[:, :, 0] @ self.smooth_2d @ pinv(self.ftilde_k[:, :, 0])
+            )
+            abc_y = (
+                self.ftilde_k[:, :, 1] @ self.smooth_2d @ pinv(self.ftilde_k[:, :, 1])
+            )
             self.abc_x = abc_x
             self.abc_y = abc_y
 
@@ -612,7 +626,7 @@ class MultiModeSimulation(DummyEMSimulation):
         """
         requests = {
             w.molecule_id: {
-                "efield_au": efield_vec[w.molecule_id,:],
+                "efield_au": efield_vec[w.molecule_id, :],
                 "meta": {"time_au": self.time},
                 "init": {**w.init_payload, "molecule_id": w.molecule_id},
             }
@@ -624,7 +638,9 @@ class MultiModeSimulation(DummyEMSimulation):
             responses = self.hub.step_barrier(requests)
         return responses
 
-    def _calc_acceleration(self, time: float, mu: np.ndarray, qc: np.ndarray) -> np.ndarray:
+    def _calc_acceleration(
+        self, time: float, mu: np.ndarray, qc: np.ndarray
+    ) -> np.ndarray:
         """
         Calculate the cavity mode acceleration at the given time.
 
@@ -645,7 +661,9 @@ class MultiModeSimulation(DummyEMSimulation):
         drive_val = self._evaluate_drive(time)
         mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
         acceleration = (
-            drive_val - np.einsum('i,ik->ik', self.varepsilon_k, mu_dot_f) - np.einsum("i,ik->ik", self.omega_k**2, qc)
+            drive_val
+            - np.einsum("i,ik->ik", self.varepsilon_k, mu_dot_f)
+            - np.einsum("i,ik->ik", self.omega_k**2, qc)
         )
         # print("In Function, Cavity acceleration:", acceleration)
         acceleration = np.einsum("ik, k->ik", acceleration, self.axis)
@@ -672,8 +690,16 @@ class MultiModeSimulation(DummyEMSimulation):
         # add dipole self-energy term for the electric field if enabled
         if self.include_dse:
             mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
-            varepsilon_dot_qc -= np.einsum("i,ik,i->ik", self.varepsilon_k**2, mu_dot_f, 1.0 / (self.omega_k**2), optimize=True)
-        efield_vec = np.einsum("ijk,ik,k->jk", self.ftilde_k, varepsilon_dot_qc, self.axis, optimize=True)
+            varepsilon_dot_qc -= np.einsum(
+                "i,ik,i->ik",
+                self.varepsilon_k**2,
+                mu_dot_f,
+                1.0 / (self.omega_k**2),
+                optimize=True,
+            )
+        efield_vec = np.einsum(
+            "ijk,ik,k->jk", self.ftilde_k, varepsilon_dot_qc, self.axis, optimize=True
+        )
         assert efield_vec.shape == mu.shape
         return efield_vec
 
@@ -697,10 +723,14 @@ class MultiModeSimulation(DummyEMSimulation):
         """
         kinetic_energy = 0.5 * pc**2
         mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
-        potential_energy = 0.5 * np.einsum("i,ij->ij", self.omega_k**2, qc**2) + np.einsum("i,ij,ij->ij", self.varepsilon_k, qc, mu_dot_f)
+        potential_energy = 0.5 * np.einsum(
+            "i,ij->ij", self.omega_k**2, qc**2
+        ) + np.einsum("i,ij,ij->ij", self.varepsilon_k, qc, mu_dot_f)
         if self.include_dse:
-            potential_energy += 0.5 * np.einsum("i,ij->ij", self.varepsilon_k**2 / self.omega_k**2, mu_dot_f**2)
-    
+            potential_energy += 0.5 * np.einsum(
+                "i,ij->ij", self.varepsilon_k**2 / self.omega_k**2, mu_dot_f**2
+            )
+
         e_molecule = sum(
             wrapper.additional_data_history[-1]["energy_au"]
             for wrapper in self.wrappers
@@ -728,9 +758,15 @@ class MultiModeSimulation(DummyEMSimulation):
                 rescaling_factor = 1.0
                 if wrapper.rescaling_factor != None:
                     rescaling_factor = float(wrapper.rescaling_factor)
-                dipole_vec[wrapper.molecule_id, 0] = latest_data.get("mux_au") * rescaling_factor
-                dipole_vec[wrapper.molecule_id, 1] = latest_data.get("muy_au") * rescaling_factor
-                dipole_vec[wrapper.molecule_id, 2] = latest_data.get("muz_au") * rescaling_factor
+                dipole_vec[wrapper.molecule_id, 0] = (
+                    latest_data.get("mux_au") * rescaling_factor
+                )
+                dipole_vec[wrapper.molecule_id, 1] = (
+                    latest_data.get("muy_au") * rescaling_factor
+                )
+                dipole_vec[wrapper.molecule_id, 2] = (
+                    latest_data.get("muz_au") * rescaling_factor
+                )
         if self.shift_dipole_baseline:
             dipole_vec -= self.dipole_baseline
         return dipole_vec
@@ -788,9 +824,9 @@ class MultiModeSimulation(DummyEMSimulation):
                     except Exception:
                         pass
         # dmu/dt
-        dmudt = np.zeros((self.n_grid,3), dtype=float)
+        dmudt = np.zeros((self.n_grid, 3), dtype=float)
         for wrapper in self.wrappers:
-            dmudt[wrapper.molecule_id,:] = wrapper.last_amp
+            dmudt[wrapper.molecule_id, :] = wrapper.last_amp
         # for dipole gauge we use mu directly instead of dmu/dt
         dipole = self._calc_dipole_vec()
         # we need to filter only the coupling axis
@@ -824,7 +860,7 @@ class MultiModeSimulation(DummyEMSimulation):
         efield_vec = self._calc_effective_efield(
             qc_prev + 0.5 * self.dt * pc_half, dipole
         )
-        
+
         # update dipole info
         self.dipole_prev = self.dipole.copy()
         self.dmudt_prev = self.dmudt.copy()

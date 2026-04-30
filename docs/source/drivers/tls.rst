@@ -78,6 +78,8 @@ Parameters
        ``E_z``. Default: ``2``.
    * - ``pe_initial``
      - Initial excited-state population. Default: ``0.0``.
+   * - ``e_phase_initial``
+     - Initial phase of the coherence between the ground and excited states in radians. Default: ``0.0``.
    * - ``checkpoint``
      - When ``True`` write ``tls_checkpoint_id_<n>.npz`` after each step. Default:
        ``False``.
