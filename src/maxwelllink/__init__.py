@@ -1,7 +1,5 @@
 from importlib.metadata import version, PackageNotFoundError
 
-from maxwelllink.mxl_drivers.python.models.sho_model import SHOModel
-
 try:
     __version__ = version("maxwelllink")
 except PackageNotFoundError:
