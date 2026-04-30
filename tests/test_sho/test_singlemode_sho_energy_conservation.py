@@ -45,7 +45,7 @@ def test_singlemode_sho_energy_conservation(
     coupling_strength = 3e-5
     dt_au = 0.5
     damping_au = 0e-4
-    total_steps = 4096
+    total_steps = 40960
 
     sim = mxl.SingleModeSimulation(
             molecules=[molecule],
@@ -70,7 +70,7 @@ def test_singlemode_sho_energy_conservation(
         import matplotlib.pyplot as plt
         
         plt.plot(time, energy_total, label="total energy")
-        plt.plot(time, energy_molecule, label="molecule energy")
+        # plt.plot(time, energy_molecule, label="molecule energy")
         plt.xlabel("Time (a.u.)")
         plt.ylabel("Energy (a.u.)")
         plt.legend()

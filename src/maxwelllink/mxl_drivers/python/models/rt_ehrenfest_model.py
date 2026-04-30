@@ -197,6 +197,10 @@ class RTEhrenfestModel(RTTDDFTModel):
         self.dmudt_middlepoint = None
         self.dipole_projected = None
         self.dmudt_projected = None
+        self.dipole_force_time = None
+        self.dipole_half_step = None
+        self.dmudt_half_step = None
+        self._V_half_next = None
 
     # -------------- heavy-load initialization (at INIT) --------------
 
@@ -337,6 +341,37 @@ class RTEhrenfestModel(RTTDDFTModel):
         self.mol.set_geometry(geom)
         self.mol.reset_point_group("c1")
         self.mol.update_geometry()
+
+    def _calc_total_dipole(self, R=None):
+        """
+        Compute the total electronic plus nuclear dipole at the current density.
+
+        Parameters
+        ----------
+        R : numpy.ndarray, optional
+            Nuclear positions with shape ``(nat, 3)`` in Bohr. If omitted, the
+            current Psi4 molecule geometry is used.
+
+        Returns
+        -------
+        numpy.ndarray
+            Total dipole vector ``[mu_x, mu_y, mu_z]`` in a.u.
+        """
+
+        Dtot = self.Da + self.Db
+        mu_e = -np.array(
+            [
+                np.trace(Dtot @ self.mu_ints[0]).real,
+                np.trace(Dtot @ self.mu_ints[1]).real,
+                np.trace(Dtot @ self.mu_ints[2]).real,
+            ],
+            dtype=float,
+        )
+        if R is None:
+            R = self._molecule_positions_bohr()
+        Z = np.array([self.mol.Z(a) for a in range(self.mol.natom())], dtype=float)
+        mu_n = (Z[:, None] * np.asarray(R, dtype=float)).sum(axis=0)
+        return mu_e + mu_n
 
     def _density_to_orth(self, Da, Db):
         """
@@ -1215,6 +1250,10 @@ class RTEhrenfestModel(RTTDDFTModel):
         sigma_noise = self.sigma_noise
         friction_gamma_au = self.friction_gamma_au
         rng = self.rng
+        self.dipole_force_time = None
+        self.dipole_half_step = None
+        self.dmudt_half_step = None
+        self._V_half_next = None
 
         for k in range(int(1)):
             # ---- (1) first half-kick of velocity Verlet (p_{k+1/2})
@@ -1257,6 +1296,8 @@ class RTEhrenfestModel(RTTDDFTModel):
             Fk1 = self.compute_forces(efield_vec=efield_vec)
 
             Vk1 = Vk_half + 0.5 * (Fk1 / mass_au[:, None]) * dtN
+            self.dipole_force_time = self._calc_total_dipole(Rk1)
+            self._V_half_next = Vk1 + 0.5 * (Fk1 / mass_au[:, None]) * dtN
 
             # ---- (5) book-keeping / update loop variables
             Rk, Vk, Fk = Rk1, Vk1, Fk1
@@ -1345,32 +1386,28 @@ class RTEhrenfestModel(RTTDDFTModel):
             Amplitude vector ``[A_x, A_y, A_z]`` in a.u.
         """
 
-        # nuclear contribution to dipole moment time derivative
-        nat = self.mol.natom()
-        Z = np.array([self.mol.Z(a) for a in range(nat)], dtype=float)
-        amp_n = (Z[:, None] * self._V_inst).sum(axis=0)
-
         # electronic contribution to dipole moment time derivative
         amp_e = super().calc_amp_vector()
-        amp_total = amp_e + amp_n
 
-        # now here is the issue: if we are at the electronic regime, amp_e is important, which is evaluated at
-        # time step t + dt_e/2, where t is the time for the E-field amplitude. This scheme agrees with FDTD time stepping.
-        # However, if we are at the nuclear regime, amp_n is important, which is evaluated at time step t (E-field time), and we
-        # would expect amp_e/amp_n to be evaluated at time step t + dt_N/2. This inconsistency may lead to some issues when coupling with FDTD.
-
-        # so we need to provide a better amp_total evaluation scheme when at nuclear regime
+        nat = self.mol.natom()
+        Z = np.array([self.mol.Z(a) for a in range(nat)], dtype=float)
         if self.em_coupling_regime == "nuclear":
-            self.dmudt_prev = (
-                self.dmudt_projected.copy()
-                if self.dmudt_projected is not None
-                else amp_total.copy()
+            if self._V_half_next is None:
+                self._V_half_next = (
+                    self.Vk + 0.5 * (self.Fk / self.mass_au[:, None]) * self.dtN
+                )
+            amp_n = (Z[:, None] * self._V_half_next).sum(axis=0)
+            amp_total = amp_e + amp_n
+            self.dmudt_half_step = amp_total.copy()
+            if self.dipole_force_time is None:
+                self.dipole_force_time = self._calc_total_dipole(self.Rk)
+            self.dipole_half_step = (
+                self.dipole_force_time + 0.5 * self.dtN * self.dmudt_half_step
             )
-            self.dmudt_middlepoint = amp_total.copy()
-            self.dmudt_projected = 2.0 * self.dmudt_middlepoint - self.dmudt_prev
-            amp_total = self.dmudt_projected
+            return amp_total
 
-        return amp_total
+        amp_n = (Z[:, None] * self._V_inst).sum(axis=0)
+        return amp_e + amp_n
 
     # ------------ optional operation / checkpoint --------------
 
@@ -1395,25 +1432,21 @@ class RTEhrenfestModel(RTTDDFTModel):
         data["muy_m_au"] = data["muy_au"]
         data["muz_m_au"] = data["muz_au"]
 
-        # now here is the issue: if we are at the electronic regime, dipole is evaluated at
-        # time step t + dt_e/2, where t is the time for the E-field amplitude. This scheme agrees with FDTD time stepping.
-        # However, if we are at the nuclear regime, dipole is evaluated at time step t (E-field time), and we
-        # would expect dipole to be evaluated at time step t + dt_N/2. This inconsistency may lead to some issues when coupling with FDTD.
         if self.em_coupling_regime == "nuclear":
-            self.dipole_prev = (
-                self.dipole_projected.copy()
-                if self.dipole_projected is not None
-                else self.dipoles_eh[-1].copy()
-            )
-            self.dipole_middlepoint = self.dipoles_eh[-1].copy()
-            self.dipole_projected = 2.0 * self.dipole_middlepoint - self.dipole_prev
-            # augment data with projected dipole
-            data["mux_au"] = float(self.dipole_projected[0])
-            data["muy_au"] = float(self.dipole_projected[1])
-            data["muz_au"] = float(self.dipole_projected[2])
-            data["mux_m_au"] = float(self.dipole_middlepoint[0])
-            data["muy_m_au"] = float(self.dipole_middlepoint[1])
-            data["muz_m_au"] = float(self.dipole_middlepoint[2])
+            if self.dmudt_half_step is None:
+                self.calc_amp_vector()
+            if self.dipole_force_time is None:
+                self.dipole_force_time = self._calc_total_dipole(self.Rk)
+            if self.dipole_half_step is None:
+                self.dipole_half_step = (
+                    self.dipole_force_time + 0.5 * self.dtN * self.dmudt_half_step
+                )
+            data["mux_au"] = float(self.dipole_half_step[0])
+            data["muy_au"] = float(self.dipole_half_step[1])
+            data["muz_au"] = float(self.dipole_half_step[2])
+            data["mux_m_au"] = float(self.dipole_force_time[0])
+            data["muy_m_au"] = float(self.dipole_force_time[1])
+            data["muz_m_au"] = float(self.dipole_force_time[2])
 
         return data
 
@@ -1440,6 +1473,10 @@ class RTEhrenfestModel(RTTDDFTModel):
                 "Fk": self.Fk,
                 "_V_inst": self._V_inst,
                 "_step_in_cycle": self._step_in_cycle,
+                "dipole_force_time": self.dipole_force_time,
+                "dipole_half_step": self.dipole_half_step,
+                "dmudt_half_step": self.dmudt_half_step,
+                "_V_half_next": self._V_half_next,
             },
         )
 
@@ -1470,6 +1507,15 @@ class RTEhrenfestModel(RTTDDFTModel):
             self._V_inst = np.asarray(checkpoint_data["_V_inst"], dtype=float)
             self._step_in_cycle = int(checkpoint_data["_step_in_cycle"])
 
+            def _optional_array(name):
+                value = checkpoint_data.get(name, None)
+                return None if value is None else np.asarray(value, dtype=float)
+
+            self.dipole_force_time = _optional_array("dipole_force_time")
+            self.dipole_half_step = _optional_array("dipole_half_step")
+            self.dmudt_half_step = _optional_array("dmudt_half_step")
+            self._V_half_next = _optional_array("_V_half_next")
+
     def _snapshot(self):
         """
         Return a deep-copied snapshot of the current model state.
@@ -1493,6 +1539,20 @@ class RTEhrenfestModel(RTTDDFTModel):
             "Fk": self.Fk.copy(),
             "_V_inst": self._V_inst.copy(),
             "_step_in_cycle": self._step_in_cycle,
+            "dipole_force_time": (
+                None
+                if self.dipole_force_time is None
+                else self.dipole_force_time.copy()
+            ),
+            "dipole_half_step": (
+                None if self.dipole_half_step is None else self.dipole_half_step.copy()
+            ),
+            "dmudt_half_step": (
+                None if self.dmudt_half_step is None else self.dmudt_half_step.copy()
+            ),
+            "_V_half_next": (
+                None if self._V_half_next is None else self._V_half_next.copy()
+            ),
         }
         return snapshot
 
@@ -1517,6 +1577,10 @@ class RTEhrenfestModel(RTTDDFTModel):
         self.Fk = snapshot["Fk"]
         self._V_inst = snapshot["_V_inst"]
         self._step_in_cycle = snapshot["_step_in_cycle"]
+        self.dipole_force_time = snapshot.get("dipole_force_time", None)
+        self.dipole_half_step = snapshot.get("dipole_half_step", None)
+        self.dmudt_half_step = snapshot.get("dmudt_half_step", None)
+        self._V_half_next = snapshot.get("_V_half_next", None)
 
 
 if __name__ == "__main__":

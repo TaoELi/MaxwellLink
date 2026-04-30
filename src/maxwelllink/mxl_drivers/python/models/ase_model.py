@@ -516,6 +516,9 @@ class ASEModel(DummyModel):
         self.dmudt_middlepoint = None
         self.dipole_projected = None
         self.dmudt_projected = None
+        self.dipole_force_time = None
+        self.dipole_half_step = None
+        self._half_step_amp = None
 
         self.kinEnuc = 0.0
 
@@ -574,6 +577,42 @@ class ASEModel(DummyModel):
                 f"-> dt_fs={dt_fs:.6e} fs; substeps={self.n_substeps}; "
                 f"calculator={self.calc_name}({self.calc_kwargs})"
             )
+    
+    # --------- core helper function in propagation -----------
+
+    def _update_vv_dipole_timing(self):
+        """
+        Cache force-time and half-step dipoles for the MaxwellLink expectation
+        of the velocity-Verlet integrator.
+
+        After ASE's VelocityVerlet step, the atoms sit at the force-evaluation
+        geometry and their momenta have received the second half kick. The
+        MaxwellLink single-mode DSE lookahead expects ``mux_m_au`` at this
+        force time and ``mux_au`` half a molecular step later.
+        """
+
+        if self._charges is None:
+            self.dipole_force_time = np.zeros(3, dtype=float)
+            self.dipole_half_step = np.zeros(3, dtype=float)
+            self._half_step_amp = np.zeros(3, dtype=float)
+            return
+
+        q = np.asarray(self._charges, dtype=float).reshape(-1)
+        positions = self.atoms.get_positions()
+        self.dipole_force_time = (q.reshape(1, -1) @ positions).reshape(3)
+        self.dipole_force_time *= BOHR_PER_ANG
+
+        forces = np.asarray(self.atoms.get_forces(md=True), dtype=float)
+        momenta = np.asarray(self.atoms.get_momenta(), dtype=float)
+        masses = self.atoms.get_masses().reshape(-1, 1)
+        p_half = momenta + 0.5 * self.integrator.dt * forces
+        v_half = p_half / masses
+        positions_half = positions + 0.5 * self.integrator.dt * v_half
+
+        self.dipole_half_step = (q.reshape(1, -1) @ positions_half).reshape(3)
+        self.dipole_half_step *= BOHR_PER_ANG
+        self._half_step_amp = (q.reshape(-1, 1) * v_half).sum(axis=0)
+        self._half_step_amp *= BOHR_PER_ANG / FS_TO_AU
 
     # -------------- one FDTD step under E-field --------------
 
@@ -612,6 +651,7 @@ class ASEModel(DummyModel):
         if vel is None:
             vel = np.zeros((len(self.atoms), 3), float)
         self._vel_angs_per_fs = np.asarray(vel, float)
+        self._update_vv_dipole_timing()
 
         # calculate kinetic energy under the atomic units
         kinetic_energy_au = 0.0
@@ -645,21 +685,10 @@ class ASEModel(DummyModel):
         if self._vel_angs_per_fs is None or self._charges is None:
             return np.zeros(3, float)
 
-        v_au = self._vel_angs_per_fs * (BOHR_PER_ANG / FS_TO_AU)
-        amp = (self._charges.reshape(-1, 1) * v_au).sum(axis=0)
+        if self._half_step_amp is None:
+            self._update_vv_dipole_timing()
 
-        # MaxwellLink sends E-field at time step n, expects amp at time step n+1/2.
-        # However, with velocity verlet, if E-field is sent at time step n, then both velocity and position are updated to step n
-        # at the final stage of velocity verlet. Therefore, we need to do a simple linear extrapolation here to get amp at time step n+1/2.
-        self.dmudt_prev = (
-            self.dmudt_projected.copy()
-            if self.dmudt_projected is not None
-            else amp.copy()
-        )
-        self.dmudt_middlepoint = amp.copy()
-        self.dmudt_projected = 2.0 * self.dmudt_middlepoint - self.dmudt_prev
-
-        return self.dmudt_projected
+        return self._half_step_amp.copy()
 
     # ------------ optional operation / checkpoint --------------
 
@@ -677,16 +706,8 @@ class ASEModel(DummyModel):
             A dictionary containing additional data.
         """
 
-        # MaxwellLink sends E-field at time step n, expects amp at time step n+1/2.
-        # However, with velocity verlet, if E-field is sent at time step n, then both velocity and position are updated to step n
-        # at the final stage of velocity verlet. Therefore, we need to do a simple linear extrapolation here to get dipole at time step n+1/2.
-        self.dipole_prev = (
-            self.dipole_projected.copy().reshape(-1)
-            if self.dipole_projected is not None
-            else self.forcewrap._cache_dipole_vec.copy().reshape(-1)
-        )
-        self.dipole_middlepoint = self.forcewrap._cache_dipole_vec.copy().reshape(-1)
-        self.dipole_projected = 2.0 * self.dipole_middlepoint - self.dipole_prev
+        if self.dipole_force_time is None or self.dipole_half_step is None:
+            self._update_vv_dipole_timing()
 
         d = {
             "time_au": float(self.t),
@@ -696,12 +717,12 @@ class ASEModel(DummyModel):
                 else 0.0
             ),
             "energy_kin_au": float(self.kinEnuc),
-            "mux_au": float(self.dipole_projected[0]),
-            "muy_au": float(self.dipole_projected[1]),
-            "muz_au": float(self.dipole_projected[2]),
-            "mux_m_au": float(self.dipole_middlepoint[0]),
-            "muy_m_au": float(self.dipole_middlepoint[1]),
-            "muz_m_au": float(self.dipole_middlepoint[2]),
+            "mux_au": float(self.dipole_half_step[0]),
+            "muy_au": float(self.dipole_half_step[1]),
+            "muz_au": float(self.dipole_half_step[2]),
+            "mux_m_au": float(self.dipole_force_time[0]),
+            "muy_m_au": float(self.dipole_force_time[1]),
+            "muz_m_au": float(self.dipole_force_time[2]),
             "temperature_K": float(self.atoms.get_temperature()),
         }
         return d

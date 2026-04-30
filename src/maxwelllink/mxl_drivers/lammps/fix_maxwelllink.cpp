@@ -380,9 +380,9 @@ void FixMaxwellLink::build_additional_json(std::string& out,
      << ",\"mux_au\":"<< mu_global[0]
      << ",\"muy_au\":"<< mu_global[1]
      << ",\"muz_au\":"<< mu_global[2]
-     << ",\"mux_m_au\":"<< mu_global_midpoint[0]
-     << ",\"muy_m_au\":"<< mu_global_midpoint[1]
-     << ",\"muz_m_au\":"<< mu_global_midpoint[2]
+     << ",\"mux_m_au\":"<< mu_global_force[0]
+     << ",\"muy_m_au\":"<< mu_global_force[1]
+     << ",\"muz_m_au\":"<< mu_global_force[2]
      << ",\"energy_au\":"<< ke_au + pe_au
      << ",\"temp_K\":"<< tempK
      << ",\"pe_au\":" << pe_au
@@ -562,6 +562,7 @@ void FixMaxwellLink::initial_integrate(int /*vflag*/)
           mu_global[i] -= mu_global_initial[i];
         }
 
+        mu_global_force[i] = mu_global[i];
         mu_global_prev[i] = mu_global[i];
         dmu_dt_global_prev[i] = dmu_dt_global[i];
       }
@@ -883,6 +884,14 @@ void FixMaxwellLink::end_of_step()
 
   double ke_au = 0.0;
   double tempK = -1.0;
+  double dmu_dt_global_force[3] = {0.0, 0.0, 0.0};
+
+  calc_initial_dipole_info(mu_global_force, dmu_dt_global_force, ke_au, tempK);
+  if (reset_dipole) {
+    for (size_t i=0; i < 3; ++i) {
+      mu_global_force[i] -= mu_global_initial[i];
+    }
+  }
 
   calc_dipole_info(mu_global_midpoint, dmu_dt_global_midpoint, ke_au, tempK);
   if (reset_dipole) {
@@ -893,11 +902,9 @@ void FixMaxwellLink::end_of_step()
 
   // MaxwellLink expects d(mu)/dt and mu at half a time step after E-field (force) evaluation
   for (size_t i = 0; i < 3; ++i) {
-    //dmu_dt_global[i] = 2.0 * dmu_dt_global_midpoint[i] - dmu_dt_global_prev[i];
-    //mu_global[i] = 2.0 * mu_global_midpoint[i] - mu_global_prev[i];
     dmu_dt_global[i] = dmu_dt_global_midpoint[i];
     mu_global[i] = mu_global_midpoint[i];
-}
+  }
 
 
   double pe_native = modify->compute[modify->find_compute("thermo_pe")]->compute_scalar();
