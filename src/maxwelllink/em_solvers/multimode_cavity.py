@@ -481,10 +481,12 @@ class MultiModeSimulation(DummyEMSimulation):
         if qc_initial is None:
             need_qc_initial = True
         else :
+            need_qc_initial = False
             qc_initial = np.array(qc_initial, dtype=float).reshape((self.n_mode, 3))
         if pc_initial is None:
             need_pc_initial = True
         else :
+            need_pc_initial = False
             pc_initial = np.array(pc_initial, dtype=float).reshape((self.n_mode, 3))
 
         if thermostat_seed is not None:
