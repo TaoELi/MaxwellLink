@@ -537,6 +537,7 @@ class MultiModeSimulation(DummyEMSimulation):
         if isinstance(self.photon_drive, (int, float)):
             const = float(self.photon_drive)
             self.photon_drive = lambda _t, c=const: c
+            
         if isinstance(excited_grid_list, list):
             self.excited_grid_list = excited_grid_list
         else:            
@@ -986,8 +987,8 @@ class MultiModeSimulation(DummyEMSimulation):
                         self.memmaps["qc"][record_idx,:,:] = self.qc.copy()
                     if "pc" in self.record_list:
                         self.memmaps["pc"][record_idx,:,:] = self.pc.copy()
-                    if "photon_pulse" in self.record_list:
-                        self.memmaps["photon_pulse"][record_idx, 0] = self.photon_pulse(self.time)
+                    if "photon_drive" in self.record_list:
+                        self.memmaps["photon_drive"][record_idx, 0] = self.photon_drive(self.time)
                     if "molecule_pulse" in self.record_list:
                         self.memmaps["molecule_pulse"][record_idx, 0] = self.molecule_pulse(self.time)
                     if "energy" in self.record_list:
@@ -1012,8 +1013,8 @@ class MultiModeSimulation(DummyEMSimulation):
                         self.h5_file["qc"][record_idx,:,:] = self.qc.copy()
                     if "pc" in self.record_list:
                         self.h5_file["pc"][record_idx,:,:] = self.pc.copy()
-                    if "photon_pulse" in self.record_list:
-                        self.h5_file["photon_pulse"][record_idx, 0] = self.photon_pulse(self.time)
+                    if "photon_drive" in self.record_list:
+                        self.h5_file["photon_drive"][record_idx, 0] = self.photon_drive(self.time)
                     if "molecule_pulse" in self.record_list:
                         self.h5_file["molecule_pulse"][record_idx, 0] = self.molecule_pulse(self.time)
                     if "energy" in self.record_list:
@@ -1036,8 +1037,8 @@ class MultiModeSimulation(DummyEMSimulation):
                     self.qc_history.append(self.qc.copy())
                 if "pc" in self.record_list:
                     self.pc_history.append(self.pc.copy())
-                if "photon_pulse" in self.record_list:
-                    self.photon_pulse_history.append(self.photon_pulse(self.time))
+                if "photon_drive" in self.record_list:
+                    self.photon_drive_history.append(self.photon_drive(self.time))
                 if "molecule_pulse" in self.record_list:
                     self.molecule_pulse_history.append(self.molecule_pulse(self.time))
                 if "energy" in self.record_list:
@@ -1106,11 +1107,11 @@ class MultiModeSimulation(DummyEMSimulation):
             self.record_list = []
         else :
             for item in record_list:
-                if item not in ["all", "time", "qc", "pc", "photon_pulse", "molecule_pulse", "energy", "effective_efield", "molecule_response", "molecule_dipole"]:
-                    raise ValueError(f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'photon_pulse', 'molecule_pulse', 'energy', 'effective_efield', 'molecule_response', 'molecule_dipole'.")
+                if item not in ["all", "time", "qc", "pc", "photon_drive", "molecule_pulse", "energy", "effective_efield", "molecule_response", "molecule_dipole"]:
+                    raise ValueError(f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'photon_drive', 'molecule_pulse', 'energy', 'effective_efield', 'molecule_response', 'molecule_dipole'.")
             
             if record_list == ["all"]: 
-                self.record_list = ["time", "qc", "pc", "photon_pulse", "molecule_pulse", "energy", "effective_efield", "molecule_response", "molecule_dipole"]
+                self.record_list = ["time", "qc", "pc", "photon_drive", "molecule_pulse", "energy", "effective_efield", "molecule_response", "molecule_dipole"]
             else : 
                 self.record_list = record_list
 
@@ -1128,7 +1129,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 self.dim_dict = {"time": 1,
                     "qc": self.qc.shape, 
                     "pc": self.pc.shape, 
-                    "photon_pulse": 1, 
+                    "photon_drive": 1, 
                     "molecule_pulse": 1, 
                     "energy": 1, 
                     "effective_efield": self.dmudt.shape, 
@@ -1175,8 +1176,8 @@ class MultiModeSimulation(DummyEMSimulation):
                     self.qc_history = []
                 if "pc" in self.record_list:
                     self.pc_history = []
-                if "photon_pulse" in self.record_list:
-                    self.photon_pulse_history = []
+                if "photon_drive" in self.record_list:
+                    self.photon_drive_history = []
                 if "molecule_pulse" in self.record_list:
                     self.molecule_pulse_history = []
                 if "energy" in self.record_list:
