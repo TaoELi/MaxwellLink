@@ -22,20 +22,32 @@ The latest version of **MaxwellLink** (v0.3) ships with [**AI Agent Skills**](ht
 
 - **Embracing state-of-the-art ecosystems** in both computational electrodynamics and quantum chemistry, extending the boundary of light-matter simulations.
 - **Unified Python interfaces** for socket-connected and embedded molecular drivers in light-matter simulations.
-- **EM dynamics** from simple to complex systems, supporting
-  - full-feature [MEEP FDTD](https://meep.readthedocs.io/en/latest/),
-  - single-mode cavity, 
-  - multimode Fabry-Perot cavity, and
-  - arbitrary laser driven dynamics. 
-- **Heterogeneous molecular theories** in one simulation, including 
-  - two-level systems and simple harmonic oscillators,
-  - [QuTiP](https://qutip.org/) model Hamiltonians, 
-  - in-house RT-TDDFT/Ehrenfest dynamics using [Psi4](https://psicode.org/) integrals, 
-  - [ASE](https://wiki.fysik.dtu.dk/ase/) classical dynamics, 
-  - direct socket connection to modified [LAMMPS](https://www.lammps.org/) for classical MD via `fix mxl`, 
-  - direct socket connection to modified [DFTB+](https://github.com/TEL-Research/dftbplus) for tight-binding BOMD/real-time Ehrenfest dynamics.
+- **EM dynamics** from simple to complex systems.
+- **Heterogeneous molecular theories** in one simulation.
 - **Extensible code structure** to add custom EM solvers or molecular drivers with minimal effort.
 - **Embedded AI Agent Skills** to allow users to chat within, e.g., [Visual Code IDE + Codex](https://taoeli.github.io/MaxwellLink/agent_skills.html), to directly generate desired input files and even run jobs on both local machines and HPC systems.
+
+## Supported light-matter simulation schemes
+
+The most appealing feature of **MaxwellLink** is that it enables the self-consistent coupling of **one EM solver** plus **N different molecular drivers** concurrently. The socket communication technique further allows distributed light-matter simulations on different machines and HPC nodes -- both the EM solver and molecular drivers can have their own MPI parallel processes.
+
+As of today, the following [EM solvers](https://maxwelllink.org/em_solvers/index.html) and [molecular drivers](https://maxwelllink.org/drivers/index.html) are supported.
+
+### Supported EM solvers
+
+- Full-feature [MEEP FDTD](https://meep.readthedocs.io/en/latest/),
+- Single-mode cavity, 
+- Multimode Fabry-Perot cavity, and
+- Arbitrary laser driven dynamics. 
+
+### Supported molecular drivers
+
+- Two-level systems and simple harmonic oscillators,
+- [QuTiP](https://qutip.org/) model Hamiltonians, 
+- In-house RT-TDDFT/Ehrenfest dynamics using [Psi4](https://psicode.org/) integrals, 
+- [ASE](https://wiki.fysik.dtu.dk/ase/) classical dynamics, 
+- Direct socket connection to modified [LAMMPS](https://www.lammps.org/) for classical MD via `fix mxl`, 
+- Direct socket connection to modified [DFTB+](https://github.com/TEL-Research/dftbplus) for tight-binding BOMD/real-time Ehrenfest dynamics.
 
 ## Quick Start
 
