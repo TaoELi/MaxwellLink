@@ -57,13 +57,13 @@ Included molecular drivers
 - **First-principles nonadiabatic quantum dynamics** 
 
   - RT-TDDFT and RT-TDDFT-Ehrenfest dynamics using `Psi4 <https://psicode.org/>`_ integrals as a built-in reference implementation.
-  - Direct socket connection to RT-TDDFTB Ehrenfest dynamics using a modified `DFTB+ <https://github.com/TEL-Research/dftbplus>`_ code.
+  - Direct socket connection to RT-TDDFTB Ehrenfest dynamics using a modified `DFTB+ <https://github.com/TEL-Research/dftbplus>`__ code.
 
 - **Classical or first-principles Born-Oppenheimer molecular mechanics** 
 
-  - ASE drivers that wrap any `ASE <https://ase-lib.org/index.html>`_ calculator (including `Psi4 <https://psicode.org/>`_, `ORCA <https://www.faccts.de/orca/>`_, `DFTB+ <https://www.dftbplus.org/>`_).
+  - ASE drivers that wrap any `ASE <https://ase-lib.org/index.html>`_ calculator (including `Psi4 <https://psicode.org/>`_, `ORCA <https://www.faccts.de/orca/>`_, `DFTB+ <https://www.dftbplus.org/>`__).
   - Direct socket connection to `LAMMPS <https://www.lammps.org/>`_ using ``fix mxl``.
-  - Direct socket connection to **Born-Oppenheimer Molecular Dynamics** using a modified `DFTB+ <https://github.com/TEL-Research/dftbplus>`_ code.
+  - Direct socket connection to **Born-Oppenheimer Molecular Dynamics** using a modified `DFTB+ <https://github.com/TEL-Research/dftbplus>`__ code.
 
 Learning path
 ~~~~~~~~~~~~~~~

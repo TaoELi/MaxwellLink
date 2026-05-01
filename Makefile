@@ -16,9 +16,10 @@ DOCS_API = $(DOCS_SOURCE)/api
 
 doc:
 	rm -rf $(DOCS_SOURCE)/tutorials/notebook/*
-	rsync -av --exclude='README.md' tutorials/ $(DOCS_SOURCE)/tutorials/notebook/
-	$(SPHINXAPIDOC) -o $(DOCS_API) src/maxwelllink -f -e -M
-	$(SPHINXBUILD) -b html $(DOCS_SOURCE) $(DOCS_BUILD)
+	rsync -av --exclude='README.md' --exclude='dftbplus_bomd_dipole_derivatives.ipynb' tutorials/ $(DOCS_SOURCE)/tutorials/notebook/
+	rm -rf $(DOCS_API)
+	LC_ALL=C $(SPHINXAPIDOC) -o $(DOCS_API) src/maxwelllink -f -e -M
+	LC_ALL=C $(SPHINXBUILD) -b html $(DOCS_SOURCE) $(DOCS_BUILD)
 
 html:
 	python -c 'import pathlib, webbrowser, sys; index = pathlib.Path("docs/build/html/index.html").resolve(); sys.exit("Docs not built; run `make doc` first.") if not index.exists() else webbrowser.open(index.as_uri())'

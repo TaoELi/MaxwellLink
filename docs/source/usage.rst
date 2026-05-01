@@ -215,7 +215,7 @@ population and the simulation time in atomic units.
    time_au = np.array(tls.extra["time_au"])
 
 We can then compare the electronic excited-state trajectory to the analytical golden-rule result as shown in
-:doc:`tutorials/notebook/meep_tls_spontaneous_emission`.
+:doc:`the Meep TLS spontaneous-emission tutorial <tutorials/notebook/07_meep_tls_spontaneous_emission>`.
 
 
 

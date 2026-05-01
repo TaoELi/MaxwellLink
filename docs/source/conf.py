@@ -1,4 +1,6 @@
 from __future__ import annotations
+import logging
+import os
 import sys
 from pathlib import Path
 from importlib.metadata import version as pkg_version, PackageNotFoundError
@@ -6,6 +8,11 @@ from importlib.metadata import version as pkg_version, PackageNotFoundError
 # --- Make the package importable ---
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
+
+matplotlib_cache = ROOT / "docs" / "build" / ".matplotlib"
+matplotlib_cache.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_cache))
+logging.getLogger("matplotlib").setLevel(logging.ERROR)
 
 # --- Project info ---
 project = "MaxwellLink"
