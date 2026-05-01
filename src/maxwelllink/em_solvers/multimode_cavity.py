@@ -851,11 +851,12 @@ class MultiModeSimulation(DummyEMSimulation):
         float
             Sum of molecular dipole moment along the coupling axis.
         """
+        # modify local e-field for molecules under excitation
+        if self.excited_grid_list:
+            efield_vec[self.excited_grid_list, :] += self.molecule_pulse(self.time) * self.molecule_pulse_axis
+
         # Non-socket molecules
         for wrapper in self.non_socket_wrappers:
-            if self.excited_grid_list:
-                efield_vec[self.excited_mode_list, :] += self.molecule_pulse(self.time) * self.molecule_pulse_axis
-
             wrapper.propagate(efield_vec[wrapper.molecule_id,:])
             amp = wrapper.calc_amp_vector() * wrapper.rescaling_factor
             wrapper.last_amp = amp
@@ -864,8 +865,6 @@ class MultiModeSimulation(DummyEMSimulation):
         # Socket molecules
         if self.socket_wrappers:
             self._ensure_socket_connections()
-            if self.excited_grid_list:
-                efield_vec[self.excited_mode_list, :] += self.molecule_pulse(self.time) * self.molecule_pulse_axis
 
             responses = self._collect_socket_responses(efield_vec) 
             for wrapper in self.socket_wrappers:
