@@ -247,7 +247,7 @@ class SingleModeSimulation(DummyEMSimulation):
         include_dse : bool, default: False
             Include dipole self-energy term in the simulation.
         molecule_half_step : bool, default: False
-            Whether to further evaluate molecular info for another half time step.
+            Whether to further evaluate molecular info for another half time step. LEGACY SETTING, DO NOT USE.
         shift_dipole_baseline : bool, default: False
             Whether to shift all dipole values using the initial dipole value, so initial dipole value is changed to zero.
             Setting this to True can facilitate simulating strong coupling systems with large permanent dipoles.
