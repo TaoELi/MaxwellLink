@@ -209,16 +209,6 @@ the photon mode dispersion together with the spatial grid of molecular sites.
        fractional grid units). ``0.0`` disables the ABC; positive values
        smoothly damp grid points within ``abc_cutoff`` of either boundary to
        suppress unphysical reflections. Default: ``0.0``.
-   * - ``excited_grid_list``
-     - List of molecular grid indices that receive the molecule-side pulse.
-       Default: ``[]``.
-   * - ``molecule_pulse_drive``
-     - Constant float or callable ``molecule_pulse_drive(time_au)`` returning
-       the strength of the pulse applied to ``excited_grid_list``. Defaults to
-       ``0.0``.
-   * - ``molecule_pulse_axis``
-     - One or more axes (``"x"``, ``"y"``, ``"z"``) along which the molecule
-       pulse acts. Default: ``"y"``.
 
 Simulation parameters
 ---------------------
@@ -241,9 +231,6 @@ These arguments are passed to
        Socket and non-socket molecules can be mixed in the same simulation.
        The number of molecules should match the spatial grid defined on the
        cavity.
-   * - ``drive``
-     - Constant float or callable ``drive(time_au)`` returning the external
-       drive applied to every cavity mode. Defaults to ``0.0``.
    * - ``hub``
      - Optional :class:`~maxwelllink.sockets.sockets.SocketHub` shared by all
        socket-mode molecules. The simulation infers the hub from the first
@@ -290,6 +277,27 @@ These arguments are passed to
    * - ``gauge``
      - Gauge choice for the light-matter coupling. Currently only ``"dipole"``
        is supported.
+   * - ``excited_mode_list``
+     - List of cavity-mode indices that receive the photon-side pulse defined
+       by ``photon_pulse_drive``. Default: ``[]`` (no photon pulse applied).
+   * - ``photon_pulse_drive``
+     - Constant float or callable ``photon_pulse_drive(time_au)`` returning the
+       drive applied to the cavity modes listed in ``excited_mode_list``.
+       Defaults to ``0.0``.
+   * - ``photon_pulse_axis``
+     - One or more axes (``"x"``, ``"y"``, ``"z"``) along which the photon
+       pulse acts. Default: ``"y"``.
+   * - ``excited_grid_list``
+     - List of molecular grid indices that receive the molecule-side pulse
+       defined by ``molecule_pulse_drive``. Default: ``[]`` (no molecule
+       pulse applied).
+   * - ``molecule_pulse_drive``
+     - Constant float or callable ``molecule_pulse_drive(time_au)`` returning
+       the strength of the pulse applied to ``excited_grid_list``. Defaults to
+       ``0.0``.
+   * - ``molecule_pulse_axis``
+     - One or more axes (``"x"``, ``"y"``, ``"z"``) along which the molecule
+       pulse acts. Default: ``"y"``.
 
 Returned data
 -------------
@@ -300,7 +308,8 @@ with ``record_history=True`` populates the following attributes:
 - :attr:`simu.time_history` – time stamps in atomic units.
 - :attr:`simu.qc_history` – cavity-mode coordinates with shape ``(n_record, n_mode, 3)``.
 - :attr:`simu.pc_history` – cavity-mode momenta with shape ``(n_record, n_mode, 3)``.
-- :attr:`simu.drive_history` – external drive values.
+- :attr:`simu.photon_drive_history` – photon-side pulse values applied to ``excited_mode_list``.
+- :attr:`simu.molecule_pulse_history` – molecule-side pulse values applied to ``excited_grid_list``.
 - :attr:`simu.energy_history` – total energy of the cavity and coupled molecules.
 - :attr:`simu.effective_efield_history` – effective electric field at each molecular grid point with shape ``(n_record, n_grid, 3)``.
 - :attr:`simu.molecule_response_history` – :math:`\partial_t\boldsymbol{\mu}` summed along ``coupling_axis`` for every grid point.
