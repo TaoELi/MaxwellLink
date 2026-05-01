@@ -92,7 +92,7 @@ FixMaxwellLink::FixMaxwellLink(LAMMPS *lmp, int narg, char **arg)
       inet = 0; ++iarg;
     } else if (strcmp(arg[iarg], "reset_dipole") == 0) {
       reset_dipole = 1; ++iarg;
-      printf("[MaxwellLink] Will reset initial permanent dipole to zero.\n");
+      utils::logmesg(lmp, "[MaxwellLink] Will reset initial permanent dipole to zero.\n");
     } else {
       error->all(FLERR, "Unknown fix MaxwellLink keyword: {}", arg[iarg]);
     }
@@ -410,7 +410,8 @@ void FixMaxwellLink::handshake_if_needed()
     if (!strncmp(header, HDR_INIT, MSGLEN)) {
       molid = read_int32();
       if (comm->me == 0)
-        printf("[MaxwellLink] Assigned a molecular ID: %d\n", molid);
+        // printf("[MaxwellLink] Assigned a molecular ID: %d\n", molid);
+        utils::logmesg(lmp, "[MaxwellLink] Assigned a molecular ID: {}\n", molid);
       char *blob = nullptr;
       int blen = read_bytes(blob);
 
@@ -435,7 +436,8 @@ void FixMaxwellLink::handshake_if_needed()
     if (!strncmp(header, HDR_STOP, MSGLEN) || !strncmp(header, HDR_EXIT, MSGLEN)) {
       writebuffer(HDR_BYE, MSGLEN);
       //error->one(FLERR, "Fix MaxwellLink: server requested stop");
-      printf("[MaxwellLink] Server requested stop/exit during handshake, exiting gracefully...\n");
+      //printf("[MaxwellLink] Server requested stop/exit during handshake, exiting gracefully...\n");
+      utils::logmesg(lmp, "[MaxwellLink] Server requested stop/exit during handshake, exiting gracefully...\n");
       stop_requested = true;
       error->one(FLERR, "[MaxwellLink] Exit requested by MaxwellLink server...");
       return;
@@ -462,17 +464,17 @@ void FixMaxwellLink::broadcast_dt()
       output->reset_dt();
 
       if (comm->me == 0) {
-          printf("[MaxwellLink] 1 atomic units time in LAMMPS native time units = %.15g\n", timeau_native);
-          printf("[MaxwellLink] MaxwellLink uses time step: dt_au = %.15g ->  dt_native (LAMMPS units) = %.15g\n",
+          utils::logmesg(lmp, "[MaxwellLink] 1 atomic units time in LAMMPS native time units = {}\n", timeau_native);
+          utils::logmesg(lmp, "[MaxwellLink] MaxwellLink uses time step: dt_au = {} ->  dt_native (LAMMPS units) = {}\n",
                  dt_au_recv, dt_native_recv);
-          printf("[MaxwellLink] Modified LAMMPS time step from %.15g to %.15g to match MaxwellLink dt!\n",
+          utils::logmesg(lmp, "[MaxwellLink] Modified LAMMPS time step from {} to {} to match MaxwellLink dt!\n",
                  prior, update->dt);
-          printf("[MaxwellLink] Make sure all coupled simulations use this time step, after the modification, LAMMPS dt = %.15g!\n", update->dt);
+          utils::logmesg(lmp, "[MaxwellLink] Make sure all coupled simulations use this time step, after the modification, LAMMPS dt = {}\!\n", update->dt);
       }
 
       if (comm->me == 1) { // rank 1 only
-        printf("[MaxwellLink] Non-master rank modified LAMMPS time step from %.15g to %.15g to match MaxwellLink dt!\n",
-               prior, update->dt);
+        utils::logmesg(lmp, "[MaxwellLink] Non-master rank modified LAMMPS time step from {} to {} to match MaxwellLink dt!\n",
+                       prior, update->dt);
       }
     }
   }
@@ -590,7 +592,7 @@ void FixMaxwellLink::initial_integrate(int /*vflag*/)
       if (!strncmp(header, HDR_STOP, MSGLEN) || !strncmp(header, HDR_EXIT, MSGLEN)) {
         writebuffer(HDR_BYE, MSGLEN);
         //error->one(FLERR, "Fix MaxwellLink: server requested stop");
-        printf("[MaxwellLink] Server requested stop/exit, exiting gracefully...\n");
+        utils::logmesg(lmp, "[MaxwellLink] Server requested stop/exit, exiting gracefully...\n");
         stop_requested = true;
         break;
       }
@@ -943,7 +945,7 @@ void FixMaxwellLink::end_of_step()
       if (!strncmp(header, HDR_STOP, MSGLEN) || !strncmp(header, HDR_EXIT, MSGLEN)) {
         writebuffer(HDR_BYE, MSGLEN);
         //error->one(FLERR, "Fix MaxwellLink: server requested stop");
-        printf("[MaxwellLink] Server requested stop/exit, exiting gracefully...\n");
+        utils::logmesg(lmp, "[MaxwellLink] Server requested stop/exit, exiting gracefully...\n");
         stop_requested = true;
         break;
       }
