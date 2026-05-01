@@ -51,9 +51,11 @@ Use the bundled script to build a `LAMMPS <https://www.lammps.org/>`_ executable
 
    mxl_install_lammps
 
-The script clones `LAMMPS <https://www.lammps.org/>`_, copies ``fix_maxwelllink.cpp``/``.h`` into ``src/MISC``,
+The script clones `LAMMPS <https://www.lammps.org/>`_, copies ``src/maxwelllink/mxl_drivers/lammps/fix_maxwelllink.cpp``/``.h`` into ``src/MISC``,
 and compiles an ``lmp_mxl`` binary placed on ``PATH``. Advanced users may copy
 the fix into an existing source tree and rebuild manually.
+
+A modified LAMMPS code with this fix is also available at `GitHub <https://github.com/TEL-Research/lammps>`_.
 
 LAMMPS input
 ^^^^^^^^^^^^
