@@ -28,6 +28,46 @@ from ..units import AU_TO_FS, FS_TO_AU, AU_TO_K
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
 
 
+class DummyThermostat:
+    """
+    Placeholder for a general thermostat implementation.
+    """
+    def __init__(self, temperature_au: float, random_seed: Optional[int] = 2026):
+        self.temperature_au = temperature_au
+        self.random_seed = random_seed
+        self.rng = np.random.default_rng(random_seed)
+
+    def sample_momentum_maxwell_boltzmann(self, p, temperature_au=0.0):
+        size = p.shape if isinstance(p, np.ndarray) else (len(p),)
+        p_new = self.rng.normal(scale=np.sqrt(temperature_au), size=size)
+        return p_new
+    
+    def sample_position_maxwell_boltzmann(self, omega, q, temperature_au=0.0):
+        size = q.shape if isinstance(q, np.ndarray) else (len(q),)
+        q_new = self.rng.normal(scale=np.sqrt(temperature_au) / omega, size=size)
+        return q_new
+    
+    def apply_kick(self, momentum: np.ndarray, dt_au: float):
+        return momentum
+
+
+class LangevinThermostat(DummyThermostat):
+    """
+    Langevin thermostat implementation for the cavity mode.
+    """
+    def __init__(self, temperature_au: float, tau_au: float, random_seed: Optional[int] = 2026):
+        super().__init__(temperature_au, random_seed)
+        self.tau_au = tau_au
+        self.T_l, self.S_l = None, None
+        
+    def apply_kick(self, momentum: np.ndarray, dt_au: float):
+        if self.T_l is None:
+            self.T_l = np.exp(-dt_au / self.tau_au)
+            self.S_l = np.sqrt(self.temperature_au * (1.0 - self.T_l**2))
+        random_kick = self.rng.normal(0, self.S_l, size=momentum.shape)
+        return momentum * self.T_l + random_kick
+
+
 class SingleModeUnits(DummyEMUnits):
     """
     EM units for single-mode cavity simulations (1:1 to atomic units).
@@ -160,9 +200,9 @@ class SingleModeSimulation(DummyEMSimulation):
         pc_initial: Optional[list] = None,
         mu_initial: Optional[list] = None,
         dmudt_initial: Optional[list] = None,
-        thermostat_seed: Optional[int] = None,
-        NVT_T_au: Optional[float] = None,
-        langevin_tau_au: Optional[float] = None,
+        temp_au: float = 0.0,
+        tau_au: Optional[float] = None,
+        random_seed: Optional[int] = None, 
         record_history: bool = True,
         include_dse: bool = False,
         molecule_half_step: bool = False,
@@ -196,12 +236,12 @@ class SingleModeSimulation(DummyEMSimulation):
             Initial total molecular dipole vector (a.u.).
         dmudt_initial : list, default: [0.0, 0.0, 0.0]
             Initial time derivative of the total molecular dipole vector (a.u.).
-        thermostat_seed : int, optional
-            Random seed for initial photonic position and momentum sampling if provided.
-        NVT_T_au : float, optional
-            Temperature for NVT thermostat (a.u.).
-        langevin_tau_au : float, optional
-            Time constant for Langevin dynamics (a.u.).
+        temp_au : float, default: 0.0  
+            Temperature for sampling initial cavity coordinates from Maxwell-Boltzmann distribution (a.u.). If zero or negative, no sampling is done and initial coordinates are used as provided.
+        tau_au : float, optional
+            Damping time constant for the Langevin thermostat (a.u.). If not provided, no Langevin thermostat is applied.
+        random_seed : int, optional
+            Random seed for the Langevin thermostat. If not provided, a default seed is used.
         record_history : bool, default: True
             Record time, field, velocity, drive, and molecular response histories.
         include_dse : bool, default: False
@@ -288,13 +328,23 @@ class SingleModeSimulation(DummyEMSimulation):
         if dmudt_initial is None:
             dmudt_initial = [0.0, 0.0, 0.0]
 
-        if thermostat_seed is not None:
-            self.rng = np.random.default_rng(thermostat_seed)
-            qc_initial = self.rng.normal(scale=np.sqrt(1.0 / self.frequency), size=3)
-            pc_initial = self.rng.normal(scale=np.sqrt(self.frequency), size=3)
-            print(f"[SingleModeCavity] Initializing qc and pc with random seed {thermostat_seed}.")
-        else :
-            self.rng = np.random.default_rng()
+        self.temp_au = temp_au
+        if tau_au is not None and temp_au is not None:
+            self.thermostat = LangevinThermostat(temperature_au=temp_au, tau_au=tau_au, random_seed=random_seed)
+        else:
+            self.thermostat = DummyThermostat(temperature_au=temp_au, random_seed=random_seed)
+        
+        if temp_au > 0.0:
+            # sample initial qc and pc from Maxwell-Boltzmann distribution at the given temperature
+            qc_initial = self.thermostat.sample_position_maxwell_boltzmann(
+                omega=self.frequency, q=qc_initial, temperature_au=temp_au
+            )
+            pc_initial = self.thermostat.sample_momentum_maxwell_boltzmann(
+                p=pc_initial, temperature_au=temp_au
+            )
+            print(f"[SingleModeCavity] Sampled initial cavity coordinates from Maxwell-Boltzmann distribution at T = {temp_au*AU_TO_K} K = {temp_au} a.u.")
+            print(f"[SingleModeCavity] Initial qc: {qc_initial}, pc: {pc_initial}")
+            print(f"[SingleModeCavity] THIS OVERRIDES PROVIDED INITIAL CONDITIONS OF CAVITY POSITIONS AND MOMENTA!")
 
         self.qc = np.array(qc_initial, dtype=float) * self.axis
         self.pc = np.array(pc_initial, dtype=float) * self.axis
@@ -305,25 +355,6 @@ class SingleModeSimulation(DummyEMSimulation):
         self.dipole_lookahead = self.dipole.copy()
         self.has_dipole_lookahead = False
         self.acceleration = np.zeros(3, dtype=float)
-        self.if_NVT = False
-
-        if NVT_T_au is not None:
-
-            if NVT_T_au <= 0.0:
-                raise ValueError("NVT_T_au must be positive if provided.")
-            self.NVT_T_au = NVT_T_au
-
-            if langevin_tau_au is not None: 
-                if langevin_tau_au <= 0.0:
-                    raise ValueError("langevin_tau_au must be positive if provided.")
-                self.langevin_tau_au = langevin_tau_au
-                self.T_l = np.exp(-self.dt / self.langevin_tau_au)
-                self.S_l = np.sqrt(self.NVT_T_au * (1.0 - self.T_l**2))
-            else :
-                raise ValueError("langevin_tau_au must be provided when NVT_T_au is provided to specify the characteristic time for Langevin thermostat.")
-            
-            self.if_NVT = True
-            print(f"[SingleModeCavity] NVT thermostat enabled with T = {self.NVT_T_au*AU_TO_K} K = {self.NVT_T_au} a.u., Langevin tau = {self.langevin_tau_au*AU_TO_FS} fs = {self.langevin_tau_au} a.u.")
 
         self.include_dse = bool(include_dse)
         self.molecule_half_step = bool(molecule_half_step)
@@ -678,9 +709,8 @@ class SingleModeSimulation(DummyEMSimulation):
         self.pc *= np.exp(-self.damping * self.dt)
 
         # apply Langevin thermostat to the cavity mode momenta if enabled
-        if self.if_NVT:
-            random_kick = self.rng.normal(0, self.S_l, size=self.pc.shape)
-            self.pc = self.pc * self.T_l + random_kick
+        # by default, this does nothing and just returns the original momentum
+        self.pc = self.thermostat.apply_kick(self.pc, self.dt)
 
         # 4. update acceleration and time
         self.time += self.dt
