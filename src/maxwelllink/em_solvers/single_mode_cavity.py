@@ -208,6 +208,8 @@ class SingleModeSimulation(DummyEMSimulation):
         molecule_half_step: bool = False,
         shift_dipole_baseline: bool = False,
         gauge="dipole",
+        excite_ph: bool = True,
+        excite_mol: bool = False,
     ):
         r"""
         Parameters
@@ -254,6 +256,10 @@ class SingleModeSimulation(DummyEMSimulation):
         gauge : str, default: "dipole"
             Gauge choice for light-matter coupling: "dipole" or "velocity". Using velocity gauge will couple to dmu/dt to cavity momentum
             instead of mu to the cavity position.
+        excite_ph : bool, default: True
+            Whether to excite the cavity mode with the drive term. If False, the drive term will be ignored in the cavity equation of motion.
+        excite_mol : bool, default: False
+            Whether to excite the molecules with the drive term. If False, the drive term will not be included in the effective electric field that drives the molecules. 
         """
 
         super().__init__(hub=hub, molecules=molecules)
@@ -377,6 +383,12 @@ class SingleModeSimulation(DummyEMSimulation):
             self.drive_history = []
             self.molecule_response_history = []
             self.energy_history = []
+        
+        self.excite_ph = excite_ph
+        self.excite_mol = excite_mol
+        # add a warning if both of them are True
+        if self.excite_ph and self.excite_mol:
+            print("[SingleModeCavity] WARNING: YOU NOW EXCITE BOTH THE CAVITY AND MOLECULES")
 
     # ------------------------------------------------------------------
     # Core helpers
@@ -460,7 +472,7 @@ class SingleModeSimulation(DummyEMSimulation):
         float
             The calculated acceleration.
         """
-        drive_val = self._evaluate_drive(time)
+        drive_val = self._evaluate_drive(time) if self.excite_ph else 0.0
         acceleration = (
             drive_val - self.coupling_strength * mu - (self.frequency**2) * qc
         )
@@ -568,6 +580,11 @@ class SingleModeSimulation(DummyEMSimulation):
         float
             Sum of molecular dipole moment along the coupling axis.
         """
+        # add efield_vec with drive term if excite_mol is True
+        if self.excite_mol:
+            drive_val = self._evaluate_drive(self.time)
+            efield_vec = np.array(efield_vec) + drive_val * self.axis
+
         # Non-socket molecules
         for wrapper in self.non_socket_wrappers:
             wrapper.propagate(efield_vec)

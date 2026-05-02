@@ -17,13 +17,25 @@ components can be coupled simultaneously by supplying composite axes such as
 
      \ddot{\mathbf{q}}_c = -\omega_c^{2} \mathbf{q}_c - \varepsilon \sum_{m} \boldsymbol{\mu}_{m} - \kappa \dot{\mathbf{q}}_c + D(t),
 
-  where :math:`\omega_c` is ``frequency_au``, :math:`\kappa` is ``damping_au``, :math:`\varepsilon = 1/\sqrt{\epsilon_0 V}` is ``coupling_strength``, and :math:`D(t)` is the optional external drive. The sum runs over the dipole components selected by ``coupling_axis`` for each coupled molecule. The effective electric field returned to the drivers is
+  where :math:`\omega_c` is ``frequency_au``, :math:`\kappa` is ``damping_au``, :math:`\varepsilon = 1/\sqrt{\epsilon_0 V}` is ``coupling_strength``, and :math:`D(t)` is the optional external drive. The drive enters the cavity equation only when ``excite_ph=True`` (default). The sum runs over the dipole components selected by ``coupling_axis`` for each coupled molecule. The effective electric field returned to the drivers is
 
   .. math::
 
-     \mathbf{E}(t) = -\varepsilon\, \mathbf{q}_c(t) - \delta_{\mathrm{DSE}} \frac{\varepsilon^{2}}{\omega_c^{2}}\, \boldsymbol{\mu}(t),
+     \mathbf{E}(t) = -\varepsilon\, \mathbf{q}_c(t) - \delta_{\mathrm{DSE}} \frac{\varepsilon^{2}}{\omega_c^{2}}\, \boldsymbol{\mu}(t) + \delta_{\mathrm{exc,mol}}\, D(t)\,\hat{\mathbf{e}},
 
-  with :math:`\boldsymbol{\mu}(t)` the summed molecular dipole restricted to the requested axes and :math:`\delta_{\mathrm{DSE}} = 1` only when ``include_dse=True``.
+  with :math:`\boldsymbol{\mu}(t)` the summed molecular dipole restricted to the requested axes, :math:`\delta_{\mathrm{DSE}} = 1` only when ``include_dse=True``, and :math:`\delta_{\mathrm{exc,mol}} = 1` only when ``excite_mol=True`` (with :math:`\hat{\mathbf{e}}` the unit vector along ``coupling_axis``).
+
+  When ``temp_au > 0`` the initial cavity coordinate and momentum are resampled from a Maxwell-Boltzmann distribution at temperature :math:`T` (atomic units),
+
+  .. math::
+
+     q_c \sim \mathcal{N}\!\left(0,\, \sqrt{T}/\omega_c\right), \qquad p_c \sim \mathcal{N}\!\left(0,\, \sqrt{T}\right),
+
+  overriding any provided ``qc_initial`` / ``pc_initial``. If ``tau_au`` is also supplied, a Langevin thermostat with damping time :math:`\tau` is applied to the cavity momentum every step,
+
+  .. math::
+
+     p_c \leftarrow p_c\, e^{-\Delta t/\tau} + \xi,\qquad \xi \sim \mathcal{N}\!\left(0,\, \sqrt{T\,(1 - e^{-2\Delta t/\tau})}\right).
 
 Requirements
 ------------
@@ -125,6 +137,12 @@ Parameters
      - Initial total molecular dipole vector prior to axis masking (a.u.). Default: ``[0.0, 0.0, 0.0]``.
    * - ``dmudt_initial``
      - Initial time derivative of the total molecular dipole vector (a.u.). Default: ``[0.0, 0.0, 0.0]``.
+   * - ``temp_au``
+     - Cavity temperature in atomic units (Hartree). When ``> 0``, the initial cavity coordinate and momentum are resampled from a Maxwell-Boltzmann distribution at this temperature, overriding ``qc_initial`` and ``pc_initial``. Default: ``0.0``.
+   * - ``tau_au``
+     - Langevin thermostat relaxation time :math:`\tau` (a.u.). When supplied alongside ``temp_au > 0``, a Langevin thermostat is applied to the cavity momentum each step. Leave as ``None`` for an NVE-like cavity (initial-temperature sampling only). Default: ``None``.
+   * - ``random_seed``
+     - Seed for the RNG that drives the Maxwell-Boltzmann sampling and the Langevin kicks. Use a fixed integer for reproducibility. Default: ``None``.
    * - ``shift_dipole_baseline``
      - When ``True`` subtract the initial dipole so the simulation starts from a zero baseline (helps with large permanent dipoles). Default: ``False``.
    * - ``molecule_half_step``
@@ -134,6 +152,10 @@ Parameters
        Default: ``True``.
    * - ``include_dse``
      - When ``True`` add the dipole self-energy correction to the field returned to the molecules and account for it in the cavity energy. Default: ``False``.
+   * - ``excite_ph``
+     - When ``True`` the external ``drive`` term is applied to the cavity equation of motion. Set to ``False`` to suppress the drive in the photonic equation. Default: ``True``.
+   * - ``excite_mol``
+     - When ``True`` the external ``drive`` term is added to the effective electric field returned to the molecules along ``coupling_axis`` (direct molecular excitation). Default: ``False``. Setting both ``excite_ph`` and ``excite_mol`` to ``True`` drives both subsystems and triggers a console warning.
 
 Returned data
 -------------
