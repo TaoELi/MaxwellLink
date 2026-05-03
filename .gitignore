@@ -254,3 +254,4 @@ tests/test_agents/prompts_local_extended.txt
 tutorials/dftbplus_runs
 tutorials/dftbplus_bomd_dipder_runs/
 tutorials/dftbplus_bomd_dipole_derivatives.ipynb
+tutorials/*cp2k*
