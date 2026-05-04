@@ -176,7 +176,7 @@ For BOMD, add ``MaxwellLinkSocket`` inside ``Driver = VelocityVerlet``. The
 DFTB+ converts the input unit to atomic units.
 
 Current Mulliken charges
-^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This is the default BOMD dipole-derivative model. It uses the current DFTB+
 Mulliken-like net atomic charge for each atom.
@@ -198,7 +198,7 @@ Mulliken-like net atomic charge for each atom.
    }
 
 Fixed user charges
-^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~
 
 Use this mode to reproduce the partial-charge approximation used by many
 classical MD drivers. Provide one charge per atom in DFTB+ atom order.
@@ -222,7 +222,7 @@ classical MD drivers. Provide one charge per atom in DFTB+ atom order.
    }
 
 On-the-fly Born effective charges
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 In this mode, DFTB+ computes the Born effective charges during the MD run
 using linear response theory.
