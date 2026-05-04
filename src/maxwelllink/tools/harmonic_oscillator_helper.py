@@ -62,13 +62,13 @@ class Maxwell_Boltzmann_initializer:
     
     def momentum_initializer(self, p):
         if np.all(p == 0):
-            print(f"Initializing momenta with Maxwell-Boltzmann distribution at temperature {self.temperature_au} au.")
+            print(f"[Maxwell-Boltzmann Initializer] Initializing momenta with Maxwell-Boltzmann distribution at temperature {self.temperature_au} au.")
             size = p.shape if isinstance(p, np.ndarray) else (len(p),)
-            p_new = self.rng.normal(scale=np.sqrt(self.temperature_au), size=size)
-            if p_new.size == 3 :
-                return p_new
+            p_mb = self.rng.normal(scale=np.sqrt(self.temperature_au), size=size)
+            if p_mb.size == 3 :
+                return p_mb
             p_mb -= np.mean(p_mb, axis=0)  # remove any net momentum to ensure total momentum is zero
-            T_cur_p = np.sum(p_mb**2) / (p_new.size - 3)
+            T_cur_p = np.sum(p_mb**2) / (p_mb.size - 3)
             scaling_factor_p = np.sqrt(self.temperature_au / T_cur_p)
             return p_mb * scaling_factor_p
         else:
@@ -77,13 +77,13 @@ class Maxwell_Boltzmann_initializer:
     
     def position_initializer(self, omega, q):
         if np.all(q == 0):
-            print(f"Initializing positions with Maxwell-Boltzmann distribution at temperature {self.temperature_au} au.")
+            print(f"[Maxwell-Boltzmann Initializer] Initializing positions with Maxwell-Boltzmann distribution at temperature {self.temperature_au} au.")
             size = q.shape if isinstance(q, np.ndarray) else (len(q),)
-            q_new = self.rng.normal(scale=np.sqrt(self.temperature_au) / omega, size=size)
-            if q_new.size == 3 :
-                return q_new
+            q_mb = self.rng.normal(scale=np.sqrt(self.temperature_au) / omega, size=size)
+            if q_mb.size == 3 :
+                return q_mb
             q_mb -= np.mean(q_mb, axis=0)  # remove any net displacement to ensure total displacement is zero
-            T_cur_q = np.sum((omega * q_mb)**2) / (q_new.size - 3)
+            T_cur_q = np.sum((omega * q_mb)**2) / (q_mb.size - 3)
             scaling_factor_q = np.sqrt(self.temperature_au / T_cur_q)
             return q_mb * scaling_factor_q
         else:
