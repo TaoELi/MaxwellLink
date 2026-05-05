@@ -34,10 +34,11 @@ Python-based Drivers for Productive Runs
 Socket Connection to Third-Party Drivers
 ------------------------------------------------
 
-Additionally, **MaxwellLink** provides direct connections to third-party C++ or Fortran molecular packages, such as LAMMPS and DFTB+.
+Additionally, **MaxwellLink** provides direct connections to third-party C++ or Fortran molecular packages, such as LAMMPS, DFTB+, and CP2K.
 
 .. toctree::
    :maxdepth: 1
 
    lammps
    dftbplus
+   cp2k

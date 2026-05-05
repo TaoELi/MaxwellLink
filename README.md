@@ -50,8 +50,9 @@ As of today, the following [EM solvers](https://maxwelllink.org/em_solvers/index
 - [QuTiP](https://qutip.org/) model Hamiltonians, 
 - In-house RT-TDDFT/Ehrenfest dynamics using [Psi4](https://psicode.org/) integrals, 
 - [ASE](https://wiki.fysik.dtu.dk/ase/) classical dynamics, 
-- Direct socket connection to modified [LAMMPS](https://www.lammps.org/) for classical MD via `fix mxl`, 
-- Direct socket connection to modified [DFTB+](https://github.com/TEL-Research/dftbplus) for tight-binding BOMD/real-time Ehrenfest dynamics.
+- Direct socket connection to modified [LAMMPS](https://github.com/TEL-Research/lammps) for classical MD via `fix mxl`, 
+- (beta version) Direct socket connection to modified [DFTB+](https://github.com/TEL-Research/dftbplus) for tight-binding BOMD/real-time Ehrenfest dynamics.
+- (beta version) Direct socket connection to modified [CP2K](https://github.com/TEL-Research/cp2k) for real-time TDDFT/Ehrenfest dynamcis in both non-periodic and periodic systems.
 
 ## Quick Start
 
