@@ -22,12 +22,20 @@ class DummyInitializer:
         pass
     
     def momentum_initializer(self, p):
-        size = p.shape if isinstance(p, np.ndarray) else (len(p),)
-        return np.zeros(size)
-    
+        if np.all(p == 0):
+            size = p.shape if isinstance(p, np.ndarray) else (len(p),)
+            return np.zeros(size)
+        else:
+            print("[Dummy Initializer] Warning: Initial momenta are provided, skipping Dummy initialization.")
+            return p
+
     def position_initializer(self, omega, q):
-        size = q.shape if isinstance(q, np.ndarray) else (len(q),)
-        return np.zeros(size)
+        if np.all(q == 0):
+            size = q.shape if isinstance(q, np.ndarray) else (len(q),)
+            return np.zeros(size)
+        else:
+            print("[Dummy Initializer] Warning: Initial positions are provided, skipping Dummy initialization.")
+            return q
     
 class DummyThermostat:
     """
