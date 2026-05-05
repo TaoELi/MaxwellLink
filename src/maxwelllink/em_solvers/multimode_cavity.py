@@ -452,10 +452,10 @@ class MultiModeSimulation(DummyEMSimulation):
         if pc_initial is None: pc_initial = np.zeros((self.n_mode, 3), dtype=float)
         else : pc_initial = np.array(pc_initial, dtype=float).reshape((self.n_mode, 3))
 
-        #self.initializer = initializer
+        self.initializer = initializer
         self.thermostat = thermostat
-        qc_initial = initializer.position_initializer(self.omega_k, qc_initial)
-        pc_initial = initializer.momentum_initializer(pc_initial)
+        qc_initial = self.initializer.position_initializer(self.omega_k, qc_initial)
+        pc_initial = self.initializer.momentum_initializer(pc_initial)
 
         self.qc = qc_initial * self.axis
         self.pc = pc_initial * self.axis
