@@ -22,15 +22,13 @@ TDDFT and its Ehrenfest dynamics extension are supported for both non-periodic
     \mathbf{H}(t) = \mathbf{H}_{\mathrm{KS}}(t)
      - \widetilde{\mathbf{E}}(t)\cdot\boldsymbol{\mu}.
 
-  - In periodic systems, CP2K must use ``REAL_TIME_PROPAGATION%VELOCITY_GAUGE``.
-  **MaxwellLink** still sends the electric field to CP2K, but CP2K integrates it
-  into the vector potential for constructing the Kohn-Sham Hamiltonian,
+  - In periodic systems, CP2K must use ``REAL_TIME_PROPAGATION%VELOCITY_GAUGE``. **MaxwellLink** still sends the electric field to CP2K, but CP2K integrates it into the vector potential for constructing the Kohn-Sham Hamiltonian,
 
   .. math::
 
     \mathbf{A}_n =
       \mathbf{A}_{n-1}
-      - c\,\Delta t\,\widetilde{\mathbf{E}}_{n-1/2},
+      - c\,\Delta t\,\widetilde{\mathbf{E}}_{n-1/2}.
 
   For RT-Ehrenfest dynamics (``RUN_TYPE EHRENFEST_DYN``), CP2K runs its existing NVE Ehrenfest
   velocity-Verlet loop, where **MaxwellLink** supplies the external electric field for the electronic propagation 
