@@ -25,7 +25,7 @@ class Dummy_initializer:
         size = p.shape if isinstance(p, np.ndarray) else (len(p),)
         return np.zeros(size)
     
-    def position_initializer(self, q):
+    def position_initializer(self, omega, q):
         size = q.shape if isinstance(q, np.ndarray) else (len(q),)
         return np.zeros(size)
     
