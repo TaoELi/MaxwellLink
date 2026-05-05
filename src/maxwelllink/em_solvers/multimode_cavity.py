@@ -20,6 +20,7 @@ from ..molecule import Molecule
 from ..sockets import SocketHub, am_master
 from ..units import AU_TO_FS, FS_TO_AU, AU_TO_CM_INV, AU_TO_K
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
+from ..tools.harmonic_oscillator_helper import *
 
 
 class MultiModeUnits(DummyEMUnits):
@@ -338,12 +339,8 @@ class MultiModeSimulation(DummyEMSimulation):
         hub: Optional[SocketHub] = None,
         qc_initial: Optional[list] = None,
         pc_initial: Optional[list] = None,
-        T_initial_au: Optional[float] = None,
-        thermostat_seed: Optional[int] = None,
         mu_initial: Optional[list] = None,
         dmudt_initial: Optional[list] = None,
-        NVT_T_au: Optional[float] = None,
-        langevin_tau_au: Optional[float] = None,
         include_dse: bool = True,
         molecule_half_step: bool = False,
         shift_dipole_baseline: bool = False,
@@ -355,6 +352,8 @@ class MultiModeSimulation(DummyEMSimulation):
         excited_grid_list: Optional[list] = [],
         molecule_pulse_drive: Optional[Union[float, Callable[[float], float]]] = None,
         molecule_pulse_axis: str = "y",
+        initializer: Optional[object] = DummyInitializer(),
+        thermostat: Optional[object] = DummyThermostat(),
     ):
         r"""
         Parameters
@@ -371,19 +370,10 @@ class MultiModeSimulation(DummyEMSimulation):
             Initial cavity field coordinate (a.u.).
         pc_initial : np.ndarray, default: None
             Initial cavity field momentum (a.u.).
-        T_initial_au : float, optional
-            Initial temperature for Maxwell-Boltzmann distribution of cavity mode momenta, in atomic units. 
-            If provided, it will override the provided pc_initial and initialize the cavity mode momenta according to the Maxwell-Boltzmann distribution at this temperature.
-        thermostat_seed : int, optional
-            Random seed for Maxwell-Boltzmann initialization of cavity mode position and momentum. Also used for Langevin thermostat if enabled.
         mu_initial : np.ndarray, default: None
             Initial total molecular dipole vector (a.u.).
         dmudt_initial : np.ndarray, default: None
             Initial time derivative of the total molecular dipole vector (a.u.).
-        NVT_T_au : float, optional
-            Temperature for NVT thermostat applied to cavity modes, in atomic units. If None, system will be propagated under NVE ensemble.
-        langevin_tau_au : float, optional
-            Characteristic time for Langevin thermostat applied to cavity modes, in atomic units. If None, no Langevin thermostat is applied.
         include_dse : bool, default: True
             Include dipole self-energy term in the simulation.
         molecule_half_step : bool, default: True
@@ -407,6 +397,11 @@ class MultiModeSimulation(DummyEMSimulation):
             Constant molecule pulse drive or function ``molecule_pulse_drive(t_au)`` that determines the strength of the molecule pulse applied to the excited grid points.
         molecule_pulse_axis : str, default: "y"
             pulse axis for the molecule pulse.
+        initializer : object, optional
+            An object that provides methods to initialize cavity field coordinates and momenta, as well as molecular dipoles if needed. Must have methods ``position_initializer(omega, q)`` and ``momentum_initializer(p)`` that return initialized positions and momenta based on the cavity frequencies and/or other parameters.
+            Two example initializers are provided in ``maxwelllink.tools.harmonic_oscillator_helper``: ``DummyInitializer`` (returns zeros) and ``MaxwellBoltzmannInitializer`` (initializes based on Maxwell-Boltzmann distribution at a given temperature).
+        thermostat : object, optional
+            An object that provides a method to apply a thermostat to the cavity field momenta. Must have a method ``apply_kick(momentum)`` that takes the current momenta and returns the modified momenta after applying the thermostat kick. Two example thermostats are provided in ``maxwelllink.tools.harmonic_oscillator_helper``: ``DummyThermostat`` (does nothing) and a simple ``LangevinThermostat`` that applies a frictional kick based on a specified temperature and damping constant.
         """
 
         super().__init__(hub=hub, molecules=molecules)
@@ -453,51 +448,19 @@ class MultiModeSimulation(DummyEMSimulation):
         self.time = 0.0
         self.cavity_geometry = cavity_geometry
 
-        if mu_initial is None:
-            mu_initial = np.zeros((self.n_grid, 3), dtype=float)
-        else :
-            mu_initial = np.array(mu_initial, dtype=float).reshape((self.n_grid, 3))
-        if dmudt_initial is None:
-            dmudt_initial = np.zeros((self.n_grid, 3), dtype=float)
-        else :
-            dmudt_initial = np.array(dmudt_initial, dtype=float).reshape((self.n_grid, 3))
-        if qc_initial is None:
-            need_qc_initial = True
-        else :
-            need_qc_initial = False
-            qc_initial = np.array(qc_initial, dtype=float).reshape((self.n_mode, 3))
-        if pc_initial is None:
-            need_pc_initial = True
-        else :
-            need_pc_initial = False
-            pc_initial = np.array(pc_initial, dtype=float).reshape((self.n_mode, 3))
+        if mu_initial is None: mu_initial = np.zeros((self.n_grid, 3), dtype=float)
+        else : mu_initial = np.array(mu_initial, dtype=float).reshape((self.n_grid, 3))
+        if dmudt_initial is None: dmudt_initial = np.zeros((self.n_grid, 3), dtype=float)
+        else : dmudt_initial = np.array(dmudt_initial, dtype=float).reshape((self.n_grid, 3))
+        if qc_initial is None: qc_initial = np.zeros((self.n_mode, 3), dtype=float)
+        else : qc_initial = np.array(qc_initial, dtype=float).reshape((self.n_mode, 3))
+        if pc_initial is None: pc_initial = np.zeros((self.n_mode, 3), dtype=float)
+        else : pc_initial = np.array(pc_initial, dtype=float).reshape((self.n_mode, 3))
 
-        if thermostat_seed is not None:
-            self.rng = np.random.default_rng(thermostat_seed)
-        else :
-            self.rng = np.random.default_rng()
-
-        if T_initial_au is not None: 
-            if T_initial_au <= 0.0:
-                raise ValueError("Initial temperature must be positive.")
-            if need_pc_initial and need_qc_initial:
-                pc_initial, qc_initial = self._Maxwell_Boltzmann_initialize(T_initial_au)
-                print(f"[MultiModeCavity] Both qc_initial and pc_initial not provided. Initialized qc_initial and pc_initial with Maxwell-Boltzmann distribution at T = {T_initial_au*AU_TO_K} K = {T_initial_au} a.u.")
-            elif need_pc_initial:
-                pc_initial = self._Maxwell_Boltzmann_initialize(T_initial_au)[0]
-                print(f"[MultiModeCavity] pc_initial not provided. Initialized pc_initial with Maxwell-Boltzmann distribution at T = {T_initial_au*AU_TO_K} K = {T_initial_au} a.u.")
-            elif need_qc_initial:
-                qc_initial = self._Maxwell_Boltzmann_initialize(T_initial_au)[1]
-                print(f"[MultiModeCavity] qc_initial not provided. Initialized qc_initial with Maxwell-Boltzmann distribution at T = {T_initial_au*AU_TO_K} K = {T_initial_au} a.u.")
-            else :
-                print("[MultiModeCavity] Warning: Both qc_initial and pc_initial are provided, so T_initial_au is ignored for Maxwell-Boltzmann initialization.")
-        else :
-            if need_qc_initial:
-                qc_initial = np.zeros((self.n_mode, 3), dtype=float)
-            if need_pc_initial:
-                pc_initial = np.zeros((self.n_mode, 3), dtype=float)
-            if need_qc_initial and need_pc_initial:
-                print("[MultiModeCavity] Warning: pc_initial, qc_initial and T_initial_au are not provided, so cavity mode momenta will be initialized to zero.")
+        self.initializer = initializer
+        self.thermostat = thermostat
+        qc_initial = self.initializer.position_initializer(self.omega_k, qc_initial)
+        pc_initial = self.initializer.momentum_initializer(pc_initial)
 
         self.qc = qc_initial * self.axis
         self.pc = pc_initial * self.axis
@@ -508,25 +471,6 @@ class MultiModeSimulation(DummyEMSimulation):
         self.dipole_lookahead = self.dipole.copy()
         self.has_dipole_lookahead = False
         self.acceleration = np.zeros((self.n_mode, 3), dtype=float)
-        self.if_NVT = False
-
-        if NVT_T_au is not None:
-
-            if NVT_T_au <= 0.0:
-                raise ValueError("NVT_T_au must be positive if provided.")
-            self.NVT_T_au = NVT_T_au
-
-            if langevin_tau_au is not None: 
-                if langevin_tau_au <= 0.0:
-                    raise ValueError("langevin_tau_au must be positive if provided.")
-                self.langevin_tau_au = langevin_tau_au
-                self.T_l = np.exp(-self.dt / self.langevin_tau_au)
-                self.S_l = np.sqrt(self.NVT_T_au * (1.0 - self.T_l**2))
-            else :
-                raise ValueError("langevin_tau_au must be provided when NVT_T_au is provided to specify the characteristic time for Langevin thermostat.")
-            
-            self.if_NVT = True
-            print(f"[MultiModeCavity] NVT thermostat enabled with T = {self.NVT_T_au*AU_TO_K} K = {self.NVT_T_au} a.u., Langevin tau = {self.langevin_tau_au*AU_TO_FS} fs = {self.langevin_tau_au} a.u.")
 
         if isinstance(excited_mode_list, list):
             self.excited_mode_list = excited_mode_list
@@ -592,33 +536,6 @@ class MultiModeSimulation(DummyEMSimulation):
     # ------------------------------------------------------------------
     # Core helpers
     # ------------------------------------------------------------------
-    def _Maxwell_Boltzmann_initialize(self, T_au: float):
-        """
-        Initialize cavity mode coordinates and momenta according to Maxwell-Boltzmann distribution at the given temperature.
-
-        Parameters
-        ----------
-        T_au : float
-            Temperature in atomic units. k_B is set to 1 in atomic units, so T_au is effectively the thermal energy. Must be positive.
-        seed : int, optional
-            Random seed for reproducible results.
-        """
-        if self.n_mode <= 1:
-            print("[MultiModeCavity] Warning: Only one mode present. Initializing with zero momenta.")
-            return np.zeros((self.n_mode, 3)), np.zeros((self.n_mode, 3))
-        
-        p_mb  = self.rng.normal(0, np.sqrt(T_au), size=(self.n_mode, 3))
-        p_mb -= np.mean(p_mb, axis=0)  # remove any net momentum to ensure total momentum is zero
-        T_cur_p = np.sum(p_mb**2) / (3 * (self.n_mode - 1))
-        scaling_factor_p = np.sqrt(T_au / T_cur_p)
-
-        q_mb = self.rng.normal(0, np.sqrt(T_au) / self.omega_k[:, np.newaxis], size=(self.n_mode, 3))
-        q_mb -= np.mean(q_mb, axis=0)  # remove any net displacement to ensure total displacement is zero
-        T_cur_q = np.sum((self.omega_k[:, np.newaxis] * q_mb)**2) / (3 * (self.n_mode - 1))
-        scaling_factor_q = np.sqrt(T_au / T_cur_q)
-
-        return p_mb * scaling_factor_p, q_mb * scaling_factor_q
-
     def _ensure_socket_connections(self):
         if not self.socket_wrappers:
             return
@@ -955,11 +872,7 @@ class MultiModeSimulation(DummyEMSimulation):
             self.pc[:,1] = self.pc[:,1] @ self.abc_y
 
         self.pc *= np.exp(-self.damping * self.dt)
-
-        # apply Langevin thermostat to the cavity mode momenta if enabled
-        if self.if_NVT:
-            random_kick = self.rng.normal(0, self.S_l, size=self.pc.shape)
-            self.pc = self.pc * self.T_l + random_kick
+        self.pc = self.thermostat.apply_kick(self.pc)
 
         # 4. update acceleration and time
         self.time += self.dt

@@ -32,6 +32,8 @@ __all__ = [
     "MultiModeSimulation",
     "Vector3",
     "LaserDrivenSimulation",
+    "MaxwellBoltzmannInitializer",
+    "LangevinThermostat",
 ]
 
 
@@ -127,7 +129,16 @@ def __getattr__(name):
         )
 
         return locals()[name]
+    if name in {
+        "MaxwellBoltzmannInitializer",
+        "LangevinThermostat",
+    }:
+        from .tools.harmonic_oscillator_helper import (
+            MaxwellBoltzmannInitializer,
+            LangevinThermostat,
+        )
 
+        return locals()[name]
     if name in {"SocketHub", "get_available_host_port"}:
         from .sockets import SocketHub, get_available_host_port
 
