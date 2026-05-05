@@ -100,6 +100,8 @@ class Molecule:
             ``point-raw`` uses point dipole approximation with no sub-averaging over dx^3, which can be very inaccurate for evaluating self-interaction;
             ``anisotropic`` uses anisotropic and analytical Gaussian polarization profile [``self.sigma`` should be a list of three floats for
             (sigma_x, sigma_y, sigma_z) instead of a single float].
+            ``uniform`` uses a polarization profile with uniform amplitude within the specified size and zero outside, which can be used to 
+            approximate solid-state or continous media.
 
         Raises
         ------

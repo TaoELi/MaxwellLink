@@ -361,6 +361,8 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
             self._init_sources_point()
         elif self.polarization_type == "anisotropic":
             self._init_sources_anisotropic_analytical()
+        elif self.polarization_type == "uniform":
+            self._init_sources_uniform()
         else:
             raise ValueError(
                 f"Unsupported polarization_type '{self.polarization_type}' for Meep molecule."
@@ -848,6 +850,79 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
 
         self.sources = srcs
 
+    def _init_sources_uniform(self):
+        """
+        Construct Meep sources for the molecule's polarization kernel (1D/2D/3D)
+        using uniform shape of the polarizations, i.e, within the volume the polarization
+        is a constant, and outside the volume the polarization is zero.
+
+        Notes
+        -----
+        Sources are memoized per polarization fingerprint and component to allow
+        sharing across molecules with identical spatial kernels.
+        """
+
+        srcs = []
+        center = _to_mp_v3(self.center)
+        size = _to_mp_v3(self.size)
+
+        if self.dimensions == 1:
+            # check the size whether zero or not
+            if self.size.x <= 0:
+                raise ValueError(
+                    "For uniform polarization_type, the size of the molecule should be positive in all dimensions."
+                )
+            key = (self.polarization_fingerprint_hash, "Ez")
+            if key not in _fingerprint_source:
+                instantaneous_source_amplitudes[key] = 0.0
+                _fingerprint_source[key] = mp.Source(
+                    src=_make_custom_time_src(key),
+                    component=mp.Ez,
+                    center=center,
+                    size=size,
+                    amplitude=self.rescaling_factor / self.size.x,
+                )
+            srcs.append(_fingerprint_source[key])
+        elif self.dimensions == 2:
+            if self.size.x <= 0 or self.size.y <= 0:
+                raise ValueError(
+                    "For uniform polarization_type, the size of the molecule should be positive in all dimensions."
+                )
+            key = (self.polarization_fingerprint_hash, "Ez")
+            if key not in _fingerprint_source:
+                instantaneous_source_amplitudes[key] = 0.0
+                _fingerprint_source[key] = mp.Source(
+                    src=_make_custom_time_src(key),
+                    component=mp.Ez,
+                    center=center,
+                    size=size,
+                    amplitude=self.rescaling_factor / (self.size.x * self.size.y),
+                )
+            srcs.append(_fingerprint_source[key])
+        else:  # 3D
+            if self.size.x <= 0 or self.size.y <= 0 or self.size.z <= 0:
+                raise ValueError(
+                    "For uniform polarization_type, the size of the molecule should be positive in all dimensions."
+                )
+            for comp, tag in (
+                (mp.Ex, "Ex"),
+                (mp.Ey, "Ey"),
+                (mp.Ez, "Ez"),
+            ):
+                key = (self.polarization_fingerprint_hash, tag)
+                if key not in _fingerprint_source:
+                    instantaneous_source_amplitudes[key] = 0.0
+                    _fingerprint_source[key] = mp.Source(
+                        src=_make_custom_time_src(key),
+                        component=comp,
+                        center=center,
+                        size=size,
+                        amplitude=self.rescaling_factor / (self.size.x * self.size.y * self.size.z),
+                    )
+                srcs.append(_fingerprint_source[key])
+
+        self.sources = srcs
+
     def _calculate_ep_integral(self, sim: mp.Simulation):
         """
         Compute the regularized E-field integral over the molecule's kernel.
@@ -870,6 +945,8 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
             return self._calculate_ep_integral_point_raw(sim)
         elif self.polarization_type == "anisotropic":
             return self._calculate_ep_integral_anisotropic_analytical(sim)
+        elif self.polarization_type == "uniform":
+            return self._calculate_ep_integral_uniform(sim)
         else:
             raise ValueError(
                 f"Unsupported polarization_type '{self.polarization_type}' for Meep molecule."
@@ -1151,6 +1228,40 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
             )
         return [np.real(x), np.real(y), np.real(z)]
 
+    def _calculate_ep_integral_uniform(self, sim: mp.Simulation):
+        """
+        Compute the regularized E-field integral over the molecule's kernel
+        using uniform polarization.
+
+        Parameters
+        ----------
+        sim : meep.Simulation
+            Active Meep simulation.
+
+        Returns
+        -------
+        list of float
+            Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
+        """
+
+        dx = 1.0 / self.m.resolution
+
+        vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
+        x = y = z = 0.0
+        if self.dimensions == 1:
+            ez = sim.get_array(mp.Ez, vol).mean()
+            z = self.rescaling_factor * ez
+        elif self.dimensions == 2:
+            ez = sim.get_array(mp.Ez, vol).mean()
+            z = self.rescaling_factor * ez 
+        else:  # 3D
+            ex = sim.get_array(mp.Ex, vol).mean()
+            ey = sim.get_array(mp.Ey, vol).mean()
+            ez = sim.get_array(mp.Ez, vol).mean()
+            x = self.rescaling_factor * ex 
+            y = self.rescaling_factor * ey 
+            z = self.rescaling_factor * ez
+        return [np.real(x), np.real(y), np.real(z)]
 
 # ---------- NON-SOCKET Step Function for MEEP ----------
 def update_molecules_no_socket(
