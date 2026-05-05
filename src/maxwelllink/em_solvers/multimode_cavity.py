@@ -352,8 +352,8 @@ class MultiModeSimulation(DummyEMSimulation):
         excited_grid_list: Optional[list] = [],
         molecule_pulse_drive: Optional[Union[float, Callable[[float], float]]] = None,
         molecule_pulse_axis: str = "y",
-        initializer: Optional[object] = Dummy_initializer(),
-        thermostat: Optional[object] = Dummy_thermostat(),
+        initializer: Optional[object] = DummyInitializer(),
+        thermostat: Optional[object] = DummyThermostat(),
     ):
         r"""
         Parameters
@@ -397,6 +397,11 @@ class MultiModeSimulation(DummyEMSimulation):
             Constant molecule pulse drive or function ``molecule_pulse_drive(t_au)`` that determines the strength of the molecule pulse applied to the excited grid points.
         molecule_pulse_axis : str, default: "y"
             pulse axis for the molecule pulse.
+        initializer : object, optional
+            An object that provides methods to initialize cavity field coordinates and momenta, as well as molecular dipoles if needed. Must have methods ``position_initializer(omega, q)`` and ``momentum_initializer(p)`` that return initialized positions and momenta based on the cavity frequencies and/or other parameters.
+            Two example initializers are provided in ``maxwelllink.tools.harmonic_oscillator_helper``: ``DummyInitializer`` (returns zeros) and ``MaxwellBoltzmannInitializer`` (initializes based on Maxwell-Boltzmann distribution at a given temperature).
+        thermostat : object, optional
+            An object that provides a method to apply a thermostat to the cavity field momenta. Must have a method ``apply_kick(momentum)`` that takes the current momenta and returns the modified momenta after applying the thermostat kick. Two example thermostats are provided in ``maxwelllink.tools.harmonic_oscillator_helper``: ``DummyThermostat`` (does nothing) and a simple Langevin thermostat that applies a frictional kick based on a specified temperature and damping constant.
         """
 
         super().__init__(hub=hub, molecules=molecules)

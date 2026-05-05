@@ -13,7 +13,7 @@ import numpy as np
 from typing import Optional
 from ..units import AU_TO_K, AU_TO_FS
 
-class Dummy_initializer:
+class DummyInitializer:
     """
     A dummy initializer that returns zero momenta and positions.
     """
@@ -29,7 +29,7 @@ class Dummy_initializer:
         size = q.shape if isinstance(q, np.ndarray) else (len(q),)
         return np.zeros(size)
     
-class Dummy_thermostat:
+class DummyThermostat:
     """
     A dummy thermostat that does nothing.
     """
@@ -40,7 +40,7 @@ class Dummy_thermostat:
     def apply_kick(self, momentum: np.ndarray) -> np.ndarray:
         return momentum
     
-class Maxwell_Boltzmann_initializer:
+class MaxwellBoltzmannInitializer:
     """
     A class to initialize particle velocities based on the Maxwell-Boltzmann distribution at the given temperature.
     """
