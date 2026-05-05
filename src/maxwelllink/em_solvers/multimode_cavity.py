@@ -352,8 +352,8 @@ class MultiModeSimulation(DummyEMSimulation):
         excited_grid_list: Optional[list] = [],
         molecule_pulse_drive: Optional[Union[float, Callable[[float], float]]] = None,
         molecule_pulse_axis: str = "y",
-        initializer: Optional[object] = Dummy_initializer,
-        thermostat: Optional[object] = Dummy_thermostat,
+        initializer: Optional[object] = Dummy_initializer(),
+        thermostat: Optional[object] = Dummy_thermostat(),
     ):
         r"""
         Parameters
