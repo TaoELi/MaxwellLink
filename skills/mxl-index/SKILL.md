@@ -22,6 +22,7 @@ description: This skill should be used when users ask how to set up, choose, or 
 - EM solvers:
   - Meep FDTD: `skills/mxl-meep/SKILL.md`
   - Single-mode cavity: `skills/mxl-singlemode/SKILL.md`
+  - Multimode Fabry-Pérot cavity: `skills/mxl-multimode/SKILL.md`
   - Laser-driven dynamics: `skills/mxl-laser-driven/SKILL.md`
 - Drivers:
   - TLS: `skills/mxl-driver-tls/SKILL.md`

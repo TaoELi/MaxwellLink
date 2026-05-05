@@ -105,10 +105,9 @@ Socket mode
        cavity_geometry=cavity,
        hub=hub,
        include_dse=True,
-       record_history=True,
    )
 
-   sim.run(steps=4000)
+   sim.run(steps=4000, record_history=True, record_list=["all"])
 
 Launch :command:`mxl_driver --model tls --port 31415 ...` (or another driver)
 once for every molecule after running this script.
@@ -152,10 +151,48 @@ Non-socket mode
        molecules=molecules,
        cavity_geometry=cavity,
        include_dse=False,
-       record_history=True,
    )
 
-   sim.run(steps=4000)
+   sim.run(steps=4000, record_history=True, record_list=["all"])
+
+NVT initialization and thermostat
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The cavity-mode initial conditions and any per-step thermostat are now provided
+as composable objects via the ``initializer`` and ``thermostat`` arguments.
+``maxwelllink.tools.harmonic_oscillator_helper`` ships
+:class:`~maxwelllink.tools.harmonic_oscillator_helper.DummyInitializer` /
+:class:`~maxwelllink.tools.harmonic_oscillator_helper.DummyThermostat` (the
+defaults, NVE) and
+:class:`~maxwelllink.tools.harmonic_oscillator_helper.MaxwellBoltzmannInitializer` /
+:class:`~maxwelllink.tools.harmonic_oscillator_helper.LangevinThermostat` for
+NVT runs.
+
+.. code-block:: python
+
+   from maxwelllink import (
+       MaxwellBoltzmannInitializer,
+       LangevinThermostat,
+   )
+   from maxwelllink.units import AU_TO_K
+
+   temperature_au = 300.0 / AU_TO_K
+   dt_au = 0.5
+
+   sim = mxl.MultiModeSimulation(
+       dt_au=dt_au,
+       damping_au=0.0,
+       molecules=molecules,
+       cavity_geometry=cavity,
+       include_dse=True,
+       initializer=MaxwellBoltzmannInitializer(temperature_au=temperature_au, random_seed=2026),
+       thermostat=LangevinThermostat(temperature_au=temperature_au, dt_au=dt_au, tau_au=4000.0, random_seed=2026),
+   )
+
+   sim.run(steps=4000, record_history=True, record_list=["all"])
+
+Drop the ``thermostat`` argument (or keep the default ``DummyThermostat``) to
+get a thermal initial condition followed by NVE evolution.
 
 Cavity geometry parameters
 --------------------------
@@ -242,28 +279,32 @@ These arguments are passed to
        ``n_grid``, ``omega_k``, ``ftilde_k``, ...) through attribute lookup.
    * - ``qc_initial``
      - Initial cavity-mode coordinates with shape ``(n_mode, 3)``. Defaults to
-       zeros (or to a Maxwell-Boltzmann sample when ``T_initial_au`` is set).
+       zeros.
    * - ``pc_initial``
      - Initial cavity-mode momenta with shape ``(n_mode, 3)``. Defaults to
-       zeros (or to a Maxwell-Boltzmann sample when ``T_initial_au`` is set).
-   * - ``T_initial_au``
-     - Initial temperature (a.u.) used to draw a Maxwell-Boltzmann distribution
-       for ``qc_initial`` and/or ``pc_initial`` when they are not supplied.
-   * - ``thermostat_seed``
-     - Random seed for the Maxwell-Boltzmann initialization and the Langevin
-       thermostat. Use to obtain reproducible trajectories.
+       zeros.
    * - ``mu_initial``
      - Initial total molecular dipole vector with shape ``(n_grid, 3)`` prior
        to axis masking (a.u.). Default: zeros.
    * - ``dmudt_initial``
      - Initial time derivative of the total molecular dipole vector with shape
        ``(n_grid, 3)`` (a.u.). Default: zeros.
-   * - ``NVT_T_au``
-     - Target temperature (a.u.) for the Langevin thermostat applied to the
-       cavity modes. ``None`` corresponds to NVE evolution.
-   * - ``langevin_tau_au``
-     - Characteristic relaxation time (a.u.) for the Langevin thermostat.
-       Required when ``NVT_T_au`` is provided.
+   * - ``initializer``
+     - Object that draws the initial cavity-mode coordinates and momenta. 
+       Default:
+       :class:`~maxwelllink.tools.harmonic_oscillator_helper.DummyInitializer`
+       (zeros). Use
+       :class:`~maxwelllink.tools.harmonic_oscillator_helper.MaxwellBoltzmannInitializer`
+       (``temperature_au``, ``random_seed``) to draw an NVT thermal sample at a
+       given temperature.
+   * - ``thermostat``
+     - Object whose ``apply_kick(momentum)`` method is invoked every step on the
+       cavity-mode momenta. Default:
+       :class:`~maxwelllink.tools.harmonic_oscillator_helper.DummyThermostat`
+       (NVE). Use
+       :class:`~maxwelllink.tools.harmonic_oscillator_helper.LangevinThermostat`
+       (``temperature_au``, ``dt_au``, ``tau_au``, ``random_seed``) for an NVT
+       Langevin thermostat on the cavity bath.
    * - ``include_dse``
      - When ``True`` add the dipole self-energy correction to the field
        returned to the molecules and account for it in the cavity energy.
@@ -331,8 +372,12 @@ Notes
 - Using ``abc_cutoff > 0`` is recommended for large planar grids to suppress
   spurious reflections of the photon field at the boundaries; the cutoff is
   expressed as a fraction of the cavity length.
-- ``T_initial_au`` together with ``thermostat_seed`` provides a thermalized
-  starting condition for the photon bath; combine with ``NVT_T_au`` and
-  ``langevin_tau_au`` to maintain that temperature throughout the run.
-- Setting ``record_history=False`` (or tuning ``record_every_steps`` when
-  recording to disk) avoids large memory allocations for throughput-critical runs.
+- For NVT runs, supply both an
+  :class:`~maxwelllink.tools.harmonic_oscillator_helper.MaxwellBoltzmannInitializer`
+  (thermal initial condition) and a
+  :class:`~maxwelllink.tools.harmonic_oscillator_helper.LangevinThermostat`
+  (per-step kick) to ``initializer`` and ``thermostat`` respectively. Pass the
+  same ``random_seed`` to both for reproducible trajectories. Use
+  ``MaxwellBoltzmannInitializer`` alone for a thermal IC followed by NVE
+  dynamics.
+
