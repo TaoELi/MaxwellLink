@@ -454,7 +454,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
         self.initializer = initializer
         self.thermostat = thermostat
-        qc_initial = self.initializer.position_initializer(omega=self.omega_k, q=qc_initial)
+        qc_initial = self.initializer.position_initializer(self.omega_k, qc_initial)
         pc_initial = self.initializer.momentum_initializer(pc_initial)
 
         self.qc = qc_initial * self.axis
@@ -531,33 +531,6 @@ class MultiModeSimulation(DummyEMSimulation):
     # ------------------------------------------------------------------
     # Core helpers
     # ------------------------------------------------------------------
-    def _Maxwell_Boltzmann_initialize(self, T_au: float):
-        """
-        Initialize cavity mode coordinates and momenta according to Maxwell-Boltzmann distribution at the given temperature.
-
-        Parameters
-        ----------
-        T_au : float
-            Temperature in atomic units. k_B is set to 1 in atomic units, so T_au is effectively the thermal energy. Must be positive.
-        seed : int, optional
-            Random seed for reproducible results.
-        """
-        if self.n_mode <= 1:
-            print("[MultiModeCavity] Warning: Only one mode present. Initializing with zero momenta.")
-            return np.zeros((self.n_mode, 3)), np.zeros((self.n_mode, 3))
-        
-        p_mb  = self.rng.normal(0, np.sqrt(T_au), size=(self.n_mode, 3))
-        p_mb -= np.mean(p_mb, axis=0)  # remove any net momentum to ensure total momentum is zero
-        T_cur_p = np.sum(p_mb**2) / (3 * (self.n_mode - 1))
-        scaling_factor_p = np.sqrt(T_au / T_cur_p)
-
-        q_mb = self.rng.normal(0, np.sqrt(T_au) / self.omega_k[:, np.newaxis], size=(self.n_mode, 3))
-        q_mb -= np.mean(q_mb, axis=0)  # remove any net displacement to ensure total displacement is zero
-        T_cur_q = np.sum((self.omega_k[:, np.newaxis] * q_mb)**2) / (3 * (self.n_mode - 1))
-        scaling_factor_q = np.sqrt(T_au / T_cur_q)
-
-        return p_mb * scaling_factor_p, q_mb * scaling_factor_q
-
     def _ensure_socket_connections(self):
         if not self.socket_wrappers:
             return
