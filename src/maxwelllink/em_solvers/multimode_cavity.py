@@ -459,8 +459,8 @@ class MultiModeSimulation(DummyEMSimulation):
 
         self.initializer = initializer
         self.thermostat = thermostat
-        if qc_initial is None: qc_initial = self.initializer.position_initializer(self.omega_k, qc_initial)
-        if pc_initial is None: pc_initial = self.initializer.momentum_initializer(pc_initial)
+        qc_initial = self.initializer.position_initializer(self.omega_k, qc_initial)
+        pc_initial = self.initializer.momentum_initializer(pc_initial)
 
         self.qc = qc_initial * self.axis
         self.pc = pc_initial * self.axis
