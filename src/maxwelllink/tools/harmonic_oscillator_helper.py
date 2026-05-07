@@ -22,20 +22,10 @@ class DummyInitializer:
         pass
     
     def momentum_initializer(self, p):
-        if np.all(p == 0):
-            size = p.shape if isinstance(p, np.ndarray) else (len(p),)
-            return np.zeros(size)
-        else:
-            print("[Dummy Initializer] Warning: Initial momenta are provided, skipping Dummy initialization.")
-            return p
+        return p
 
     def position_initializer(self, omega, q):
-        if np.all(q == 0):
-            size = q.shape if isinstance(q, np.ndarray) else (len(q),)
-            return np.zeros(size)
-        else:
-            print("[Dummy Initializer] Warning: Initial positions are provided, skipping Dummy initialization.")
-            return q
+        return q
     
 class DummyThermostat:
     """
@@ -87,11 +77,11 @@ class MaxwellBoltzmannInitializer:
         if np.all(q == 0):
             print(f"[Maxwell-Boltzmann Initializer] Initializing positions with Maxwell-Boltzmann distribution at temperature {self.temperature_au} au.")
             size = q.shape if isinstance(q, np.ndarray) else (len(q),)
-            q_mb = self.rng.normal(scale=np.sqrt(self.temperature_au) / omega, size=size)
+            q_mb = self.rng.normal(scale=np.sqrt(self.temperature_au) / omega[:, None], size=size)
             if q_mb.size == 3 :
                 return q_mb
             q_mb -= np.mean(q_mb, axis=0)  # remove any net displacement to ensure total displacement is zero
-            T_cur_q = np.sum((omega * q_mb)**2) / (q_mb.size - 3)
+            T_cur_q = np.sum((omega[:, None] * q_mb)**2) / (q_mb.size - 3)
             scaling_factor_q = np.sqrt(self.temperature_au / T_cur_q)
             return q_mb * scaling_factor_q
         else:
