@@ -452,18 +452,18 @@ class MultiModeSimulation(DummyEMSimulation):
         else : mu_initial = np.array(mu_initial, dtype=float).reshape((self.n_grid, 3))
         if dmudt_initial is None: dmudt_initial = np.zeros((self.n_grid, 3), dtype=float)
         else : dmudt_initial = np.array(dmudt_initial, dtype=float).reshape((self.n_grid, 3))
-        if qc_initial is None: qc = np.zeros((self.n_mode, 3), dtype=float)
-        else : qc = np.array(qc_initial, dtype=float).reshape((self.n_mode, 3))
-        if pc_initial is None: pc = np.zeros((self.n_mode, 3), dtype=float)
-        else : pc = np.array(pc_initial, dtype=float).reshape((self.n_mode, 3))
+        if qc_initial is None: qc_initial = np.zeros((self.n_mode, 3), dtype=float)
+        else : qc_initial = np.array(qc_initial, dtype=float).reshape((self.n_mode, 3))
+        if pc_initial is None: pc_initial = np.zeros((self.n_mode, 3), dtype=float)
+        else : pc_initial = np.array(pc_initial, dtype=float).reshape((self.n_mode, 3))
 
         self.initializer = initializer
         self.thermostat = thermostat
-        if qc_initial is None: qc = self.initializer.position_initializer(self.omega_k, qc)
-        if pc_initial is None: pc = self.initializer.momentum_initializer(pc)
+        qc_initial = self.initializer.position_initializer(self.omega_k, qc_initial)
+        pc_initial = self.initializer.momentum_initializer(pc_initial)
 
-        self.qc = qc * self.axis
-        self.pc = pc * self.axis
+        self.qc = qc_initial * self.axis
+        self.pc = pc_initial * self.axis
         self.dipole = mu_initial * self.axis
         self.dipole_prev = self.dipole.copy()
         self.dmudt = dmudt_initial * self.axis
