@@ -255,3 +255,4 @@ tutorials/dftbplus_runs
 tutorials/dftbplus_bomd_dipder_runs/
 tutorials/dftbplus_bomd_dipole_derivatives.ipynb
 tutorials/*cp2k*
+tutorials/12_meep_dftb.ipynb
