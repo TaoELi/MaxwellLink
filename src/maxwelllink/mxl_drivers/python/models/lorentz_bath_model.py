@@ -40,7 +40,7 @@ class LorentzBathModel(DummyModel):
     If the anharmonic bath is used, the bath potential becomes
     :math:`V(q_j) = \\frac{1}{2} \\omega_j^2 q_j^2 - \\omega_j^2 \\sqrt{\\frac{\\chi}{2}} q_j^3 + \\frac{7}{12}\\omega_j^2\\chi q_j^4`,
     where :math:`\\chi` is the anharmonicity parameter of the bath.
-    
+
     -----
     This model provides an alternative way to understand the interplay between polaritons and
     molecular dark modes, which should be more straightforward and cheaper to understand than directly
@@ -55,6 +55,7 @@ class LorentzBathModel(DummyModel):
         omega: float = 2.4188843e-1,
         mu0: float = 1.870819866e2,
         orientation: int = 2,
+        relaxation: float = 0.0,
         # convenient way to define bath
         num_bath: int=None, 
         bath_width: float=None, 
@@ -94,6 +95,8 @@ class LorentzBathModel(DummyModel):
             is ``1.870819866e2`` a.u. (``0.1`` in MEEP units with ``[T]=0.1 fs``).
         orientation : int, default: 2
             Orientation of the dipole moment; can be ``0`` (x), ``1`` (y), or ``2`` (z).
+        relaxation : float, default: 0.0
+            Relaxation rate of the Lorentzian oscillator in atomic units (a.u.). If not provided, the Lorentzian oscillator will not have relaxation.
         num_bath : int, optional
             Number of bath oscillators. If not provided, the bath will not be defined via this convenient way.
         bath_width : float, optional
@@ -145,6 +148,7 @@ class LorentzBathModel(DummyModel):
         self.orientation_idx = int(orientation)
         if self.orientation_idx < 0 or self.orientation_idx > 2:
             raise ValueError("Orientation must be 0 (x), 1 (y), or 2 (z).")
+        self.relaxation = np.abs(relaxation)    
 
         self.p = p_initial  # initial momentum of the oscillator
         self.q = q_initial  # initial position of the oscillator
@@ -313,6 +317,8 @@ class LorentzBathModel(DummyModel):
         # enforce direct bath relaxation if bath_relaxation is provided
         if self.bath_relaxation > 0.0:
             self.p_bath *= np.exp(-self.bath_relaxation * self.dt)
+        if self.relaxation > 0.0:
+            self.p *= np.exp(-self.relaxation * self.dt)
 
         # we expect to return dmu/dt at half a time step after the E-field time
         p_lorentz_half = self.p + 0.5 * self.acceleration * self.dt
