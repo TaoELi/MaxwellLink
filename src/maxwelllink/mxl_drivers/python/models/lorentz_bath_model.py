@@ -11,6 +11,7 @@ import numpy as np
 from pyparsing import Optional
 from scipy.linalg import expm
 import os
+from ....tools.harmonic_oscillator_helper import LangevinThermostat
 
 try:
     from .dummy_model import DummyModel
@@ -51,12 +52,26 @@ class LorentzBathModel(DummyModel):
         omega: float = 2.4188843e-1,
         mu0: float = 1.870819866e2,
         orientation: int = 2,
+        # convenient way to define bath
+        num_bath: int=None, 
+        bath_width: float=None, 
+        bath_form: str=None, 
+        bath_dephasing: float=0.0,
+        # direct way to define bath
         omega_bath: list = None,
         k_bath: list = None,
+        # initial conditions
         p_initial: float = 0.0,
         q_initial: float = 0.0,
         p_bath_initial: list = None,
         q_bath_initial: list = None,
+        # optional thermostats 
+        thermostat: str=None,
+        langevin_tau_au: float=41341.0, # 1 ps in a.u.
+        initializer: str=None,
+        temperature_au: float=0.0,
+        random_seed: int=114514,
+        # checkpoint and restart settings
         checkpoint: bool = False,
         restart: bool = False,
         verbose: bool = False,
@@ -75,6 +90,15 @@ class LorentzBathModel(DummyModel):
             is ``1.870819866e2`` a.u. (``0.1`` in MEEP units with ``[T]=0.1 fs``).
         orientation : int, default: 2
             Orientation of the dipole moment; can be ``0`` (x), ``1`` (y), or ``2`` (z).
+        num_bath : int, optional
+            Number of bath oscillators. If not provided, the bath will not be defined via this convenient way.
+        bath_width : float, optional
+            Frequency width of the bath oscillators in atomic units (a.u.). If not provided, the bath will not be defined via this convenient way.
+        bath_form : str, optional
+            Form of the bath distribution, which can be "uniform", "gaussian", or "lorentzian". If not provided, the bath will not be defined via this convenient way.
+        bath_dephasing : float, optional
+            Dephasing rate from the bright state to the dark modes (bath oscillators) in atomic units (a.u.), which can be used to determine the coupling coefficients 
+            between the Lorentzian oscillator and the bath oscillators. If not provided, the bath will not be defined via this convenient way.
         omega_bath : list of float, shape (N_bath,), optional
             Transition frequencies of the bath oscillators in atomic units (a.u.).
         k_bath : list of float, shape (N_bath,), optional
@@ -87,6 +111,16 @@ class LorentzBathModel(DummyModel):
             Initial momenta of the bath oscillators.
         q_bath_initial : list of float, shape (N_bath,), optional
             Initial positions of the bath oscillators.
+        thermostat : str, optional
+            Type of thermostat to use. Can be "langevin".
+        langevin_tau_au : float, optional
+            Damping time constant for the Langevin thermostat in atomic units (a.u.). Default is ``41341.0`` a.u. (1 ps in a.u.).
+        initializer : str, optional
+            Type of initializer to use. Can be "maxwell_boltzmann".
+        temperature_au : float, optional
+            Temperature in atomic units (a.u.) for the thermostat and initializer. Must be positive.
+        random_seed : int, optional
+            Random seed for reproducible results in the thermostat and initializer.
         checkpoint : bool, default: False
             Whether to enable checkpointing.
         restart : bool, default: False
@@ -111,15 +145,36 @@ class LorentzBathModel(DummyModel):
         self.acceleration = 0.0 # acceleration of the oscillator
         self.p_half = 0.0  # half time step momentum of the oscillator
 
-        # Initialize bath parameters (if provided)
-        # check the dimensions of the bath parameters
+        # Direct way to define the bath, which has higher priority than the convenient way
         if omega_bath is not None and k_bath is not None:
             if len(omega_bath) != len(k_bath):
                 raise ValueError("The length of omega_bath and k_bath must be the same.")
-        self.nbath = len(omega_bath) if omega_bath is not None else 0  # number of bath oscillators
-
-        self.omega_bath = np.array(omega_bath)  # transition frequencies of the bath oscillators
-        self.k_bath = np.array(k_bath)  # coupling coefficients between the Lorentzian oscillator and the bath oscillators
+            self.omega_bath = np.array(omega_bath)  # transition frequencies of the bath oscillators
+            self.k_bath = np.array(k_bath)  # coupling coefficients between the Lorentzian oscillator and the bath oscillators
+        # Convenient way to define the bath, which has lower priority than the direct way
+        elif num_bath is not None and bath_width is not None and bath_form is not None:
+            self.num_bath = int(num_bath)
+            if self.num_bath <= 1:
+                raise ValueError("num_bath must be greater than 1 to define a bath.")
+            self.bath_width = float(bath_width)
+            self.bath_form = bath_form.lower()
+            self.bath_dephasing = float(bath_dephasing)
+            # consider implementing different bath forms
+            self.omega_bath = np.linspace(self.omega - self.bath_width*0.5, self.omega + self.bath_width*0.5, self.num_bath)
+            omega_bath_relative = self.omega_bath - self.omega
+            domega = self.omega_bath[1] - self.omega_bath[0]
+            k = np.sqrt(2.0 * domega / np.pi * self.bath_dephasing) 
+            if self.bath_form == "uniform":
+                self.k_bath = np.ones(self.num_bath) * k
+            elif self.bath_form == "lorentzian":
+                gamma = self.bath_dephasing
+                self.k_bath = k * ( gamma**2 / (gamma**2 + (omega_bath_relative)**2) )**0.5
+            elif self.bath_form == "gaussian":
+                gamma = self.bath_dephasing
+                self.k_bath = k * np.exp(-0.25 * (omega_bath_relative / gamma)**2)
+            else:
+                raise ValueError("Unsupported bath form. Supported forms are: uniform, gaussian, lorentzian.")
+        
         if p_bath_initial is None:
             self.p_bath = np.zeros_like(self.omega_bath)
         else:
@@ -130,8 +185,30 @@ class LorentzBathModel(DummyModel):
             self.q_bath = np.array(q_bath_initial)
         self.acceleration_bath = np.zeros_like(self.omega_bath)  # accelerations of the bath oscillators
 
+        # now let's provide initializer 
+        self.random_seed = random_seed
+        self.temperature_au = temperature_au
+        if initializer is not None:
+            initializer = initializer.lower()
+            if initializer == "maxwell_boltzmann": 
+                self.rng = np.random.default_rng(self.random_seed)  
+                self.p = float(self.rng.normal(scale=np.sqrt(self.temperature_au), size=1)[0])   
+                self.q = float(self.rng.normal(scale=np.sqrt(self.temperature_au) / self.omega, size=1)[0])
+                self.p_bath = self.rng.normal(scale=np.sqrt(self.temperature_au), size=self.omega_bath.shape)
+                self.q_bath = self.rng.normal(scale=np.sqrt(self.temperature_au) / self.omega_bath, size=self.omega_bath.shape)          
+            else:
+                raise ValueError("Unsupported initializer. Supported initializers are: maxwell_boltzmann.")
+
+        self.thermostat = None
+        self.langevin_tau_au = langevin_tau_au 
+        if thermostat is not None:
+            thermostat = thermostat.lower()
+            self.thermostat = thermostat
+            if thermostat != "langevin":
+                raise ValueError("Unsupported thermostat. Supported thermostats are: langevin.")
+            
         if self.verbose:
-            print(f"[molecule ID {self.molecule_id}] Initialized Lorentzian-bath model with {self.nbath} bath oscillators.")
+            print(f"[molecule ID {self.molecule_id}] Initialized Lorentzian-bath model with bath oscillators.")
 
         # optional, checking whether the driver can be paused and resumed properly
         self.restarted = False
@@ -159,6 +236,9 @@ class LorentzBathModel(DummyModel):
 
         self.dt = float(dt_new)
         self.molecule_id = int(molecule_id)
+
+        if self.thermostat == "langevin":
+            self.thermostat = LangevinThermostat(temperature_au=self.temperature_au, dt_au=self.dt, tau_au=self.langevin_tau_au, random_seed=self.random_seed)
 
         # Prepare checkpoint filename
         self.checkpoint_filename = "lorentz_bath_checkpoint_id_%d.npz" % self.molecule_id
@@ -213,6 +293,11 @@ class LorentzBathModel(DummyModel):
         # p also updated to the full time step, the same as the E-field time
         self.p += 0.5 * self.acceleration * self.dt
         self.p_bath += 0.5 * self.acceleration_bath * self.dt
+
+        # thermostat
+        if self.thermostat is not None:
+            self.p = self.thermostat.apply_kick(self.p)
+            self.p_bath = self.thermostat.apply_kick(self.p_bath)
 
         # we expect to return dmu/dt at half a time step after the E-field time
         self.p_half = self.p + 0.5 * self.acceleration * self.dt
