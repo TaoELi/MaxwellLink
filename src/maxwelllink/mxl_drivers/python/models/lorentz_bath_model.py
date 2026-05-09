@@ -37,7 +37,9 @@ class LorentzBathModel(DummyModel):
 
     :math:`H = \\frac{1}{2} \\left(p_B - \\sum_{j\\in \\rm{bath}} k_j q_j \\right)^2 +  \\frac{1}{2} \\omega^2  q_B^2 - \\mu_{0} q_B \\cdot E(t) + \\sum_{j\\in \\rm{bath}} \\left( \\frac{1}{2} \\omega_j^2 q_j^2 + \\frac{1}{2} p_j^2\\right)`
 
-    Notes
+    If the anharmonic bath is used, the bath potential becomes
+    :math:`V(q_j) = \\frac{1}{2} \\omega_j^2 q_j^2 - \\omega_j^2 \\sqrt{\\frac{\\chi}{2}} q_j^3 + \\frac{7}{12}\\omega_j^2\\chi q_j^4`,
+    where :math:`\\chi` is the anharmonicity parameter of the bath.
     -----
     This model provides an alternative way to understand the interplay between polaritons and
     molecular dark modes, which should be more straightforward and cheaper to understand than directly
@@ -58,6 +60,7 @@ class LorentzBathModel(DummyModel):
         bath_form: str=None, 
         bath_dephasing: float=0.0,
         bath_relaxation: float=0.0,
+        bath_anharmonicity: float=0.0,
         # direct way to define bath
         omega_bath: list = None,
         k_bath: list = None,
@@ -101,6 +104,8 @@ class LorentzBathModel(DummyModel):
             between the Lorentzian oscillator and the bath oscillators. If not provided, the bath will not be defined via this convenient way.
         bath_relaxation : float, optional
             The direct relaxation rate of the bath oscillators in atomic units (a.u.). If not provided, the bath oscillators will not have relaxation.
+        bath_anharmonicity : float, optional
+            The anharmonicity of the bath oscillators in atomic units (a.u.). For realistic molecules, this parameter can be set as 1% of the fundamental frequency
         omega_bath : list of float, shape (N_bath,), optional
             Transition frequencies of the bath oscillators in atomic units (a.u.).
         k_bath : list of float, shape (N_bath,), optional
@@ -145,6 +150,8 @@ class LorentzBathModel(DummyModel):
         self.acceleration = 0.0 # acceleration of the oscillator
         self.p_half = 0.0  # half time step momentum of the oscillator
 
+        self.bath_relaxation = float(bath_relaxation)
+        self.bath_anharmonicity = float(bath_anharmonicity)
         # Direct way to define the bath, which has higher priority than the convenient way
         if omega_bath is not None and k_bath is not None:
             if len(omega_bath) != len(k_bath):
@@ -159,7 +166,6 @@ class LorentzBathModel(DummyModel):
             self.bath_width = float(bath_width)
             self.bath_form = bath_form.lower()
             self.bath_dephasing = float(bath_dephasing)
-            self.bath_relaxation = float(bath_relaxation)
             # consider implementing different bath forms
             self.omega_bath = np.linspace(self.omega - self.bath_width*0.5, self.omega + self.bath_width*0.5, self.num_bath)
             omega_bath_relative = self.omega_bath - self.omega
@@ -176,6 +182,11 @@ class LorentzBathModel(DummyModel):
             else:
                 raise ValueError("Unsupported bath form. Supported forms are: uniform, gaussian, lorentzian.")
         
+        # useful parameters for updating equations of motion
+        self.omega_bath_squared = self.omega_bath**2
+        self.omega_anharm_coeff1 = -3.0 * self.omega_bath_squared * np.sqrt(self.bath_anharmonicity / 2.0)
+        self.omega_anharm_coeff2 = 7.0/3.0 * self.omega_bath_squared * self.bath_anharmonicity
+
         if p_bath_initial is None:
             self.p_bath = np.zeros_like(self.omega_bath)
         else:
@@ -285,7 +296,9 @@ class LorentzBathModel(DummyModel):
 
         # force evaluation time [the same time as the E-field time]
         self.acceleration = -self.omega**2 * self.q + int_ep
-        self.acceleration_bath = -self.omega_bath**2 * self.q_bath
+        self.acceleration_bath = -self.omega_bath_squared * self.q_bath
+        if self.bath_anharmonicity != 0.0:
+            self.acceleration_bath += -self.omega_anharm_coeff1 * self.q_bath**2 - self.omega_anharm_coeff2 * self.q_bath**3
 
         # p also updated to the full time step, the same as the E-field time
         self.p += 0.5 * self.acceleration * self.dt
