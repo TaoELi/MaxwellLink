@@ -264,7 +264,6 @@ class SHOModel(DummyModel):
             "p": self.p,
             "q": self.q,
             "acceleration": self.acceleration,
-            "density_matrix": self.rho.copy(),
         }
         return snapshot
 
@@ -282,4 +281,3 @@ class SHOModel(DummyModel):
         self.p = snapshot["p"]
         self.q = snapshot["q"]
         self.acceleration = snapshot["acceleration"]
-        self.rho = snapshot["density_matrix"]
