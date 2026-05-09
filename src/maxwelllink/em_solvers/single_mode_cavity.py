@@ -201,7 +201,7 @@ class SingleModeSimulation(DummyEMSimulation):
         mu_initial: Optional[list] = None,
         dmudt_initial: Optional[list] = None,
         temp_au: float = 0.0,
-        tau_au: Optional[float] = None,
+        langevin_tau_au: Optional[float] = None,
         random_seed: Optional[int] = None, 
         record_history: bool = True,
         include_dse: bool = False,
@@ -240,7 +240,7 @@ class SingleModeSimulation(DummyEMSimulation):
             Initial time derivative of the total molecular dipole vector (a.u.).
         temp_au : float, default: 0.0  
             Temperature for sampling initial cavity coordinates from Maxwell-Boltzmann distribution (a.u.). If zero or negative, no sampling is done and initial coordinates are used as provided.
-        tau_au : float, optional
+        langevin_tau_au : float, optional
             Damping time constant for the Langevin thermostat (a.u.). If not provided, no Langevin thermostat is applied.
         random_seed : int, optional
             Random seed for the Langevin thermostat. If not provided, a default seed is used.
@@ -335,8 +335,8 @@ class SingleModeSimulation(DummyEMSimulation):
             dmudt_initial = [0.0, 0.0, 0.0]
 
         self.temp_au = temp_au
-        if tau_au is not None and temp_au is not None:
-            self.thermostat = LangevinThermostat(temperature_au=temp_au, tau_au=tau_au, random_seed=random_seed)
+        if langevin_tau_au is not None and temp_au is not None:
+            self.thermostat = LangevinThermostat(temperature_au=temp_au, tau_au=langevin_tau_au, random_seed=random_seed)
         else:
             self.thermostat = DummyThermostat(temperature_au=temp_au, random_seed=random_seed)
         

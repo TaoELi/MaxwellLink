@@ -41,11 +41,11 @@ sim = mxl.SingleModeSimulation(
     record_history=True,
     # Thermal initial condition + Langevin thermostat on the cavity:
     temp_au=9.5e-4,        # ~300 K (use AU_TO_K for conversions)
-    tau_au=4000.0,         # Langevin relaxation time (a.u.)
+    langevin_tau_au=4000.0,         # Langevin relaxation time (a.u.)
     random_seed=2026,      # reproducible sampling/kicks
 )
 ```
-Drop `tau_au` (or set it to `None`) to keep only the Maxwell-Boltzmann initial sampling and run NVE afterwards.
+Drop `langevin_tau_au` (or set it to `None`) to keep only the Maxwell-Boltzmann initial sampling and run NVE afterwards.
 
 ## Notes
 - For SLURM/HPC two-step runs, write a host/port file from the main job (e.g. via `maxwelllink.sockets.get_available_host_port(localhost=False, save_to_file="tcp_host_port_info.txt")`) and have the driver job read it.
