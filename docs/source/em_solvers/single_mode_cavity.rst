@@ -25,7 +25,7 @@ components can be coupled simultaneously by supplying composite axes such as
 
   with :math:`\boldsymbol{\mu}(t)` the summed molecular dipole restricted to the requested axes, :math:`\delta_{\mathrm{DSE}} = 1` only when ``include_dse=True``, and :math:`\delta_{\mathrm{exc,mol}} = 1` only when ``excite_mol=True`` (with :math:`\hat{\mathbf{e}}` the unit vector along ``coupling_axis``).
 
-  When ``temp_au > 0`` the initial cavity coordinate and momentum are resampled from a Maxwell-Boltzmann distribution at temperature :math:`T` (atomic units),
+  When ``temperature_au > 0`` the initial cavity coordinate and momentum are resampled from a Maxwell-Boltzmann distribution at temperature :math:`T` (atomic units),
 
   .. math::
 
@@ -137,10 +137,10 @@ Parameters
      - Initial total molecular dipole vector prior to axis masking (a.u.). Default: ``[0.0, 0.0, 0.0]``.
    * - ``dmudt_initial``
      - Initial time derivative of the total molecular dipole vector (a.u.). Default: ``[0.0, 0.0, 0.0]``.
-   * - ``temp_au``
+   * - ``temperature_au``
      - Cavity temperature in atomic units (Hartree). When ``> 0``, the initial cavity coordinate and momentum are resampled from a Maxwell-Boltzmann distribution at this temperature, overriding ``qc_initial`` and ``pc_initial``. Default: ``0.0``.
    * - ``langevin_tau_au``
-     - Langevin thermostat relaxation time :math:`\tau` (a.u.). When supplied alongside ``temp_au > 0``, a Langevin thermostat is applied to the cavity momentum each step. Leave as ``None`` for an NVE-like cavity (initial-temperature sampling only). Default: ``None``.
+     - Langevin thermostat relaxation time :math:`\tau` (a.u.). When supplied alongside ``temperature_au > 0``, a Langevin thermostat is applied to the cavity momentum each step. Leave as ``None`` for an NVE-like cavity (initial-temperature sampling only). Default: ``None``.
    * - ``random_seed``
      - Seed for the RNG that drives the Maxwell-Boltzmann sampling and the Langevin kicks. Use a fixed integer for reproducibility. Default: ``None``.
    * - ``shift_dipole_baseline``

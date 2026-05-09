@@ -200,7 +200,7 @@ class SingleModeSimulation(DummyEMSimulation):
         pc_initial: Optional[list] = None,
         mu_initial: Optional[list] = None,
         dmudt_initial: Optional[list] = None,
-        temp_au: float = 0.0,
+        temperature_au: float = 0.0,
         langevin_tau_au: Optional[float] = None,
         random_seed: Optional[int] = None, 
         record_history: bool = True,
@@ -238,7 +238,7 @@ class SingleModeSimulation(DummyEMSimulation):
             Initial total molecular dipole vector (a.u.).
         dmudt_initial : list, default: [0.0, 0.0, 0.0]
             Initial time derivative of the total molecular dipole vector (a.u.).
-        temp_au : float, default: 0.0  
+        temperature_au : float, default: 0.0  
             Temperature for sampling initial cavity coordinates from Maxwell-Boltzmann distribution (a.u.). If zero or negative, no sampling is done and initial coordinates are used as provided.
         langevin_tau_au : float, optional
             Damping time constant for the Langevin thermostat (a.u.). If not provided, no Langevin thermostat is applied.
@@ -334,21 +334,21 @@ class SingleModeSimulation(DummyEMSimulation):
         if dmudt_initial is None:
             dmudt_initial = [0.0, 0.0, 0.0]
 
-        self.temp_au = temp_au
-        if langevin_tau_au is not None and temp_au is not None:
-            self.thermostat = LangevinThermostat(temperature_au=temp_au, tau_au=langevin_tau_au, random_seed=random_seed)
+        self.temperature_au = temperature_au
+        if langevin_tau_au is not None and temperature_au is not None:
+            self.thermostat = LangevinThermostat(temperature_au=temperature_au, tau_au=langevin_tau_au, random_seed=random_seed)
         else:
-            self.thermostat = DummyThermostat(temperature_au=temp_au, random_seed=random_seed)
+            self.thermostat = DummyThermostat(temperature_au=temperature_au, random_seed=random_seed)
         
-        if temp_au > 0.0:
+        if temperature_au > 0.0:
             # sample initial qc and pc from Maxwell-Boltzmann distribution at the given temperature
             qc_initial = self.thermostat.sample_position_maxwell_boltzmann(
-                omega=self.frequency, q=qc_initial, temperature_au=temp_au
+                omega=self.frequency, q=qc_initial, temperature_au=temperature_au
             )
             pc_initial = self.thermostat.sample_momentum_maxwell_boltzmann(
-                p=pc_initial, temperature_au=temp_au
+                p=pc_initial, temperature_au=temperature_au
             )
-            print(f"[SingleModeCavity] Sampled initial cavity coordinates from Maxwell-Boltzmann distribution at T = {temp_au*AU_TO_K} K = {temp_au} a.u.")
+            print(f"[SingleModeCavity] Sampled initial cavity coordinates from Maxwell-Boltzmann distribution at T = {temperature_au*AU_TO_K} K = {temperature_au} a.u.")
             print(f"[SingleModeCavity] Initial qc: {qc_initial}, pc: {pc_initial}")
             print(f"[SingleModeCavity] THIS OVERRIDES PROVIDED INITIAL CONDITIONS OF CAVITY POSITIONS AND MOMENTA!")
 
