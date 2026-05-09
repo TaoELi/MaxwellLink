@@ -202,6 +202,7 @@ class SingleModeSimulation(DummyEMSimulation):
         dmudt_initial: Optional[list] = None,
         temperature_au: float = 0.0,
         langevin_tau_au: Optional[float] = None,
+        initializer: str=None,
         random_seed: Optional[int] = None, 
         record_history: bool = True,
         include_dse: bool = False,
@@ -242,6 +243,8 @@ class SingleModeSimulation(DummyEMSimulation):
             Temperature for sampling initial cavity coordinates from Maxwell-Boltzmann distribution (a.u.). If zero or negative, no sampling is done and initial coordinates are used as provided.
         langevin_tau_au : float, optional
             Damping time constant for the Langevin thermostat (a.u.). If not provided, no Langevin thermostat is applied.
+        initializer : str, optional
+            Type of initializer to use for sampling initial cavity coordinates and momenta. Can be "maxwell_boltzmann". If not provided, no special initialization is done and initial coordinates are used as provided.
         random_seed : int, optional
             Random seed for the Langevin thermostat. If not provided, a default seed is used.
         record_history : bool, default: True
@@ -340,7 +343,8 @@ class SingleModeSimulation(DummyEMSimulation):
         else:
             self.thermostat = DummyThermostat(temperature_au=temperature_au, random_seed=random_seed)
         
-        if temperature_au > 0.0:
+        self.initializer = initializer.lower() if initializer is not None else None
+        if temperature_au > 0.0 and self.initializer == "maxwell_boltzmann":
             # sample initial qc and pc from Maxwell-Boltzmann distribution at the given temperature
             qc_initial = self.thermostat.sample_position_maxwell_boltzmann(
                 omega=self.frequency, q=qc_initial, temperature_au=temperature_au
