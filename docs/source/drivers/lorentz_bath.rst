@@ -1,11 +1,11 @@
-Lorentz bath driver
+Lorentz-Bath driver
 ===================
 
 .. warning::
   
   This is a beta feature and may change in future versions. 
 
-The Lorentz bath driver implements a classical bright harmonic oscillator coupled
+The Lorentz-Bath driver implements a classical bright harmonic oscillator coupled
 to a bath of classical dark oscillators. It is provided by
 :class:`maxwelllink.mxl_drivers.python.models.LorentzBathModel` and ships with
 **MaxwellLink** for reduced polaritonic-chemistry models where a collective
@@ -13,7 +13,7 @@ molecular bright mode exchanges energy with dark molecular modes.
 
 .. note::
 
-  The Lorentz bath driver advances the bright coordinate :math:`q_B`, its
+  The Lorentz-Bath driver advances the bright coordinate :math:`q_B`, its
   conjugate momentum :math:`p_B`, and bath coordinates :math:`q_j, p_j` generated
   by the Hamiltonian
 
