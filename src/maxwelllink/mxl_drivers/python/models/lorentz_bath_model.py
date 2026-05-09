@@ -300,9 +300,11 @@ class LorentzBathModel(DummyModel):
             self.p_bath = self.thermostat.apply_kick(self.p_bath)
 
         # we expect to return dmu/dt at half a time step after the E-field time
-        self.p_half = self.p + 0.5 * self.acceleration * self.dt
+        p_lorentz_half = self.p + 0.5 * self.acceleration * self.dt
         p_bath_half = self.p_bath + 0.5 * self.acceleration_bath * self.dt
-        self.p_half -= np.dot(self.k_bath, self.q_bath + 0.5 * p_bath_half * self.dt)  # coupling to the bath at half time step
+        q_bath_half = self.q_bath + 0.5 * p_bath_half * self.dt
+        p_shifted_half = np.dot(self.k_bath, q_bath_half)
+        self.p_half = p_lorentz_half - p_shifted_half  # coupling to the bath at half time step
         # we also expect to return mu at half a time step after the E-field time
         self.q_half = self.q + 0.5 * self.p_half * self.dt
 
@@ -315,11 +317,21 @@ class LorentzBathModel(DummyModel):
         dip_vec[self.orientation_idx] = dipole
 
         self.dipole_vec = dip_vec
-        # here we simply calculate the end-point energy for the whole system for simplicity
-        p_shifted = np.dot(self.k_bath, self.q_bath)
-        self.energy = 0.5 * (self.p - p_shifted)**2 + 0.5 * self.omega**2 * self.q**2 + np.sum(0.5 * self.omega_bath**2 * self.q_bath**2 + 0.5 * self.p_bath**2)
-        self.energy_lorentz = 0.5 * self.p**2 + 0.5 * self.omega**2 * self.q**2
-        self.energy_bath = self.p * p_shifted + 0.5 * p_shifted**2 + np.sum(0.5 * self.omega_bath**2 * self.q_bath**2 + 0.5 * self.p_bath**2)
+        # Report the Hamiltonian at the same half step used for the returned dipole response.
+        self.energy = (
+            0.5 * self.p_half**2
+            + 0.5 * self.omega**2 * self.q_half**2
+            + np.sum(0.5 * self.omega_bath**2 * q_bath_half**2 + 0.5 * p_bath_half**2)
+        )
+        self.energy_lorentz = (
+            0.5 * p_lorentz_half**2
+            + 0.5 * self.omega**2 * self.q_half**2
+        )
+        self.energy_bath = (
+            p_lorentz_half * p_shifted_half
+            + 0.5 * p_shifted_half**2
+            + np.sum(0.5 * self.omega_bath**2 * q_bath_half**2 + 0.5 * p_bath_half**2)
+        )
 
     def calc_amp_vector(self):
         """
