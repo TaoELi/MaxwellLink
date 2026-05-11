@@ -128,6 +128,74 @@ sim = mxl.MultiModeSimulation(
 sim.run(steps=4000, record_history=True, record_list=["all"])
 ```
 
+## K-parallel molecule-side pulse
+```python
+from maxwelllink.tools import gaussian_pulse, k_parallel_pulse
+
+envelope = gaussian_pulse(
+    amplitude_au=1.0,
+    t0_au=0.0,
+    sigma_au=0.05 * steps * dt_au,
+)
+source = k_parallel_pulse(
+    cavity=cavity,
+    envelope=envelope,
+    omega_au=2580.0 * cm_to_au,
+    k_parallel_au=12.5 * cm_to_au,
+    target="molecule",
+    direction="y",          # "x", "y", "+x", "-x", "+y", or "-y"
+    center=(0.5, 0.10),     # fractional cavity coordinates
+    size=(0.16, 0.20),      # full source window size
+    amplitude_au=1e-2,
+)
+
+sim = mxl.MultiModeSimulation(
+    dt_au=dt_au,
+    damping_au=0.0,
+    molecules=molecules,
+    cavity_geometry=cavity,
+    include_dse=True,
+    excited_grid_list=source.excited_grid_list,
+    molecule_pulse_drive=source,
+    molecule_pulse_axis="y",
+)
+```
+- `k_parallel_au` uses the same effective in-plane frequency units as `delta_omega_x_au` / `delta_omega_y_au`.
+- `direction` controls the in-plane phase gradient; `molecule_pulse_axis` controls the field polarization seen by the molecular driver.
+- The returned `source` also exposes `spatial_window`, `spatial_phase`, `grid_xy`, and `k_order` for debugging or plotting.
+- Use `envelope=1.0` for a continuous cosine source with grid-dependent phases.
+
+## K-parallel photon-side pulse
+```python
+from maxwelllink.tools import k_parallel_pulse
+
+source = k_parallel_pulse(
+    cavity=cavity,
+    target="photon",
+    envelope=1.0,
+    omega_au=2580.0 * cm_to_au,
+    k_parallel_au=12.5 * cm_to_au,
+    direction="y",
+    projection_axis="y",
+    center=(0.5, 0.10),
+    size=(0.16, 0.20),
+    amplitude_au=1e-2,
+)
+
+sim = mxl.MultiModeSimulation(
+    dt_au=dt_au,
+    damping_au=0.0,
+    molecules=molecules,
+    cavity_geometry=cavity,
+    include_dse=True,
+    excited_mode_list=source.excited_mode_list,
+    photon_pulse_drive=source,
+    photon_pulse_axis="y",
+)
+```
+- Photon-side `target="photon"` projects the same real-space source window and phase pattern onto cavity modes.
+- `projection_axis` should usually match `photon_pulse_axis`.
+
 ## Disk-backed recording (large/long runs)
 ```python
 sim.run(

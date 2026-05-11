@@ -25,13 +25,13 @@ components can be coupled simultaneously by supplying composite axes such as
 
   with :math:`\boldsymbol{\mu}(t)` the summed molecular dipole restricted to the requested axes, :math:`\delta_{\mathrm{DSE}} = 1` only when ``include_dse=True``, and :math:`\delta_{\mathrm{exc,mol}} = 1` only when ``excite_mol=True`` (with :math:`\hat{\mathbf{e}}` the unit vector along ``coupling_axis``).
 
-  When ``temp_au > 0`` the initial cavity coordinate and momentum are resampled from a Maxwell-Boltzmann distribution at temperature :math:`T` (atomic units),
+  When ``temperature_au > 0`` and ``initializer="maxwell_boltzmann"``, the initial cavity coordinate and momentum are resampled from a Maxwell-Boltzmann distribution at temperature :math:`T` (atomic units),
 
   .. math::
 
      q_c \sim \mathcal{N}\!\left(0,\, \sqrt{T}/\omega_c\right), \qquad p_c \sim \mathcal{N}\!\left(0,\, \sqrt{T}\right),
 
-  overriding any provided ``qc_initial`` / ``pc_initial``. If ``tau_au`` is also supplied, a Langevin thermostat with damping time :math:`\tau` is applied to the cavity momentum every step,
+  overriding any provided ``qc_initial`` / ``pc_initial``. If ``langevin_tau_au`` is also supplied, a Langevin thermostat with damping time :math:`\tau` is applied to the cavity momentum every step,
 
   .. math::
 
@@ -137,12 +137,14 @@ Parameters
      - Initial total molecular dipole vector prior to axis masking (a.u.). Default: ``[0.0, 0.0, 0.0]``.
    * - ``dmudt_initial``
      - Initial time derivative of the total molecular dipole vector (a.u.). Default: ``[0.0, 0.0, 0.0]``.
-   * - ``temp_au``
-     - Cavity temperature in atomic units (Hartree). When ``> 0``, the initial cavity coordinate and momentum are resampled from a Maxwell-Boltzmann distribution at this temperature, overriding ``qc_initial`` and ``pc_initial``. Default: ``0.0``.
-   * - ``tau_au``
-     - Langevin thermostat relaxation time :math:`\tau` (a.u.). When supplied alongside ``temp_au > 0``, a Langevin thermostat is applied to the cavity momentum each step. Leave as ``None`` for an NVE-like cavity (initial-temperature sampling only). Default: ``None``.
+   * - ``temperature_au``
+     - Cavity temperature in atomic units (Hartree), used by the optional initializer and Langevin thermostat. Default: ``0.0``.
+   * - ``langevin_tau_au``
+     - Langevin thermostat relaxation time :math:`\tau` (a.u.). When supplied, a Langevin thermostat is applied to the cavity momentum each step. Leave as ``None`` for an NVE-like cavity. Default: ``None``.
+   * - ``initializer``
+     - Optional initial-condition sampler. Set to ``"maxwell_boltzmann"`` with ``temperature_au > 0`` to resample ``qc_initial`` and ``pc_initial`` from a Maxwell-Boltzmann distribution. Leave as ``None`` to use the provided initial coordinates and momenta. Default: ``None``.
    * - ``random_seed``
-     - Seed for the RNG that drives the Maxwell-Boltzmann sampling and the Langevin kicks. Use a fixed integer for reproducibility. Default: ``None``.
+     - Seed for the RNG that drives the optional Maxwell-Boltzmann sampling and Langevin kicks. Use a fixed integer for reproducibility. Default: ``None``.
    * - ``shift_dipole_baseline``
      - When ``True`` subtract the initial dipole so the simulation starts from a zero baseline (helps with large permanent dipoles). Default: ``False``.
    * - ``molecule_half_step``

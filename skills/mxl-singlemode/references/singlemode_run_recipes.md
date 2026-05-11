@@ -40,15 +40,16 @@ sim = mxl.SingleModeSimulation(
     hub=hub,
     record_history=True,
     # Thermal initial condition + Langevin thermostat on the cavity:
-    temp_au=9.5e-4,        # ~300 K (use AU_TO_K for conversions)
-    tau_au=4000.0,         # Langevin relaxation time (a.u.)
+    temperature_au=9.5e-4,        # ~300 K (use AU_TO_K for conversions)
+    initializer="maxwell_boltzmann",
+    langevin_tau_au=4000.0,         # Langevin relaxation time (a.u.)
     random_seed=2026,      # reproducible sampling/kicks
 )
 ```
-Drop `tau_au` (or set it to `None`) to keep only the Maxwell-Boltzmann initial sampling and run NVE afterwards.
+Drop `langevin_tau_au` (or set it to `None`) to keep only the Maxwell-Boltzmann initial sampling and run NVE afterwards. Drop `initializer` to keep the provided `qc_initial`/`pc_initial`.
 
 ## Notes
 - For SLURM/HPC two-step runs, write a host/port file from the main job (e.g. via `maxwelllink.sockets.get_available_host_port(localhost=False, save_to_file="tcp_host_port_info.txt")`) and have the driver job read it.
-- Thermal initialization: when `temp_au > 0`, `qc_initial`/`pc_initial` are overridden by Maxwell-Boltzmann samples at `temp_au` (Hartree). Pair with `tau_au` for a Langevin thermostat on the cavity momentum; use `random_seed` for reproducibility. Convert temperatures with `from maxwelllink.units import AU_TO_K` (e.g. `T_au = 300.0 / AU_TO_K`).
+- Thermal initialization: when `temperature_au > 0` and `initializer="maxwell_boltzmann"`, `qc_initial`/`pc_initial` are overridden by Maxwell-Boltzmann samples at `temperature_au` (Hartree). Pair with `langevin_tau_au` for a Langevin thermostat on the cavity momentum; use `random_seed` for reproducibility. Convert temperatures with `from maxwelllink.units import AU_TO_K` (e.g. `T_au = 300.0 / AU_TO_K`).
 - In `mxl.SingleModeSimulation`: `include_dse=True` must be included for simulating vibrational strong coupling with real-molecule drivers (such as LAMMPS or Psi4). This option does not need to be included for model drivers (tls or qutip).
 - Drive routing: by default `excite_ph=True` and `excite_mol=False`, so the optional `drive(t)` term acts only on the cavity. Set `excite_mol=True` (and typically `excite_ph=False`) to apply the drive directly to the molecules along `coupling_axis`, e.g. for comparing cavity-mediated vs. direct molecular excitation. Enabling both at once is supported and prints a warning.

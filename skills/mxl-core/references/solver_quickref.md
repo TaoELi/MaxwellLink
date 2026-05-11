@@ -13,10 +13,10 @@ Pick the solver that matches fidelity vs speed. All solvers share `Molecule` and
 - One damped harmonic oscillator in a.u.; fastest for prototyping or regression. No external deps.
 - Core args: `dt_au`, `frequency_au`, `damping_au`, `coupling_strength`, `coupling_axis` (e.g., `"z"` or `"xy"`), `molecules`, optional `drive`, `hub`, `record_history`.
 - Supports socket and embedded drivers simultaneously.
+- Thermal options: `temperature_au`, `initializer="maxwell_boltzmann"` for initial thermal sampling, and optional `langevin_tau_au` for a Langevin thermostat.
 - Optional dipole self-energy via `include_dse=True`.
 
 ## LaserDrivenSimulation (`maxwelllink.em_solvers.laser_driven`)
 - Applies user-supplied `drive(time_au)` directly; no EM feedback. No external deps.
 - Core args: `dt_au`, `molecules`, `drive` (float or callable), `coupling_axis` (`"x"|"y"|"z"` combos), optional `hub`, `record_history`.
 - Good for pump-probe style studies where the field is prescribed.
-

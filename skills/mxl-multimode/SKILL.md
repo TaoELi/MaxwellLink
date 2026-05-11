@@ -35,6 +35,7 @@ The thermal knobs are now **objects**, not scalar kwargs. Old-style `T_initial_a
 ## Drives
 - Photon-side pulse: pick mode indices via `excited_mode_list=[i, ...]`, give a constant or `callable(t_au)` as `photon_pulse_drive`, and choose `photon_pulse_axis` (default `"y"`).
 - Molecule-side pulse: pick grid indices via `excited_grid_list=[i, ...]`, with `molecule_pulse_drive` (constant or callable) and `molecule_pulse_axis` (default `"y"`).
+- K-parallel source: use `from maxwelllink.tools import gaussian_pulse, k_parallel_pulse`; build `source = k_parallel_pulse(cavity=cavity, target="molecule" or "photon", envelope=gaussian_pulse(...) or 1.0, omega_au=..., k_parallel_au=..., direction="x" or "y", center=(...), size=(...), amplitude_au=...)`. For `target="molecule"`, pass `excited_grid_list=source.excited_grid_list` and `molecule_pulse_drive=source`; for `target="photon"`, pass `excited_mode_list=source.excited_mode_list` and `photon_pulse_drive=source`.
 - Both are optional and additive; passing an empty list disables that channel.
 
 ## Run + recording

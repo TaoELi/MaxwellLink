@@ -194,6 +194,78 @@ NVT runs.
 Drop the ``thermostat`` argument (or keep the default ``DummyThermostat``) to
 get a thermal initial condition followed by NVE evolution.
 
+K-parallel sources
+^^^^^^^^^^^^^^^^^^
+
+For directional polariton wavepacket excitation, use
+:func:`maxwelllink.tools.k_parallel_pulse` to build either a molecule-side
+source grid list or a photon-side cavity-mode list.
+
+For molecule-side excitation:
+
+.. code-block:: python
+
+   from maxwelllink.tools import gaussian_pulse, k_parallel_pulse
+
+   envelope = gaussian_pulse(
+       amplitude_au=1.0,
+       t0_au=0.0,
+       sigma_au=0.05 * steps * dt_au,
+   )
+
+   source = k_parallel_pulse(
+       cavity=cavity,
+       envelope=envelope,
+       omega_au=2580.0 * cm_to_au,
+       k_parallel_au=12.5 * cm_to_au,
+       direction="y",
+       target="molecule",
+       center=(0.5, 0.10),
+       size=(0.16, 0.20),
+       amplitude_au=1e-2,
+   )
+
+   sim = mxl.MultiModeSimulation(
+       dt_au=dt_au,
+       molecules=molecules,
+       cavity_geometry=cavity,
+       excited_grid_list=source.excited_grid_list,
+       molecule_pulse_drive=source,
+       molecule_pulse_axis="y",
+   )
+
+For photon-side excitation, the same real-space source profile is projected
+onto cavity modes:
+
+.. code-block:: python
+
+   source = k_parallel_pulse(
+       cavity=cavity,
+       envelope=1.0,
+       omega_au=2580.0 * cm_to_au,
+       k_parallel_au=12.5 * cm_to_au,
+       direction="y",
+       target="photon",
+       projection_axis="y",
+       center=(0.5, 0.10),
+       size=(0.16, 0.20),
+       amplitude_au=1e-2,
+   )
+
+   sim = mxl.MultiModeSimulation(
+       dt_au=dt_au,
+       molecules=molecules,
+       cavity_geometry=cavity,
+       excited_mode_list=source.excited_mode_list,
+       photon_pulse_drive=source,
+       photon_pulse_axis="y",
+   )
+
+- ``direction`` controls the in-plane phase gradient;
+- ``molecule_pulse_axis`` or ``photon_pulse_axis`` controls field polarization.
+- For photon-side sources, ``projection_axis`` should normally match ``photon_pulse_axis``. 
+- ``envelope`` may also be a scalar; for example ``envelope=1.0`` gives a continuous cosine source with spatially dependent phases.
+
 Cavity geometry parameters
 --------------------------
 
@@ -323,8 +395,10 @@ These arguments are passed to
        by ``photon_pulse_drive``. Default: ``[]`` (no photon pulse applied).
    * - ``photon_pulse_drive``
      - Constant float or callable ``photon_pulse_drive(time_au)`` returning the
-       drive applied to the cavity modes listed in ``excited_mode_list``.
-       Defaults to ``0.0``.
+       drive applied to the cavity modes listed in ``excited_mode_list``. The
+       callable may return a scalar, values with shape
+       ``(len(excited_mode_list),)``, or vector-valued fields with shape
+       ``(len(excited_mode_list), 3)``. Defaults to ``0.0``.
    * - ``photon_pulse_axis``
      - One or more axes (``"x"``, ``"y"``, ``"z"``) along which the photon
        pulse acts. Default: ``"y"``.
@@ -334,8 +408,10 @@ These arguments are passed to
        pulse applied).
    * - ``molecule_pulse_drive``
      - Constant float or callable ``molecule_pulse_drive(time_au)`` returning
-       the strength of the pulse applied to ``excited_grid_list``. Defaults to
-       ``0.0``.
+       the strength of the pulse applied to ``excited_grid_list``. The callable
+       may return a scalar, values with shape ``(len(excited_grid_list),)``, or
+       vector-valued fields with shape ``(len(excited_grid_list), 3)``.
+       Defaults to ``0.0``.
    * - ``molecule_pulse_axis``
      - One or more axes (``"x"``, ``"y"``, ``"z"``) along which the molecule
        pulse acts. Default: ``"y"``.
@@ -380,4 +456,3 @@ Notes
   same ``random_seed`` to both for reproducible trajectories. Use
   ``MaxwellBoltzmannInitializer`` alone for a thermal IC followed by NVE
   dynamics.
-

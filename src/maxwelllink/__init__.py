@@ -23,6 +23,7 @@ __all__ = [
     "ASEModel",
     "TLSModel",
     "SHOModel",
+    "LorentzBathModel",
     # v2 features
     "MeepSimulation",
     "meep_units_helper",
@@ -179,4 +180,8 @@ def __getattr__(name):
         from .mxl_drivers.python.models.sho_model import SHOModel
 
         return SHOModel
+    if name == "LorentzBathModel":
+        from .mxl_drivers.python.models.lorentz_bath_model import LorentzBathModel
+
+        return LorentzBathModel
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -30,6 +30,7 @@ Python-based Drivers for Productive Runs
    rttddft
    rtehrenfest
    ase
+   lorentz_bath
 
 Socket Connection to Third-Party Drivers
 ------------------------------------------------

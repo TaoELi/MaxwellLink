@@ -230,6 +230,7 @@ class FabryPerotCavity():
         x_grid_2d = np.reshape(x_grid_2d, -1)
         y_grid_2d = np.reshape(y_grid_2d, -1)
         self.n_grid = np.size(x_grid_2d)
+        self.grid_xy = np.column_stack((x_grid_2d, y_grid_2d))
 
         # generate 2D grid points of kx, ky in units of 1/Lx, 1/Ly
         kx_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_x)])
@@ -394,7 +395,7 @@ class MultiModeSimulation(DummyEMSimulation):
         excited_grid_list : list, optional
             List of grid point indices that are excited by the molecule pulse. The excitation is applied by adding the molecule pulse drive to the effective electric field at these grid points.
         molecule_pulse_drive : float or callable, optional
-            Constant molecule pulse drive or function ``molecule_pulse_drive(t_au)`` that determines the strength of the molecule pulse applied to the excited grid points.
+            Constant molecule pulse drive or function ``molecule_pulse_drive(t_au)`` that determines the strength of the molecule pulse applied to the excited grid points. The callable may return a scalar, or vector-valued fields, or a per-grid array over ``excited_grid_list``.
         molecule_pulse_axis : str, default: "y"
             pulse axis for the molecule pulse.
         initializer : object, optional
@@ -601,7 +602,13 @@ class MultiModeSimulation(DummyEMSimulation):
             - np.einsum("i,ik->ik", self.omega_k**2, qc)
         )
         if self.excited_mode_list:
-            acceleration[self.excited_mode_list, :] += self.photon_drive(time) * self.photon_pulse_axis
+            acceleration[self.excited_mode_list, :] += self._eval_pulse_field(
+                pulse=self.photon_drive,
+                selected=self.excited_mode_list,
+                axis=self.photon_pulse_axis,
+                label="photon_pulse_drive",
+                time=time,
+            )
         # print("In Function, Cavity acceleration:", acceleration)
         acceleration = np.einsum("ik, k->ik", acceleration, self.axis)
         return acceleration
@@ -777,6 +784,42 @@ class MultiModeSimulation(DummyEMSimulation):
 
         return dipole_vec * self.axis, has_half_step_shift
 
+    def _eval_pulse_field(
+        self,
+        pulse,
+        selected: Sequence[int],
+        axis: Sequence[bool],
+        label: str,
+        time: Optional[float] = None,
+    ):
+        """
+        Evaluate a pulse field under different types.
+
+        ``pulse`` can return a scalar for the uniform pulse, or an array
+        of pulses over the selected indices.
+        """
+
+        n_selected = len(selected)
+        value = np.asarray(pulse(self.time if time is None else time), dtype=float)
+        axis = np.asarray(axis, dtype=float)
+
+        # for scalar uniform pulse, we broadcast it to all selected axes
+        if value.ndim == 0:
+            return float(value) * axis[None, :]
+
+        # for array pulse, we broadcast it to the selected axes
+        if value.shape == (n_selected,):
+            return value[:, None] * axis[None, :]
+
+        # for three-dimensional array pulse, we simply use the raw values
+        if value.shape == (n_selected, 3):
+            return value
+
+        raise ValueError(
+            f"{label}(t) must return a scalar, "
+            "(len(selected),), or (len(selected), 3)."
+        )
+
     def _step_molecules(self, efield_vec: Sequence[float]):
         """
         Propagate all molecules for one EM step and collect their dipole moments.
@@ -793,7 +836,12 @@ class MultiModeSimulation(DummyEMSimulation):
         """
         # modify local e-field for molecules under excitation
         if self.excited_grid_list:
-            efield_vec[self.excited_grid_list, :] += self.molecule_pulse(self.time) * self.molecule_pulse_axis
+            efield_vec[self.excited_grid_list, :] += self._eval_pulse_field(
+                pulse=self.molecule_pulse,
+                selected=self.excited_grid_list,
+                axis=self.molecule_pulse_axis,
+                label="molecule_pulse_drive",
+            )
 
         # Non-socket molecules
         for wrapper in self.non_socket_wrappers:
@@ -908,6 +956,12 @@ class MultiModeSimulation(DummyEMSimulation):
         Record the history of the simulation at the current time step.
         '''
 
+        def pulse_record_value(pulse):
+            value = np.asarray(pulse(self.time), dtype=float)
+            if value.ndim == 0:
+                return np.array([float(value)], dtype=float)
+            return value.copy()
+
         record_idx = step_idx // self.record_every_steps
 
         if savedata and (record_idx <= self.record_max_steps) :
@@ -923,9 +977,9 @@ class MultiModeSimulation(DummyEMSimulation):
                     if "pc" in self.record_list:
                         self.memmaps["pc"][record_idx,:,:] = self.pc.copy()
                     if "photon_drive" in self.record_list:
-                        self.memmaps["photon_drive"][record_idx, 0] = self.photon_drive(self.time)
+                        self.memmaps["photon_drive"][record_idx, ...] = pulse_record_value(self.photon_drive)
                     if "molecule_pulse" in self.record_list:
-                        self.memmaps["molecule_pulse"][record_idx, 0] = self.molecule_pulse(self.time)
+                        self.memmaps["molecule_pulse"][record_idx, ...] = pulse_record_value(self.molecule_pulse)
                     if "energy" in self.record_list:
                         self.memmaps["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
                     if "photonic_energy" in self.record_list:
@@ -951,9 +1005,9 @@ class MultiModeSimulation(DummyEMSimulation):
                     if "pc" in self.record_list:
                         self.h5_file["pc"][record_idx,:,:] = self.pc.copy()
                     if "photon_drive" in self.record_list:
-                        self.h5_file["photon_drive"][record_idx, 0] = self.photon_drive(self.time)
+                        self.h5_file["photon_drive"][record_idx, ...] = pulse_record_value(self.photon_drive)
                     if "molecule_pulse" in self.record_list:
-                        self.h5_file["molecule_pulse"][record_idx, 0] = self.molecule_pulse(self.time)
+                        self.h5_file["molecule_pulse"][record_idx, ...] = pulse_record_value(self.molecule_pulse)
                     if "energy" in self.record_list:
                         self.h5_file["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
                     if "photonic_energy" in self.record_list:
@@ -1066,12 +1120,22 @@ class MultiModeSimulation(DummyEMSimulation):
         if self.record_history:
             
             if self.record_to_disk and disk_folder_address is not None:
+                def pulse_record_dim(pulse):
+                    shape = np.asarray(pulse(self.time), dtype=float).shape
+                    return 1 if shape == () else shape
+
+                photon_drive_dim = 1
+                molecule_pulse_dim = 1
+                if "photon_drive" in self.record_list:
+                    photon_drive_dim = pulse_record_dim(self.photon_drive)
+                if "molecule_pulse" in self.record_list:
+                    molecule_pulse_dim = pulse_record_dim(self.molecule_pulse)
 
                 self.dim_dict = {"time": 1,
                     "qc": self.qc.shape, 
                     "pc": self.pc.shape, 
-                    "photon_drive": 1, 
-                    "molecule_pulse": 1, 
+                    "photon_drive": photon_drive_dim,
+                    "molecule_pulse": molecule_pulse_dim,
                     "energy": 1, 
                     "photonic_energy": self.pc.shape[0],
                     "effective_efield": self.dmudt.shape, 

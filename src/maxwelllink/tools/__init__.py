@@ -11,6 +11,7 @@ from .pulses import (
     gaussian_pulse,
     gaussian_enveloped_cosine,
     cosine_drive,
+    k_parallel_pulse,
 )
 from .transverse_components import calc_transverse_components_3d
 
@@ -21,5 +22,6 @@ __all__ = [
     "gaussian_pulse",
     "gaussian_enveloped_cosine",
     "cosine_drive",
+    "k_parallel_pulse",
     "calc_transverse_components_3d",
 ]
