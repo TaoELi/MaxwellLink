@@ -330,6 +330,12 @@ def k_parallel_pulse(
         raise ValueError(f"{delta_name} is zero, so nonzero k_parallel_au is undefined.")
 
     k_order = 0.0 if delta_omega_axis == 0.0 else k_parallel / delta_omega_axis
+    # k_order should not exceed the number of cavity modes along the axis, and we need to enforce it
+    if abs(k_order) > cavity.n_mode_x if axis == "x" else cavity.n_mode_y:
+        raise ValueError(
+            f"Absolute k_parallel_au is too large for the cavity mode spacing along {axis}. "
+            f"Maximum allowed is {delta_omega_axis * (cavity.n_mode_x if axis == 'x' else cavity.n_mode_y):.3e}."
+        )
     k_norm = math.pi * k_order
 
     half_size = np.array(size_pair, dtype=float) * 0.5
