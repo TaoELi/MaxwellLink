@@ -647,7 +647,7 @@ class MultiModeSimulation(DummyEMSimulation):
         assert efield_vec.shape == mu.shape
         return efield_vec
 
-    def _calc_photonic_energy(self, pc, qc) -> float:
+    def _calc_photonic_energy(self, pc, qc) -> np.ndarray:
         """
         Calculate the energy of the all photonic modes.
 
