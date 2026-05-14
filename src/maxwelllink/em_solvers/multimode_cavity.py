@@ -233,6 +233,8 @@ class FabryPerotCavity():
         self.grid_xy = np.column_stack((x_grid_2d, y_grid_2d))
 
         # generate 2D grid points of kx, ky in units of 1/Lx, 1/Ly
+        self.n_mode_x = n_mode_x
+        self.n_mode_y = n_mode_y
         kx_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_x)])
         ky_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_y)])
         kx_grid_2d, ky_grid_2d = np.meshgrid(kx_grid_1d, ky_grid_1d)
