@@ -256,4 +256,4 @@ tutorials/dftbplus_bomd_dipder_runs/
 tutorials/dftbplus_bomd_dipole_derivatives.ipynb
 tutorials/*cp2k*
 tutorials/12_meep_dftb.ipynb
-tutorials/12_multimode_lorentz_bath.ipynb
+tutorials/12_multimode_lorentz_bath*.ipynb
