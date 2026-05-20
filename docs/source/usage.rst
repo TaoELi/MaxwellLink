@@ -203,6 +203,19 @@ input bash script launches one main job and two driver jobs. The two driver jobs
     sbatch --dependency=after:${job_main_id} submit_driver.sh
     sbatch --dependency=after:${job_main_id} submit_driver.sh
 
+
+.. warning:: 
+
+   For simutaneously connecting more than 4096 TCP molecular drivers, in the EM script (``submit_main.sh``), please set ``ulimit -u N`` in BASH 
+   before running the EM solver, where ``N`` should be larger than the total number of drivers. Some Linux environments have a relative small default limit, 
+   which may cause issues when too many drivers try to connect to the hub.
+
+.. warning:: 
+
+   Currently, up to 16,384 TCP molecular drivers can stay in the queue for SocketHub connection. Simutaneously launching more than 16,384 TCP drivers will likely cause connection issues.
+   For simutaneously connecting a very large amount of TCP molecular drivers, it is preferrable to ``sleep 0.1s`` before launching each new molecular driver (so more than 16,384 drivers can be properly connected).
+
+
 Inspecting TLS output
 ---------------------
 
