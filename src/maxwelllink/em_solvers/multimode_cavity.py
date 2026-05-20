@@ -18,9 +18,9 @@ import numpy as np
 
 from ..molecule import Molecule
 from ..sockets import SocketHub, am_master
-from ..units import AU_TO_FS, FS_TO_AU, AU_TO_CM_INV, AU_TO_K
+from ..units import FS_TO_AU, AU_TO_CM_INV
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
-from ..tools.harmonic_oscillator_helper import *
+from ..tools.harmonic_oscillator_helper import DummyInitializer, DummyThermostat
 
 
 class MultiModeUnits(DummyEMUnits):
@@ -94,7 +94,8 @@ class MoleculeMultiModeWrapper(MoleculeDummyWrapper):
         if extra:
             self.additional_data_history.append(extra)
 
-class FabryPerotCavity():
+
+class FabryPerotCavity:
     r"""
     Damped harmonic oscillators coupled to MaxwellLink molecules.
 
@@ -123,7 +124,7 @@ class FabryPerotCavity():
 
     def __init__(
         self,
-        frequency_au: float = None,   
+        frequency_au: float = None,
         coupling_strength: float = 1.0,
         coupling_axis: str = "xy",
         x_grid_1d: Optional[list] = None,
@@ -199,30 +200,34 @@ class FabryPerotCavity():
             )
 
         # generate 1D grid points of molecular bath coords in units of Lx, Ly
-        if n_grid_x is not None: 
+        if n_grid_x is not None:
             if n_grid_x <= 0:
                 raise ValueError("n_grid_x must be positive if provided.")
             if n_repeat_x <= 0:
                 raise ValueError("n_repeat_x must be positive.")
             if x_grid_1d is not None:
                 print("Warning: n_grid_x is provided and will override x_grid_1d.")
-            x_grid_1d = np.repeat(np.arange(1, n_grid_x + 1) / (n_grid_x + 1), n_repeat_x)
-        elif x_grid_1d is not None: 
+            x_grid_1d = np.repeat(
+                np.arange(1, n_grid_x + 1) / (n_grid_x + 1), n_repeat_x
+            )
+        elif x_grid_1d is not None:
             x_grid_1d = np.array(x_grid_1d, dtype=float)
-        else: 
+        else:
             raise ValueError("Either n_grid_x or x_grid_1d must be provided.")
-        
-        if n_grid_y is not None: 
+
+        if n_grid_y is not None:
             if n_grid_y <= 0:
                 raise ValueError("n_grid_y must be positive if provided.")
             if n_repeat_y <= 0:
                 raise ValueError("n_repeat_y must be positive.")
             if y_grid_1d is not None:
                 print("Warning: n_grid_y is provided and will override y_grid_1d.")
-            y_grid_1d = np.repeat(np.arange(1, n_grid_y + 1) / (n_grid_y + 1), n_repeat_y)
-        elif y_grid_1d is not None: 
+            y_grid_1d = np.repeat(
+                np.arange(1, n_grid_y + 1) / (n_grid_y + 1), n_repeat_y
+            )
+        elif y_grid_1d is not None:
             y_grid_1d = np.array(y_grid_1d, dtype=float)
-        else: 
+        else:
             raise ValueError("Either n_grid_y or y_grid_1d must be provided.")
 
         # generate 2D grid points of molecular bath coords in units of Lx, Ly
@@ -242,11 +247,18 @@ class FabryPerotCavity():
         ky_grid_2d = np.reshape(ky_grid_2d, -1)
 
         # construct cavity mode frequency array for all photon dimensions
-        omega_parallel = np.reshape(((kx_grid_2d / np.pi * self.delta_omega_x_au) ** 2 + (ky_grid_2d / np.pi * self.delta_omega_y_au) ** 2) ** 0.5, -1)
+        omega_parallel = np.reshape(
+            (
+                (kx_grid_2d / np.pi * self.delta_omega_x_au) ** 2
+                + (ky_grid_2d / np.pi * self.delta_omega_y_au) ** 2
+            )
+            ** 0.5,
+            -1,
+        )
         print("omega_parallel in cm-1", omega_parallel * AU_TO_CM_INV)
         self.omega_k = (self.frequency_au**2 + omega_parallel**2) ** 0.5
         print("omega_k in cm-1", self.omega_k * AU_TO_CM_INV)
-        
+
         # construct renormalized cavity mode function for each molecular grid point
         self.n_mode = n_mode_x * n_mode_y
         ftilde_k = np.zeros((self.n_mode, self.n_grid, 3), dtype=float)
@@ -332,7 +344,9 @@ class FabryPerotCavity():
             self.abc_y = abc_y
 
         self.if_abc = (abc_x is not None) and (abc_y is not None)
-        print(f"Applying Absorbing Boundary Condition : {self.if_abc}, cutoff: {self.abc_cutoff}")
+        print(
+            f"Applying Absorbing Boundary Condition : {self.if_abc}, cutoff: {self.abc_cutoff}"
+        )
 
 
 class MultiModeSimulation(DummyEMSimulation):
@@ -345,7 +359,9 @@ class MultiModeSimulation(DummyEMSimulation):
     def __getattr__(self, name):
         if self.cavity_geometry is not None and hasattr(self.cavity_geometry, name):
             return getattr(self.cavity_geometry, name)
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
 
     def __init__(
         self,
@@ -464,14 +480,24 @@ class MultiModeSimulation(DummyEMSimulation):
         self.time = 0.0
         self.cavity_geometry = cavity_geometry
 
-        if mu_initial is None: mu_initial = np.zeros((self.n_grid, 3), dtype=float)
-        else : mu_initial = np.array(mu_initial, dtype=float).reshape((self.n_grid, 3))
-        if dmudt_initial is None: dmudt_initial = np.zeros((self.n_grid, 3), dtype=float)
-        else : dmudt_initial = np.array(dmudt_initial, dtype=float).reshape((self.n_grid, 3))
-        if qc_initial is None: qc_initial = np.zeros((self.n_mode, 3), dtype=float)
-        else : qc_initial = np.array(qc_initial, dtype=float).reshape((self.n_mode, 3))
-        if pc_initial is None: pc_initial = np.zeros((self.n_mode, 3), dtype=float)
-        else : pc_initial = np.array(pc_initial, dtype=float).reshape((self.n_mode, 3))
+        if mu_initial is None:
+            mu_initial = np.zeros((self.n_grid, 3), dtype=float)
+        else:
+            mu_initial = np.array(mu_initial, dtype=float).reshape((self.n_grid, 3))
+        if dmudt_initial is None:
+            dmudt_initial = np.zeros((self.n_grid, 3), dtype=float)
+        else:
+            dmudt_initial = np.array(dmudt_initial, dtype=float).reshape(
+                (self.n_grid, 3)
+            )
+        if qc_initial is None:
+            qc_initial = np.zeros((self.n_mode, 3), dtype=float)
+        else:
+            qc_initial = np.array(qc_initial, dtype=float).reshape((self.n_mode, 3))
+        if pc_initial is None:
+            pc_initial = np.zeros((self.n_mode, 3), dtype=float)
+        else:
+            pc_initial = np.array(pc_initial, dtype=float).reshape((self.n_mode, 3))
 
         self.initializer = initializer
         self.thermostat = thermostat
@@ -491,19 +517,29 @@ class MultiModeSimulation(DummyEMSimulation):
         if isinstance(excited_mode_list, list):
             self.excited_mode_list = excited_mode_list
         else:
-            raise ValueError("excited_mode_list must be a list of integers specifying the indices of the excited cavity modes.")
-        
-        self.photon_drive = photon_pulse_drive if photon_pulse_drive is not None else (lambda _: 0.0)
+            raise ValueError(
+                "excited_mode_list must be a list of integers specifying the indices of the excited cavity modes."
+            )
+
+        self.photon_drive = (
+            photon_pulse_drive if photon_pulse_drive is not None else (lambda _: 0.0)
+        )
         if isinstance(self.photon_drive, (int, float)):
             const = float(self.photon_drive)
             self.photon_drive = lambda _t, c=const: c
-            
+
         if isinstance(excited_grid_list, list):
             self.excited_grid_list = excited_grid_list
-        else:            
-            raise ValueError("excited_grid_list must be a list of integers specifying the indices of the excited grid points for molecule pulse.")
+        else:
+            raise ValueError(
+                "excited_grid_list must be a list of integers specifying the indices of the excited grid points for molecule pulse."
+            )
 
-        self.molecule_pulse = molecule_pulse_drive if molecule_pulse_drive is not None else (lambda _: 0.0)
+        self.molecule_pulse = (
+            molecule_pulse_drive
+            if molecule_pulse_drive is not None
+            else (lambda _: 0.0)
+        )
         if isinstance(self.molecule_pulse, (int, float)):
             const = float(self.molecule_pulse)
             self.molecule_pulse = lambda _t, c=const: c
@@ -518,9 +554,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
         # we need True in at least one axis
         if not np.any(self.photon_pulse_axis):
-            raise ValueError(
-                "At least one pulse axis (x, y, or z) must be specified."
-            )
+            raise ValueError("At least one pulse axis (x, y, or z) must be specified.")
 
         self.molecule_pulse_axis = np.array([False, False, False], dtype=bool)
         if "x" in molecule_pulse_axis.lower():
@@ -532,9 +566,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
         # we need True in at least one axis
         if not np.any(self.molecule_pulse_axis):
-            raise ValueError(
-                "At least one pulse axis (x, y, or z) must be specified."
-            )
+            raise ValueError("At least one pulse axis (x, y, or z) must be specified.")
 
         self.include_dse = bool(include_dse)
         self.molecule_half_step = bool(molecule_half_step)
@@ -545,9 +577,7 @@ class MultiModeSimulation(DummyEMSimulation):
             self.dipole_baseline = self.dipole.copy()
             self.dipole -= self.dipole_baseline
             self.dipole_prev = self.dipole.copy()
-            print(
-                "[MultiModeCavity] Shifted dipole baseline by:", self.dipole_baseline
-            )
+            print("[MultiModeCavity] Shifted dipole baseline by:", self.dipole_baseline)
 
     # ------------------------------------------------------------------
     # Core helpers
@@ -612,9 +642,8 @@ class MultiModeSimulation(DummyEMSimulation):
             The calculated acceleration.
         """
         mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
-        acceleration = (
-            - np.einsum("i,ik->ik", self.varepsilon_k, mu_dot_f)
-            - np.einsum("i,ik->ik", self.omega_k**2, qc)
+        acceleration = -np.einsum("i,ik->ik", self.varepsilon_k, mu_dot_f) - np.einsum(
+            "i,ik->ik", self.omega_k**2, qc
         )
         if self.excited_mode_list:
             acceleration[self.excited_mode_list, :] += self._eval_pulse_field(
@@ -860,16 +889,16 @@ class MultiModeSimulation(DummyEMSimulation):
 
         # Non-socket molecules
         for wrapper in self.non_socket_wrappers:
-            wrapper.propagate(efield_vec[wrapper.molecule_id,:])
+            wrapper.propagate(efield_vec[wrapper.molecule_id, :])
             amp = wrapper.calc_amp_vector() * wrapper.rescaling_factor
             wrapper.last_amp = amp
             wrapper.append_additional_data(time_au=self.time)
-        
+
         # Socket molecules
         if self.socket_wrappers:
             self._ensure_socket_connections()
 
-            responses = self._collect_socket_responses(efield_vec) 
+            responses = self._collect_socket_responses(efield_vec)
             for wrapper in self.socket_wrappers:
                 payload = responses.get(wrapper.molecule_id)
                 if not payload:
@@ -953,9 +982,9 @@ class MultiModeSimulation(DummyEMSimulation):
         # 3. update momentum from half step to full step
         # apply absorbing boundary condition to the cavity field if enabled
         self.pc = pc_half + 0.5 * self.dt * acceleration
-        if self.if_abc: 
-            self.pc[:,0] = self.pc[:,0] @ self.abc_x
-            self.pc[:,1] = self.pc[:,1] @ self.abc_y
+        if self.if_abc:
+            self.pc[:, 0] = self.pc[:, 0] @ self.abc_x
+            self.pc[:, 1] = self.pc[:, 1] @ self.abc_y
 
         self.pc *= np.exp(-self.damping * self.dt)
         self.pc = self.thermostat.apply_kick(self.pc)
@@ -967,9 +996,9 @@ class MultiModeSimulation(DummyEMSimulation):
         self._record_history(savedata=savedata, step_idx=step_idx)
 
     def _record_history(self, savedata: bool = True, step_idx: Optional[int] = None):
-        '''
+        """
         Record the history of the simulation at the current time step.
-        '''
+        """
 
         def pulse_record_value(pulse):
             value = np.asarray(pulse(self.time), dtype=float)
@@ -979,66 +1008,90 @@ class MultiModeSimulation(DummyEMSimulation):
 
         record_idx = step_idx // self.record_every_steps
 
-        if savedata and (record_idx <= self.record_max_steps) :
+        if savedata and (record_idx <= self.record_max_steps):
 
-            if self.record_to_disk :
-                
-                if self.file_format == "npz": 
+            if self.record_to_disk:
+
+                if self.file_format == "npz":
 
                     if "time" in self.record_list:
                         self.memmaps["time"][record_idx, 0] = self.time
                     if "qc" in self.record_list:
-                        self.memmaps["qc"][record_idx,:,:] = self.qc.copy()
+                        self.memmaps["qc"][record_idx, :, :] = self.qc.copy()
                     if "pc" in self.record_list:
-                        self.memmaps["pc"][record_idx,:,:] = self.pc.copy()
+                        self.memmaps["pc"][record_idx, :, :] = self.pc.copy()
                     if "photon_drive" in self.record_list:
-                        self.memmaps["photon_drive"][record_idx, ...] = pulse_record_value(self.photon_drive)
+                        self.memmaps["photon_drive"][record_idx, ...] = (
+                            pulse_record_value(self.photon_drive)
+                        )
                     if "molecule_pulse" in self.record_list:
-                        self.memmaps["molecule_pulse"][record_idx, ...] = pulse_record_value(self.molecule_pulse)
+                        self.memmaps["molecule_pulse"][record_idx, ...] = (
+                            pulse_record_value(self.molecule_pulse)
+                        )
                     if "energy" in self.record_list:
                         self.memmaps["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
                     if "photonic_energy" in self.record_list:
                         self.memmaps["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc)
                     if "effective_efield" in self.record_list:
-                        self.memmaps["effective_efield"][record_idx,:,:] = self._calc_effective_efield(self.qc, self.dipole)
+                        self.memmaps["effective_efield"][record_idx, :, :] = (
+                            self._calc_effective_efield(self.qc, self.dipole)
+                        )
                     if "molecule_response" in self.record_list:
-                        self.memmaps["molecule_response"][record_idx,:,:] = self.dmudt.copy()
+                        self.memmaps["molecule_response"][
+                            record_idx, :, :
+                        ] = self.dmudt.copy()
                     if "molecule_dipole" in self.record_list:
-                        self.memmaps["molecule_dipole"][record_idx,:,:] = self.dipole.copy()
+                        self.memmaps["molecule_dipole"][
+                            record_idx, :, :
+                        ] = self.dipole.copy()
 
                     if record_idx % 1000 == 0:
                         for mm in self.memmaps.values():
                             mm.flush()
-                        print(f"[MultiModeCavity] Flushed history data to {self.filename} at step {step_idx}.")
-                
-                else : # h5 format
+                        print(
+                            f"[MultiModeCavity] Flushed history data to {self.filename} at step {step_idx}."
+                        )
+
+                else:  # h5 format
 
                     if "time" in self.record_list:
                         self.h5_file["time"][record_idx, 0] = self.time
                     if "qc" in self.record_list:
-                        self.h5_file["qc"][record_idx,:,:] = self.qc.copy()
+                        self.h5_file["qc"][record_idx, :, :] = self.qc.copy()
                     if "pc" in self.record_list:
-                        self.h5_file["pc"][record_idx,:,:] = self.pc.copy()
+                        self.h5_file["pc"][record_idx, :, :] = self.pc.copy()
                     if "photon_drive" in self.record_list:
-                        self.h5_file["photon_drive"][record_idx, ...] = pulse_record_value(self.photon_drive)
+                        self.h5_file["photon_drive"][record_idx, ...] = (
+                            pulse_record_value(self.photon_drive)
+                        )
                     if "molecule_pulse" in self.record_list:
-                        self.h5_file["molecule_pulse"][record_idx, ...] = pulse_record_value(self.molecule_pulse)
+                        self.h5_file["molecule_pulse"][record_idx, ...] = (
+                            pulse_record_value(self.molecule_pulse)
+                        )
                     if "energy" in self.record_list:
                         self.h5_file["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
                     if "photonic_energy" in self.record_list:
                         self.h5_file["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc)
                     if "effective_efield" in self.record_list:
-                        self.h5_file["effective_efield"][record_idx,:,:] = self._calc_effective_efield(self.qc, self.dipole)
+                        self.h5_file["effective_efield"][record_idx, :, :] = (
+                            self._calc_effective_efield(self.qc, self.dipole)
+                        )
                     if "molecule_response" in self.record_list:
-                        self.h5_file["molecule_response"][record_idx,:,:] = self.dmudt.copy()
+                        self.h5_file["molecule_response"][
+                            record_idx, :, :
+                        ] = self.dmudt.copy()
                     if "molecule_dipole" in self.record_list:
-                        self.h5_file["molecule_dipole"][record_idx,:,:] = self.dipole.copy()
+                        self.h5_file["molecule_dipole"][
+                            record_idx, :, :
+                        ] = self.dipole.copy()
 
                     if record_idx % 1000 == 0:
                         self.h5_file.flush()
-                        print(f"[MultiModeCavity] Flushed history data to {self.filename} at step {step_idx}.")
+                        print(
+                            f"[MultiModeCavity] Flushed history data to {self.filename} at step {step_idx}."
+                        )
 
-            else :
+            else:
                 if "time" in self.record_list:
                     self.time_history.append(self.time)
                 if "qc" in self.record_list:
@@ -1056,8 +1109,10 @@ class MultiModeSimulation(DummyEMSimulation):
                 if "molecule_response" in self.record_list:
                     self.molecule_response_history.append(self.dmudt.copy())
                 if "effective_efield" in self.record_list:
-                    self.effective_efield_history.append(self._calc_effective_efield(self.qc, self.dipole))
-                if "molecule_dipole" in self.record_list:   
+                    self.effective_efield_history.append(
+                        self._calc_effective_efield(self.qc, self.dipole)
+                    )
+                if "molecule_dipole" in self.record_list:
                     self.molecule_dipole_history.append(self.dipole.copy())
 
     # ------------------------------------------------------------------
@@ -1072,28 +1127,34 @@ class MultiModeSimulation(DummyEMSimulation):
         else:
             raise ValueError("gauge must be either 'dipole' or 'velocity'.")
 
-    def storage_initialization(self,
-                               steps: Optional[int] = None,
-                               record_history: bool = True,
-                               record_to_disk: bool = False,
-                               disk_folder_address: Optional[str] = None,
-                               npz_filename: Optional[str] = None,
-                               h5_filename: Optional[str] = None,
-                               record_max_steps: Optional[int] = None,
-                               record_every_steps: int = 1,
-                               record_list: Optional[list] = None,):
-        '''
-        Initialize storage for recording simulation history.        
-        '''
+    def storage_initialization(
+        self,
+        steps: Optional[int] = None,
+        record_history: bool = True,
+        record_to_disk: bool = False,
+        disk_folder_address: Optional[str] = None,
+        npz_filename: Optional[str] = None,
+        h5_filename: Optional[str] = None,
+        record_max_steps: Optional[int] = None,
+        record_every_steps: int = 1,
+        record_list: Optional[list] = None,
+    ):
+        """
+        Initialize storage for recording simulation history.
+        """
 
         self.record_history = bool(record_history)
         self.record_to_disk = bool(record_to_disk)
         self.disk_folder_address = disk_folder_address
 
         if npz_filename is not None and h5_filename is not None:
-            raise ValueError("Only one of npz_filename and h5_filename can be provided.")
+            raise ValueError(
+                "Only one of npz_filename and h5_filename can be provided."
+            )
         elif npz_filename is None and h5_filename is None and record_to_disk:
-            raise ValueError("Either npz_filename or h5_filename must be provided when record_to_disk is True.")
+            raise ValueError(
+                "Either npz_filename or h5_filename must be provided when record_to_disk is True."
+            )
         elif npz_filename is not None:
             self.filename = npz_filename
             self.file_format = "npz"
@@ -1103,19 +1164,20 @@ class MultiModeSimulation(DummyEMSimulation):
 
         if record_every_steps < 1 or isinstance(record_every_steps, int) == False:
             raise ValueError("record_every_steps must be a positive integer.")
-        else : self.record_every_steps = int(record_every_steps)
+        else:
+            self.record_every_steps = int(record_every_steps)
 
         not_record = (record_list == []) or (record_list is None)
-        if not_record :
+        if not_record:
             self.record_history = False
             self.record_to_disk = False
 
-        if isinstance(record_list, list) == False and (not_record == False) :
+        if isinstance(record_list, list) == False and (not_record == False):
             raise ValueError("record_list must be a list or None.")
 
-        if not_record :
+        if not_record:
             self.record_list = []
-        else :
+        else:
             for item in record_list:
                 if item not in ["all", "time", "qc", "pc", "photon_drive", "molecule_pulse", "energy", "photonic_energy", "effective_efield", "molecule_response", "molecule_dipole"]:
                     raise ValueError(f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'photon_drive', 'molecule_pulse', 'energy', 'photonic_energy', 'effective_efield', 'molecule_response', 'molecule_dipole'.")
@@ -1131,10 +1193,11 @@ class MultiModeSimulation(DummyEMSimulation):
             self.record_max_steps = int(record_max_steps)
             if self.record_max_steps < 0:
                 raise ValueError("record_max_steps must be non-negative or None.")
-        
+
         if self.record_history:
-            
+
             if self.record_to_disk and disk_folder_address is not None:
+
                 def pulse_record_dim(pulse):
                     shape = np.asarray(pulse(self.time), dtype=float).shape
                     return 1 if shape == () else shape
@@ -1146,9 +1209,10 @@ class MultiModeSimulation(DummyEMSimulation):
                 if "molecule_pulse" in self.record_list:
                     molecule_pulse_dim = pulse_record_dim(self.molecule_pulse)
 
-                self.dim_dict = {"time": 1,
-                    "qc": self.qc.shape, 
-                    "pc": self.pc.shape, 
+                self.dim_dict = {
+                    "time": 1,
+                    "qc": self.qc.shape,
+                    "pc": self.pc.shape,
                     "photon_drive": photon_drive_dim,
                     "molecule_pulse": molecule_pulse_dim,
                     "energy": 1, 
@@ -1157,12 +1221,14 @@ class MultiModeSimulation(DummyEMSimulation):
                     "molecule_response": self.dmudt.shape, 
                     "molecule_dipole": self.dmudt.shape}
 
-                if self.file_format == "npz": 
+                if self.file_format == "npz":
 
                     TEMP_DIR = os.path.join(disk_folder_address, "temp_memmap")
                     self.temp_dir = TEMP_DIR
                     if os.path.exists(TEMP_DIR):
-                        print(f"[MultiModeCavity] Temporary directory {TEMP_DIR} already exists. Deleting and recreating it.")
+                        print(
+                            f"[MultiModeCavity] Temporary directory {TEMP_DIR} already exists. Deleting and recreating it."
+                        )
                         shutil.rmtree(TEMP_DIR)
                     os.makedirs(TEMP_DIR, exist_ok=True)
                     self.memmaps = {}
@@ -1172,25 +1238,38 @@ class MultiModeSimulation(DummyEMSimulation):
                         dim = self.dim_dict[name]
                         filename = os.path.join(TEMP_DIR, f"temp_{name}.bin")
                         self.temp_files[name] = filename
-                        full_shape = (self.record_max_steps,) + (dim if isinstance(dim, tuple) else (dim,))
-                        memmap_obj = np.memmap(filename, dtype=np.float64, mode='w+', shape=full_shape)
+                        full_shape = (self.record_max_steps,) + (
+                            dim if isinstance(dim, tuple) else (dim,)
+                        )
+                        memmap_obj = np.memmap(
+                            filename, dtype=np.float64, mode="w+", shape=full_shape
+                        )
                         self.memmaps[name] = memmap_obj
-                
-                else : # h5 format
+
+                else:  # h5 format
                     assert self.file_format == "h5"
                     import h5py
-                    self.h5_file = h5py.File(os.path.join(disk_folder_address, self.filename), 'w')
+
+                    self.h5_file = h5py.File(
+                        os.path.join(disk_folder_address, self.filename), "w"
+                    )
                     self.datasets = {}
                     for name in self.record_list:
                         dim = self.dim_dict[name]
-                        shape = (self.record_max_steps,) + (dim if isinstance(dim, tuple) else (dim,))
-                        self.datasets[name] = self.h5_file.create_dataset(name, shape=shape, dtype=np.float64, maxshape=shape)
+                        shape = (self.record_max_steps,) + (
+                            dim if isinstance(dim, tuple) else (dim,)
+                        )
+                        self.datasets[name] = self.h5_file.create_dataset(
+                            name, shape=shape, dtype=np.float64, maxshape=shape
+                        )
 
             elif self.record_to_disk and self.disk_folder_address is None:
-                raise ValueError("disk_folder_address must be provided when record_to_disk is True.")
-            
+                raise ValueError(
+                    "disk_folder_address must be provided when record_to_disk is True."
+                )
+
             else:
-                
+
                 if "time" in self.record_list:
                     self.time_history = []
                 if "qc" in self.record_list:
@@ -1211,21 +1290,29 @@ class MultiModeSimulation(DummyEMSimulation):
                     self.molecule_response_history = []
                 if "molecule_dipole" in self.record_list:
                     self.molecule_dipole_history = []
-        
-        print(f"[MultiModeCavity] Recording history: {self.record_history}, to disk: {self.record_to_disk}, record_every_steps: {self.record_every_steps}, record_max_steps: {self.record_max_steps}")
-        print(f"[MultiModeCavity] Recording fields : {self.record_list if self.record_to_disk else 'none'}")
-        print(f"[MultiModeCavity] Recording address: {self.disk_folder_address if self.record_to_disk else 'N/A'}, filename: {self.filename if self.record_to_disk else 'N/A'}")
-        print(f"[MultiModeCavity] Temporary folder : {self.temp_dir if self.record_to_disk and self.file_format == 'npz' else 'N/A'}")
+
+        print(
+            f"[MultiModeCavity] Recording history: {self.record_history}, to disk: {self.record_to_disk}, record_every_steps: {self.record_every_steps}, record_max_steps: {self.record_max_steps}"
+        )
+        print(
+            f"[MultiModeCavity] Recording fields : {self.record_list if self.record_to_disk else 'none'}"
+        )
+        print(
+            f"[MultiModeCavity] Recording address: {self.disk_folder_address if self.record_to_disk else 'N/A'}, filename: {self.filename if self.record_to_disk else 'N/A'}"
+        )
+        print(
+            f"[MultiModeCavity] Temporary folder : {self.temp_dir if self.record_to_disk and self.file_format == 'npz' else 'N/A'}"
+        )
 
     def storage_finalization(self):
-        '''
-        Finalize storage for recording simulation history.        
-        '''
+        """
+        Finalize storage for recording simulation history.
+        """
 
         if self.record_history:
 
-            if self.record_to_disk and self.disk_folder_address is not None :
-                
+            if self.record_to_disk and self.disk_folder_address is not None:
+
                 if self.file_format == "npz":
 
                     for mm in self.memmaps.values():
@@ -1234,9 +1321,13 @@ class MultiModeSimulation(DummyEMSimulation):
                     data_for_npz = {}
                     for name in self.record_list:
                         dim = self.dim_dict[name]
-                        full_shape = (self.record_max_steps,) + (dim if isinstance(dim, tuple) else (dim,))
+                        full_shape = (self.record_max_steps,) + (
+                            dim if isinstance(dim, tuple) else (dim,)
+                        )
                         filename = self.temp_files[name]
-                        mmap_ro = np.memmap(filename, dtype=np.float64, mode='r', shape=full_shape)
+                        mmap_ro = np.memmap(
+                            filename, dtype=np.float64, mode="r", shape=full_shape
+                        )
                         data_for_npz[name] = mmap_ro
 
                     npz_path = os.path.join(self.disk_folder_address, self.filename)
@@ -1244,25 +1335,30 @@ class MultiModeSimulation(DummyEMSimulation):
                     print(f"[MultiModeCavity] Results saved to {npz_path}")
                     data_for_npz.clear()
                     shutil.rmtree(self.temp_dir)
-                    print(f"[MultiModeCavity] Temporary files at {self.temp_dir} deleted.")
+                    print(
+                        f"[MultiModeCavity] Temporary files at {self.temp_dir} deleted."
+                    )
 
-                else : # h5 format
-                    
+                else:  # h5 format
+
                     self.h5_file.close()
-                    print(f"[MultiModeCavity] Results saved to {os.path.join(self.disk_folder_address, self.filename)}")
+                    print(
+                        f"[MultiModeCavity] Results saved to {os.path.join(self.disk_folder_address, self.filename)}"
+                    )
 
-    def run(self, 
-            until: Optional[float] = None, 
-            steps: Optional[int] = None,
-            record_history: bool = True,
-            record_to_disk: bool = False,
-            disk_folder_address: Optional[str] = None,
-            npz_filename: Optional[str] = None,
-            h5_filename: Optional[str] = None,
-            record_max_steps: Optional[int] = None,
-            record_every_steps: int = 1,
-            record_list: Optional[list] = None,
-            ):
+    def run(
+        self,
+        until: Optional[float] = None,
+        steps: Optional[int] = None,
+        record_history: bool = True,
+        record_to_disk: bool = False,
+        disk_folder_address: Optional[str] = None,
+        npz_filename: Optional[str] = None,
+        h5_filename: Optional[str] = None,
+        record_max_steps: Optional[int] = None,
+        record_every_steps: int = 1,
+        record_list: Optional[list] = None,
+    ):
         """
         Run the simulation for a specified duration or number of steps.
 
@@ -1299,26 +1395,32 @@ class MultiModeSimulation(DummyEMSimulation):
                 return
             steps = int(np.ceil((until - self.time) / self.dt))
 
-        self.storage_initialization(steps=steps,
-                                    record_history=record_history,
-                                    record_to_disk=record_to_disk,
-                                    disk_folder_address=disk_folder_address,
-                                    npz_filename=npz_filename,
-                                    h5_filename=h5_filename,
-                                    record_max_steps=record_max_steps,
-                                    record_every_steps=record_every_steps,
-                                    record_list=record_list)
+        self.storage_initialization(
+            steps=steps,
+            record_history=record_history,
+            record_to_disk=record_to_disk,
+            disk_folder_address=disk_folder_address,
+            npz_filename=npz_filename,
+            h5_filename=h5_filename,
+            record_max_steps=record_max_steps,
+            record_every_steps=record_every_steps,
+            record_list=record_list,
+        )
 
         start_time = time.perf_counter()
         previous_time = start_time
         for idx in range(int(steps)):
-            
-            if self.record_history :
+
+            if self.record_history:
                 if self.record_every_steps >= 2:
-                    if idx % self.record_every_steps == 0 : self.step(savedata=True, step_idx=idx)
-                    else : self.step(savedata=False, step_idx=idx)
-                else : self.step(savedata=True, step_idx=idx)
-            else : self.step(savedata=False, step_idx=idx)
+                    if idx % self.record_every_steps == 0:
+                        self.step(savedata=True, step_idx=idx)
+                    else:
+                        self.step(savedata=False, step_idx=idx)
+                else:
+                    self.step(savedata=True, step_idx=idx)
+            else:
+                self.step(savedata=False, step_idx=idx)
 
             if (idx + 1) % 1000 == 0:
 
@@ -1333,7 +1435,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 )
 
         self.storage_finalization()
-        
+
         # close the hub
         if self.hub is not None:
             if am_master():

@@ -917,7 +917,8 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                         component=comp,
                         center=center,
                         size=size,
-                        amplitude=self.rescaling_factor / (self.size.x * self.size.y * self.size.z),
+                        amplitude=self.rescaling_factor
+                        / (self.size.x * self.size.y * self.size.z),
                     )
                 srcs.append(_fingerprint_source[key])
 
@@ -1244,8 +1245,6 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
             Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
         """
 
-        dx = 1.0 / self.m.resolution
-
         vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
         x = y = z = 0.0
         if self.dimensions == 1:
@@ -1253,15 +1252,16 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
             z = self.rescaling_factor * ez
         elif self.dimensions == 2:
             ez = sim.get_array(mp.Ez, vol).mean()
-            z = self.rescaling_factor * ez 
+            z = self.rescaling_factor * ez
         else:  # 3D
             ex = sim.get_array(mp.Ex, vol).mean()
             ey = sim.get_array(mp.Ey, vol).mean()
             ez = sim.get_array(mp.Ez, vol).mean()
-            x = self.rescaling_factor * ex 
-            y = self.rescaling_factor * ey 
+            x = self.rescaling_factor * ex
+            y = self.rescaling_factor * ey
             z = self.rescaling_factor * ez
         return [np.real(x), np.real(y), np.real(z)]
+
 
 # ---------- NON-SOCKET Step Function for MEEP ----------
 def update_molecules_no_socket(

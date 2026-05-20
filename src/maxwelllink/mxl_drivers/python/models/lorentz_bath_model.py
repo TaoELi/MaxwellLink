@@ -5,11 +5,7 @@
 # See AGENTS.md and README.md for details.                                             #
 # --------------------------------------------------------------------------------------#
 
-from typing import Optional
-
 import numpy as np
-from pyparsing import Optional
-from scipy.linalg import expm
 import os
 from ....tools.harmonic_oscillator_helper import LangevinThermostat
 
@@ -24,13 +20,13 @@ class LorentzBathModel(DummyModel):
     A Lorentzian harmonic oscillator coupled to a bath of classical oscillators.
 
     This class implements a Lorentz-Bath model for classical molecular dynamics,
-    which can be integrated with the MaxwellLink framework. The Lorentz-Bath model 
+    which can be integrated with the MaxwellLink framework. The Lorentz-Bath model
     represents the overall response of a molecular ensemble as a collective bright
     mode (represented by a single harmonic oscillator, or the Lorentzian oscillator)
-    coupled to a set of independent dark modes (represented by a bath of classical oscillators). 
+    coupled to a set of independent dark modes (represented by a bath of classical oscillators).
 
-    By tuning the bath density distribution and couplings, this model can be used to 
-    simulate the interplay between polaritons and molecular dark modes, which is a key aspect of 
+    By tuning the bath density distribution and couplings, this model can be used to
+    simulate the interplay between polaritons and molecular dark modes, which is a key aspect of
     polaritonic chemistry.
 
     The Hamiltonian for this Lorentz-Bath model is given by:
@@ -57,12 +53,12 @@ class LorentzBathModel(DummyModel):
         orientation: int = 2,
         relaxation: float = 0.0,
         # convenient way to define bath
-        num_bath: int=None, 
-        bath_width: float=None, 
-        bath_form: str=None, 
-        bath_dephasing: float=0.0,
-        bath_relaxation: float=0.0,
-        bath_anharmonicity: float=0.0,
+        num_bath: int = None,
+        bath_width: float = None,
+        bath_form: str = None,
+        bath_dephasing: float = 0.0,
+        bath_relaxation: float = 0.0,
+        bath_anharmonicity: float = 0.0,
         # direct way to define bath
         omega_bath: list = None,
         k_bath: list = None,
@@ -71,11 +67,11 @@ class LorentzBathModel(DummyModel):
         q_initial: float = 0.0,
         p_bath_initial: list = None,
         q_bath_initial: list = None,
-        # optional thermostats 
-        langevin_tau_au: float=None, 
-        initializer: str=None,
-        temperature_au: float=0.0,
-        random_seed: int=114514,
+        # optional thermostats
+        langevin_tau_au: float = None,
+        initializer: str = None,
+        temperature_au: float = 0.0,
+        random_seed: int = 114514,
         # checkpoint and restart settings
         checkpoint: bool = False,
         restart: bool = False,
@@ -104,7 +100,7 @@ class LorentzBathModel(DummyModel):
         bath_form : str, optional
             Form of the bath distribution, which can be "uniform", "gaussian", or "lorentzian". If not provided, the bath will not be defined via this convenient way.
         bath_dephasing : float, optional
-            Dephasing rate from the bright state to the dark modes (bath oscillators) in atomic units (a.u.), which can be used to determine the coupling coefficients 
+            Dephasing rate from the bright state to the dark modes (bath oscillators) in atomic units (a.u.), which can be used to determine the coupling coefficients
             between the Lorentzian oscillator and the bath oscillators. If not provided, the bath will not be defined via this convenient way.
         bath_relaxation : float, optional
             The direct relaxation rate of the bath oscillators in atomic units (a.u.). If not provided, the bath oscillators will not have relaxation.
@@ -148,11 +144,11 @@ class LorentzBathModel(DummyModel):
         self.orientation_idx = int(orientation)
         if self.orientation_idx < 0 or self.orientation_idx > 2:
             raise ValueError("Orientation must be 0 (x), 1 (y), or 2 (z).")
-        self.relaxation = np.abs(relaxation)    
+        self.relaxation = np.abs(relaxation)
 
         self.p = p_initial  # initial momentum of the oscillator
         self.q = q_initial  # initial position of the oscillator
-        self.acceleration = 0.0 # acceleration of the oscillator
+        self.acceleration = 0.0  # acceleration of the oscillator
         self.p_half = 0.0  # half time step momentum of the oscillator
 
         self.bath_relaxation = float(bath_relaxation)
@@ -160,9 +156,15 @@ class LorentzBathModel(DummyModel):
         # Direct way to define the bath, which has higher priority than the convenient way
         if omega_bath is not None and k_bath is not None:
             if len(omega_bath) != len(k_bath):
-                raise ValueError("The length of omega_bath and k_bath must be the same.")
-            self.omega_bath = np.array(omega_bath)  # transition frequencies of the bath oscillators
-            self.k_bath = np.array(k_bath)  # coupling coefficients between the Lorentzian oscillator and the bath oscillators
+                raise ValueError(
+                    "The length of omega_bath and k_bath must be the same."
+                )
+            self.omega_bath = np.array(
+                omega_bath
+            )  # transition frequencies of the bath oscillators
+            self.k_bath = np.array(
+                k_bath
+            )  # coupling coefficients between the Lorentzian oscillator and the bath oscillators
         # Convenient way to define the bath, which has lower priority than the direct way
         elif num_bath is not None and bath_width is not None and bath_form is not None:
             self.num_bath = int(num_bath)
@@ -172,25 +174,37 @@ class LorentzBathModel(DummyModel):
             self.bath_form = bath_form.lower()
             self.bath_dephasing = float(bath_dephasing)
             # consider implementing different bath forms
-            self.omega_bath = np.linspace(self.omega - self.bath_width*0.5, self.omega + self.bath_width*0.5, self.num_bath)
+            self.omega_bath = np.linspace(
+                self.omega - self.bath_width * 0.5,
+                self.omega + self.bath_width * 0.5,
+                self.num_bath,
+            )
             omega_bath_relative = self.omega_bath - self.omega
             domega = self.omega_bath[1] - self.omega_bath[0]
-            k = np.sqrt(2.0 * domega / np.pi * self.bath_dephasing) 
+            k = np.sqrt(2.0 * domega / np.pi * self.bath_dephasing)
             if self.bath_form == "uniform":
                 self.k_bath = np.ones(self.num_bath) * k
             elif self.bath_form == "lorentzian":
-                gamma = self.bath_dephasing 
-                self.k_bath = k * ( gamma**2 / (gamma**2 + (omega_bath_relative)**2) )**0.5
+                gamma = self.bath_dephasing
+                self.k_bath = (
+                    k * (gamma**2 / (gamma**2 + (omega_bath_relative) ** 2)) ** 0.5
+                )
             elif self.bath_form == "gaussian":
-                gamma = self.bath_dephasing 
-                self.k_bath = k * np.exp(-0.25 * (omega_bath_relative / gamma)**2)
+                gamma = self.bath_dephasing
+                self.k_bath = k * np.exp(-0.25 * (omega_bath_relative / gamma) ** 2)
             else:
-                raise ValueError("Unsupported bath form. Supported forms are: uniform, gaussian, lorentzian.")
-        
+                raise ValueError(
+                    "Unsupported bath form. Supported forms are: uniform, gaussian, lorentzian."
+                )
+
         # useful parameters for updating equations of motion
         self.omega_bath_squared = self.omega_bath**2
-        self.omega_anharm_coeff1 = -3.0 * self.omega_bath_squared * np.sqrt(self.bath_anharmonicity / 2.0)
-        self.omega_anharm_coeff2 = 7.0/3.0 * self.omega_bath_squared * self.bath_anharmonicity
+        self.omega_anharm_coeff1 = (
+            -3.0 * self.omega_bath_squared * np.sqrt(self.bath_anharmonicity / 2.0)
+        )
+        self.omega_anharm_coeff2 = (
+            7.0 / 3.0 * self.omega_bath_squared * self.bath_anharmonicity
+        )
 
         if p_bath_initial is None:
             self.p_bath = np.zeros_like(self.omega_bath)
@@ -200,28 +214,45 @@ class LorentzBathModel(DummyModel):
             self.q_bath = np.zeros_like(self.omega_bath)
         else:
             self.q_bath = np.array(q_bath_initial)
-        self.acceleration_bath = np.zeros_like(self.omega_bath)  # accelerations of the bath oscillators
+        self.acceleration_bath = np.zeros_like(
+            self.omega_bath
+        )  # accelerations of the bath oscillators
 
-        # now let's provide initializer 
+        # now let's provide initializer
         self.random_seed = random_seed
         self.temperature_au = temperature_au
         if initializer is not None:
             initializer = initializer.lower()
-            if initializer == "maxwell_boltzmann": 
-                self.rng = np.random.default_rng(self.random_seed)  
-                self.p = float(self.rng.normal(scale=np.sqrt(self.temperature_au), size=1)[0])   
-                self.q = float(self.rng.normal(scale=np.sqrt(self.temperature_au) / self.omega, size=1)[0])
-                self.p_bath = self.rng.normal(scale=np.sqrt(self.temperature_au), size=self.omega_bath.shape)
-                self.q_bath = self.rng.normal(scale=np.sqrt(self.temperature_au) / self.omega_bath, size=self.omega_bath.shape)          
+            if initializer == "maxwell_boltzmann":
+                self.rng = np.random.default_rng(self.random_seed)
+                self.p = float(
+                    self.rng.normal(scale=np.sqrt(self.temperature_au), size=1)[0]
+                )
+                self.q = float(
+                    self.rng.normal(
+                        scale=np.sqrt(self.temperature_au) / self.omega, size=1
+                    )[0]
+                )
+                self.p_bath = self.rng.normal(
+                    scale=np.sqrt(self.temperature_au), size=self.omega_bath.shape
+                )
+                self.q_bath = self.rng.normal(
+                    scale=np.sqrt(self.temperature_au) / self.omega_bath,
+                    size=self.omega_bath.shape,
+                )
             else:
-                raise ValueError("Unsupported initializer. Supported initializers are: maxwell_boltzmann.")
+                raise ValueError(
+                    "Unsupported initializer. Supported initializers are: maxwell_boltzmann."
+                )
 
         self.thermostat = None
-        self.langevin_tau_au = langevin_tau_au 
+        self.langevin_tau_au = langevin_tau_au
         self.thermostat = None
-            
+
         if self.verbose:
-            print(f"[molecule ID {self.molecule_id}] Initialized Lorentzian-bath model with bath oscillators.")
+            print(
+                f"[molecule ID {self.molecule_id}] Initialized Lorentzian-bath model with bath oscillators."
+            )
 
         # optional, checking whether the driver can be paused and resumed properly
         self.restarted = False
@@ -251,10 +282,17 @@ class LorentzBathModel(DummyModel):
         self.molecule_id = int(molecule_id)
 
         if self.langevin_tau_au is not None and self.temperature_au > 0.0:
-            self.thermostat = LangevinThermostat(temperature_au=self.temperature_au, dt_au=self.dt, tau_au=self.langevin_tau_au, random_seed=self.random_seed)
+            self.thermostat = LangevinThermostat(
+                temperature_au=self.temperature_au,
+                dt_au=self.dt,
+                tau_au=self.langevin_tau_au,
+                random_seed=self.random_seed,
+            )
 
         # Prepare checkpoint filename
-        self.checkpoint_filename = "lorentz_bath_checkpoint_id_%d.npz" % self.molecule_id
+        self.checkpoint_filename = (
+            "lorentz_bath_checkpoint_id_%d.npz" % self.molecule_id
+        )
 
         # Consider whether to restart from a checkpoint. We do this here because this function
         # is called in the driver during the INIT stage of the socket communication.
@@ -281,7 +319,7 @@ class LorentzBathModel(DummyModel):
             )
         int_ep = effective_efield_vec[self.orientation_idx] * self.dipole_moment
 
-        # update the position and momentum for one time step using velocity verlet 
+        # update the position and momentum for one time step using velocity verlet
         # p updated to half time step
         self.p += 0.5 * self.acceleration * self.dt
         self.p_bath += 0.5 * self.acceleration_bath * self.dt
@@ -303,7 +341,10 @@ class LorentzBathModel(DummyModel):
         self.acceleration = -self.omega**2 * self.q + int_ep
         self.acceleration_bath = -self.omega_bath_squared * self.q_bath
         if self.bath_anharmonicity != 0.0:
-            self.acceleration_bath += -self.omega_anharm_coeff1 * self.q_bath**2 - self.omega_anharm_coeff2 * self.q_bath**3
+            self.acceleration_bath += (
+                -self.omega_anharm_coeff1 * self.q_bath**2
+                - self.omega_anharm_coeff2 * self.q_bath**3
+            )
 
         # p also updated to the full time step, the same as the E-field time
         self.p += 0.5 * self.acceleration * self.dt
@@ -325,7 +366,9 @@ class LorentzBathModel(DummyModel):
         p_bath_half = self.p_bath + 0.5 * self.acceleration_bath * self.dt
         q_bath_half = self.q_bath + 0.5 * p_bath_half * self.dt
         p_shifted_half = np.dot(self.k_bath, q_bath_half)
-        self.p_half = p_lorentz_half - p_shifted_half  # coupling to the bath at half time step
+        self.p_half = (
+            p_lorentz_half - p_shifted_half
+        )  # coupling to the bath at half time step
         # we also expect to return mu at half a time step after the E-field time
         self.q_half = self.q + 0.5 * self.p_half * self.dt
 
@@ -350,7 +393,9 @@ class LorentzBathModel(DummyModel):
             + p_lorentz_half * p_shifted_half
             + 0.5 * p_shifted_half**2
         )
-        self.energy_bath = np.sum(0.5 * self.omega_bath**2 * q_bath_half**2 + 0.5 * p_bath_half**2)
+        self.energy_bath = np.sum(
+            0.5 * self.omega_bath**2 * q_bath_half**2 + 0.5 * p_bath_half**2
+        )
 
     def calc_amp_vector(self):
         """
@@ -393,8 +438,12 @@ class LorentzBathModel(DummyModel):
         data = {}
         data["time_au"] = self.t
         data["energy_au"] = self.energy if self.energy is not None else 0.0
-        data["energy_lorentz_au"] = self.energy_lorentz if self.energy_lorentz is not None else 0.0
-        data["energy_bath_au"] = self.energy_bath if self.energy_bath is not None else 0.0
+        data["energy_lorentz_au"] = (
+            self.energy_lorentz if self.energy_lorentz is not None else 0.0
+        )
+        data["energy_bath_au"] = (
+            self.energy_bath if self.energy_bath is not None else 0.0
+        )
         data["mux_au"] = self.dipole_vec[0] if self.dipole_vec is not None else 0.0
         data["muy_au"] = self.dipole_vec[1] if self.dipole_vec is not None else 0.0
         data["muz_au"] = self.dipole_vec[2] if self.dipole_vec is not None else 0.0
@@ -417,9 +466,16 @@ class LorentzBathModel(DummyModel):
         ``self.checkpoint_filename`` includes ``molid`` at ``self.initialize()``.
         """
 
-        np.savez(self.checkpoint_filename, time=self.t, p=self.p, q=self.q, 
-                 acceleration=self.acceleration, p_bath=self.p_bath, q_bath=self.q_bath,
-                 acceleration_bath=self.acceleration_bath)
+        np.savez(
+            self.checkpoint_filename,
+            time=self.t,
+            p=self.p,
+            q=self.q,
+            acceleration=self.acceleration,
+            p_bath=self.p_bath,
+            q_bath=self.q_bath,
+            acceleration_bath=self.acceleration_bath,
+        )
 
     def _reset_from_checkpoint(self):
         """

@@ -327,7 +327,9 @@ def k_parallel_pulse(
     if not math.isfinite(k_parallel):
         raise ValueError("k_parallel_au must be finite.")
     if delta_omega_axis == 0.0 and k_parallel != 0.0:
-        raise ValueError(f"{delta_name} is zero, so nonzero k_parallel_au is undefined.")
+        raise ValueError(
+            f"{delta_name} is zero, so nonzero k_parallel_au is undefined."
+        )
 
     k_order = 0.0 if delta_omega_axis == 0.0 else k_parallel / delta_omega_axis
     # k_order should not exceed the number of cavity modes along the axis, and we need to enforce it
@@ -381,7 +383,9 @@ def k_parallel_pulse(
         projection_axis_index = 0 if projection_axis_clean == "x" else 1
         ftilde_k = np.asarray(getattr(cavity, "ftilde_k", None), dtype=float)
         if ftilde_k.ndim != 3 or ftilde_k.shape[2] != 3:
-            raise ValueError("cavity must expose ftilde_k with shape (n_mode, n_grid, 3).")
+            raise ValueError(
+                "cavity must expose ftilde_k with shape (n_mode, n_grid, 3)."
+            )
         source_complex = spatial_window * np.exp(-1j * spatial_phase)
         raw_projection = ftilde_k[:, selected, projection_axis_index] @ source_complex
         projection_norm = float(np.max(np.abs(raw_projection)))
@@ -412,9 +416,7 @@ def k_parallel_pulse(
             t = float(t_au)
             temporal = float(envelope(t))
             phase_factor = np.exp(1j * (omega * t + phase))
-            return amplitude * temporal * np.real(
-                phase_factor * mode_complex_amplitude
-            )
+            return amplitude * temporal * np.real(phase_factor * mode_complex_amplitude)
 
     _drive.target = target_clean
     _drive.excited_grid_list = excited_grid_list

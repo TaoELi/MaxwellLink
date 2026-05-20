@@ -24,7 +24,7 @@ import numpy as np
 
 from ..molecule import Molecule
 from ..sockets import SocketHub, am_master
-from ..units import AU_TO_FS, FS_TO_AU, AU_TO_K
+from ..units import FS_TO_AU, AU_TO_K
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
 
 
@@ -32,6 +32,7 @@ class DummyThermostat:
     """
     Placeholder for a general thermostat implementation.
     """
+
     def __init__(self, temperature_au: float, random_seed: Optional[int] = 2026):
         self.temperature_au = temperature_au
         self.random_seed = random_seed
@@ -41,12 +42,12 @@ class DummyThermostat:
         size = p.shape if isinstance(p, np.ndarray) else (len(p),)
         p_new = self.rng.normal(scale=np.sqrt(temperature_au), size=size)
         return p_new
-    
+
     def sample_position_maxwell_boltzmann(self, omega, q, temperature_au=0.0):
         size = q.shape if isinstance(q, np.ndarray) else (len(q),)
         q_new = self.rng.normal(scale=np.sqrt(temperature_au) / omega, size=size)
         return q_new
-    
+
     def apply_kick(self, momentum: np.ndarray, dt_au: float):
         return momentum
 
@@ -55,11 +56,14 @@ class LangevinThermostat(DummyThermostat):
     """
     Langevin thermostat implementation for the cavity mode.
     """
-    def __init__(self, temperature_au: float, tau_au: float, random_seed: Optional[int] = 2026):
+
+    def __init__(
+        self, temperature_au: float, tau_au: float, random_seed: Optional[int] = 2026
+    ):
         super().__init__(temperature_au, random_seed)
         self.tau_au = tau_au
         self.T_l, self.S_l = None, None
-        
+
     def apply_kick(self, momentum: np.ndarray, dt_au: float):
         if self.T_l is None:
             self.T_l = np.exp(-dt_au / self.tau_au)
@@ -202,8 +206,8 @@ class SingleModeSimulation(DummyEMSimulation):
         dmudt_initial: Optional[list] = None,
         temperature_au: float = 0.0,
         langevin_tau_au: Optional[float] = None,
-        initializer: str=None,
-        random_seed: Optional[int] = None, 
+        initializer: str = None,
+        random_seed: Optional[int] = None,
         record_history: bool = True,
         include_dse: bool = False,
         molecule_half_step: bool = False,
@@ -239,7 +243,7 @@ class SingleModeSimulation(DummyEMSimulation):
             Initial total molecular dipole vector (a.u.).
         dmudt_initial : list, default: [0.0, 0.0, 0.0]
             Initial time derivative of the total molecular dipole vector (a.u.).
-        temperature_au : float, default: 0.0  
+        temperature_au : float, default: 0.0
             Temperature for sampling initial cavity coordinates from Maxwell-Boltzmann distribution (a.u.). If zero or negative, no sampling is done and initial coordinates are used as provided.
         langevin_tau_au : float, optional
             Damping time constant for the Langevin thermostat (a.u.). If not provided, no Langevin thermostat is applied.
@@ -262,7 +266,7 @@ class SingleModeSimulation(DummyEMSimulation):
         excite_ph : bool, default: True
             Whether to excite the cavity mode with the drive term. If False, the drive term will be ignored in the cavity equation of motion.
         excite_mol : bool, default: False
-            Whether to excite the molecules with the drive term. If False, the drive term will not be included in the effective electric field that drives the molecules. 
+            Whether to excite the molecules with the drive term. If False, the drive term will not be included in the effective electric field that drives the molecules.
         """
 
         super().__init__(hub=hub, molecules=molecules)
@@ -339,10 +343,16 @@ class SingleModeSimulation(DummyEMSimulation):
 
         self.temperature_au = temperature_au
         if langevin_tau_au is not None and temperature_au is not None:
-            self.thermostat = LangevinThermostat(temperature_au=temperature_au, tau_au=langevin_tau_au, random_seed=random_seed)
+            self.thermostat = LangevinThermostat(
+                temperature_au=temperature_au,
+                tau_au=langevin_tau_au,
+                random_seed=random_seed,
+            )
         else:
-            self.thermostat = DummyThermostat(temperature_au=temperature_au, random_seed=random_seed)
-        
+            self.thermostat = DummyThermostat(
+                temperature_au=temperature_au, random_seed=random_seed
+            )
+
         self.initializer = initializer.lower() if initializer is not None else None
         if temperature_au > 0.0 and self.initializer == "maxwell_boltzmann":
             # sample initial qc and pc from Maxwell-Boltzmann distribution at the given temperature
@@ -352,9 +362,13 @@ class SingleModeSimulation(DummyEMSimulation):
             pc_initial = self.thermostat.sample_momentum_maxwell_boltzmann(
                 p=pc_initial, temperature_au=temperature_au
             )
-            print(f"[SingleModeCavity] Sampled initial cavity coordinates from Maxwell-Boltzmann distribution at T = {temperature_au*AU_TO_K} K = {temperature_au} a.u.")
+            print(
+                f"[SingleModeCavity] Sampled initial cavity coordinates from Maxwell-Boltzmann distribution at T = {temperature_au*AU_TO_K} K = {temperature_au} a.u."
+            )
             print(f"[SingleModeCavity] Initial qc: {qc_initial}, pc: {pc_initial}")
-            print(f"[SingleModeCavity] THIS OVERRIDES PROVIDED INITIAL CONDITIONS OF CAVITY POSITIONS AND MOMENTA!")
+            print(
+                "[SingleModeCavity] THIS OVERRIDES PROVIDED INITIAL CONDITIONS OF CAVITY POSITIONS AND MOMENTA!"
+            )
 
         self.qc = np.array(qc_initial, dtype=float) * self.axis
         self.pc = np.array(pc_initial, dtype=float) * self.axis
@@ -387,12 +401,14 @@ class SingleModeSimulation(DummyEMSimulation):
             self.drive_history = []
             self.molecule_response_history = []
             self.energy_history = []
-        
+
         self.excite_ph = excite_ph
         self.excite_mol = excite_mol
         # add a warning if both of them are True
         if self.excite_ph and self.excite_mol:
-            print("[SingleModeCavity] WARNING: YOU NOW EXCITE BOTH THE CAVITY AND MOLECULES")
+            print(
+                "[SingleModeCavity] WARNING: YOU NOW EXCITE BOTH THE CAVITY AND MOLECULES"
+            )
 
     # ------------------------------------------------------------------
     # Core helpers
