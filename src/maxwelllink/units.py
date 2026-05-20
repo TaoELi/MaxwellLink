@@ -31,15 +31,16 @@ BOHR_PER_ANG = 1.889726124565062
 FORCE_PER_EFIELD_AU_EV_PER_ANG = 51.422067476
 AMU_TO_AU = 1822.888486209  # 1 amu in atomic units
 
-def unit(from_unit, to_unit='au'):
+
+def unit(from_unit, to_unit="au"):
     """Return the conversion factor from one unit to another."""
 
     from_unit = str(from_unit).upper()
     to_unit = str(to_unit).upper()
 
-    if from_unit not in ['PS', 'FS', 'AU', 'EV', 'CM_INV', 'K']:
+    if from_unit not in ["PS", "FS", "AU", "EV", "CM_INV", "K"]:
         raise ValueError(f"Unsupported from_unit: {from_unit}")
-    if to_unit not in ['PS', 'FS', 'AU', 'EV', 'CM_INV', 'K']:
+    if to_unit not in ["PS", "FS", "AU", "EV", "CM_INV", "K"]:
         raise ValueError(f"Unsupported to_unit: {to_unit}")
     if from_unit == to_unit:
         return 1.0

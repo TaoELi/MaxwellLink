@@ -577,7 +577,7 @@ class ASEModel(DummyModel):
                 f"-> dt_fs={dt_fs:.6e} fs; substeps={self.n_substeps}; "
                 f"calculator={self.calc_name}({self.calc_kwargs})"
             )
-    
+
     # --------- core helper function in propagation -----------
 
     def _update_vv_dipole_timing(self):

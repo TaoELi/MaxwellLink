@@ -6,7 +6,6 @@
 # --------------------------------------------------------------------------------------#
 
 import numpy as np
-from scipy.linalg import expm
 import os
 
 try:
@@ -30,7 +29,7 @@ class SHOModel(DummyModel):
     Notes
     -----
     Implementing this class is mostly for demonstration purposes. Users who want
-    to enjoy advanced classical molecular dynamics simulations should use 
+    to enjoy advanced classical molecular dynamics simulations should use
     the **LAMMPS** or **DFTB+** socket driver, or the **ASE** python driver instead.
     """
 
@@ -84,7 +83,7 @@ class SHOModel(DummyModel):
 
         self.p = p_initial  # initial momentum of the oscillator
         self.q = q_initial  # initial position of the oscillator
-        self.acceleration = 0.0 # acceleration of the oscillator
+        self.acceleration = 0.0  # acceleration of the oscillator
         self.p_half = 0.0  # half time step momentum of the oscillator
 
         # optional, checking whether the driver can be paused and resumed properly
@@ -140,7 +139,7 @@ class SHOModel(DummyModel):
             )
         int_ep = effective_efield_vec[self.orientation_idx] * self.dipole_moment
 
-        # update the position and momentum for one time step using velocity verlet 
+        # update the position and momentum for one time step using velocity verlet
         # p updated to half time step
         self.p += 0.5 * self.acceleration * self.dt
         # q updated to full time step
@@ -229,7 +228,13 @@ class SHOModel(DummyModel):
         ``self.checkpoint_filename`` includes ``molid`` at ``self.initialize()``.
         """
 
-        np.savez(self.checkpoint_filename, time=self.t, p=self.p, q=self.q, acceleration=self.acceleration)
+        np.savez(
+            self.checkpoint_filename,
+            time=self.t,
+            p=self.p,
+            q=self.q,
+            acceleration=self.acceleration,
+        )
 
     def _reset_from_checkpoint(self):
         """
