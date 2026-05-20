@@ -31,6 +31,55 @@ the source amplitude vector for a quantum dynamics model.
 """
 
 
+def _connect_tcp_with_retry(address: str, port: int, timeout: float) -> socket.socket:
+    """
+    Open a TCP socket connection, retrying transient connection failures.
+
+    Large driver arrays can briefly overrun the EM solver's TCP listen queue.
+    In that case a single blocking connect can fail before the solver has a
+    chance to accept later clients. Treat the driver timeout as the full retry
+    budget for establishing the connection.
+    """
+
+    deadline = time.monotonic() + float(timeout)
+    delay = 0.25
+    last_error = None
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+
+        sock = socket.socket(socket.AF_INET)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except (OSError, AttributeError):
+            pass
+        sock.settimeout(min(30.0, max(1.0, remaining)))
+        try:
+            sock.connect((address, port))
+            sock.settimeout(timeout)
+            return sock
+        except (ConnectionRefusedError, TimeoutError, socket.timeout, OSError) as exc:
+            last_error = exc
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 1.5, 5.0)
+
+    raise TimeoutError(
+        f"Timed out connecting to MaxwellLink server at {(address, port)!r} "
+        f"after {timeout} seconds"
+    ) from last_error
+
+
 # helper function to determine whether this processor is the MPI master using mpi4py
 def _am_master():
     """
@@ -429,7 +478,7 @@ def run_driver(
     unix=False,
     address="localhost",
     port: int = 31415,
-    timeout: float = 600.0,
+    timeout: float = 6000.0,
     driver=DummyModel(),
     sockets_prefix="/tmp/socketmxl_",
 ):
@@ -444,7 +493,7 @@ def run_driver(
         Hostname (TCP/IP) or UNIX socket name (when ``unix=True``).
     port : int, default: 31415
         TCP/IP port (ignored for UNIX sockets).
-    timeout : float, default: 600.0
+    timeout : float, default: 6000.0
         Socket timeout in seconds.
     driver : DummyModel, default: DummyModel()
         Quantum dynamics model implementing the driver interface.
@@ -461,16 +510,7 @@ def run_driver(
         sock = socket.socket(socket.AF_UNIX)
         sock.connect(sockets_prefix + address)
     else:
-        sock = socket.socket(socket.AF_INET)
-        # NEW: keepalive + nodelay for low-latency, long-lived tiny messages
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except (OSError, AttributeError):
-            pass
-
-        sock.connect((address, port))
-        sock.settimeout(timeout)
+        sock = _connect_tcp_with_retry(address, port, timeout)
 
     initialized = False
     have_result = False

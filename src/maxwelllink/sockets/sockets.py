@@ -747,7 +747,7 @@ class SocketHub:
                 self.serversock.bind((host, port))
                 self._where = f"{host}:{port}"
 
-            self.serversock.listen(4096)
+            self.serversock.listen(16384)
             self.serversock.settimeout(0.25)
 
             self.timeout = float(timeout)
