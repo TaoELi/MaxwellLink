@@ -305,16 +305,29 @@ class FabryPerotCavity():
             self.smooth_x_2d, self.smooth_y_2d = np.meshgrid(
                 self.smooth_x, self.smooth_y
             )
-            self.smooth_2d = self.smooth_x_2d * self.smooth_y_2d
-            self.smooth_2d = np.diag(np.reshape(self.smooth_2d, -1))
-            from scipy.linalg import pinv
+            self.smooth_2d = np.reshape(self.smooth_x_2d * self.smooth_y_2d, -1)
 
-            abc_x = (
-                self.ftilde_k[:, :, 0] @ self.smooth_2d @ pinv(self.ftilde_k[:, :, 0])
-            )
-            abc_y = (
-                self.ftilde_k[:, :, 1] @ self.smooth_2d @ pinv(self.ftilde_k[:, :, 1])
-            )
+            from scipy.linalg import solve
+
+            F_x = self.ftilde_k[:, :, 0]
+            G_x = F_x @ F_x.T
+            B_x = (F_x * self.smooth_2d[None, :]) @ F_x.T
+            abc_x = solve(
+                G_x.T,
+                B_x.T,
+                assume_a="sym",
+                check_finite=False,
+            ).T
+
+            F_y = self.ftilde_k[:, :, 1]
+            G_y = F_y @ F_y.T
+            B_y = (F_y * self.smooth_2d[None, :]) @ F_y.T
+            abc_y = solve(
+                G_y.T,
+                B_y.T,
+                assume_a="sym",
+                check_finite=False,
+            ).T
             self.abc_x = abc_x
             self.abc_y = abc_y
 
