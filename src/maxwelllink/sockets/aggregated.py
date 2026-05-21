@@ -34,7 +34,9 @@ import argparse
 from collections.abc import Iterable
 import json
 import os
+import selectors
 import socket
+import struct
 import time
 import threading
 from dataclasses import dataclass, field
@@ -65,6 +67,16 @@ AGGREADY = b"AGGREADY"
 AGGSTEP = b"AGGSTEP"
 AGGRESULT = b"AGGRESULT"
 AGGREGATION_INFO_VERSION = 1
+
+_AGG_HEADER_LEN = 12
+_AGGSTEP_HDR = AGGSTEP.ljust(_AGG_HEADER_LEN, b" ")
+_AGGRESULT_HDR = AGGRESULT.ljust(_AGG_HEADER_LEN, b" ")
+_AGGSTEP_HEAD_LEN = _AGG_HEADER_LEN + 4 + 4  # header + nreq + nuniq
+_AGGSTEP_RECORD_LEN = 4 + 4  # molecule_id + field_idx
+_AGGRESULT_HEAD_LEN = _AGG_HEADER_LEN + 4  # header + nresp
+_AGGRESULT_RECORD_LEN = 4 + 24 + 4  # molecule_id + amp vec3 + extra_len
+_INT32 = struct.Struct("<i")
+_STRUCT_3D = struct.Struct("<3d")
 
 
 def _json_dumps_bytes(payload: Mapping) -> bytes:
@@ -98,6 +110,26 @@ def _recv_msg_with_timeout(sock: socket.socket, timeout: float) -> bytes:
         return _recv_msg(sock)
     finally:
         sock.settimeout(old_timeout)
+
+
+def _ensure_scratch(buf: Optional[bytearray], size: int) -> bytearray:
+    """Return a reusable scratch buffer with at least ``size`` bytes."""
+
+    if buf is None or len(buf) < size:
+        return bytearray(size)
+    return buf
+
+
+def _recv_exact_into(sock: socket.socket, buf, nbytes: int) -> None:
+    """Read exactly ``nbytes`` into the start of ``buf``."""
+
+    mv = memoryview(buf)
+    got = 0
+    while got < nbytes:
+        nrecv = sock.recv_into(mv[got:nbytes], nbytes - got)
+        if nrecv == 0:
+            raise _SocketClosed("Peer closed")
+        got += nrecv
 
 
 def _connect_tcp_with_retry(address: str, port: int, timeout: float) -> socket.socket:
@@ -201,65 +233,192 @@ def _recv_aggregate_init(sock: socket.socket) -> dict:
 
 
 def _send_aggregate_step(
-    sock: socket.socket, requests: Mapping[int, Mapping[str, np.ndarray]]
-) -> None:
-    """Send one grouped fan-out step to a bridge."""
+    sock: socket.socket,
+    requests: Mapping[int, Mapping[str, np.ndarray]],
+    scratch: Optional[bytearray] = None,
+) -> bytearray:
+    """Send one grouped fan-out step to a bridge as one packed frame."""
 
-    _send_msg(sock, AGGSTEP)
-    _send_int(sock, len(requests))
+    unique_fields: list[tuple[float, float, float]] = []
+    field_to_idx: dict[tuple[float, float, float], int] = {}
+    members: list[tuple[int, int]] = []
     for mid, payload in requests.items():
         field = np.asarray(payload["efield_au"], dtype=DT_FLOAT).reshape(3)
-        _send_int(sock, int(mid))
-        _send_array(sock, field, DT_FLOAT)
+        key = (float(field[0]), float(field[1]), float(field[2]))
+        field_idx = field_to_idx.get(key)
+        if field_idx is None:
+            field_idx = len(unique_fields)
+            unique_fields.append(key)
+            field_to_idx[key] = field_idx
+        members.append((int(mid), field_idx))
+
+    frame_len = (
+        _AGGSTEP_HEAD_LEN
+        + 24 * len(unique_fields)
+        + _AGGSTEP_RECORD_LEN * len(members)
+    )
+    scratch = _ensure_scratch(scratch, frame_len)
+    scratch[:_AGG_HEADER_LEN] = _AGGSTEP_HDR
+    _INT32.pack_into(scratch, _AGG_HEADER_LEN, len(members))
+    _INT32.pack_into(scratch, _AGG_HEADER_LEN + 4, len(unique_fields))
+
+    offset = _AGGSTEP_HEAD_LEN
+    for fx, fy, fz in unique_fields:
+        _STRUCT_3D.pack_into(scratch, offset, fx, fy, fz)
+        offset += 24
+    for mid, field_idx in members:
+        _INT32.pack_into(scratch, offset, mid)
+        _INT32.pack_into(scratch, offset + 4, field_idx)
+        offset += _AGGSTEP_RECORD_LEN
+
+    sock.sendall(memoryview(scratch)[:frame_len])
+    return scratch
 
 
-def _recv_aggregate_step(sock: socket.socket) -> Dict[int, np.ndarray]:
+def _recv_aggregate_step(
+    sock: socket.socket,
+    *,
+    header_already_read: bool = False,
+    head_scratch: Optional[bytearray] = None,
+    body_scratch: Optional[bytearray] = None,
+) -> tuple[Dict[int, np.ndarray], bytearray, bytearray]:
     """Receive a grouped fan-out step on the bridge side."""
 
-    msg = _recv_msg(sock)
-    if msg != AGGSTEP:
-        raise RuntimeError(f"Expected {AGGSTEP!r}, got {msg!r}")
+    head_scratch = _ensure_scratch(head_scratch, _AGGSTEP_HEAD_LEN)
+    if header_already_read:
+        head_scratch[:_AGG_HEADER_LEN] = _AGGSTEP_HDR
+        _recv_exact_into(
+            sock,
+            memoryview(head_scratch)[_AGG_HEADER_LEN:],
+            _AGGSTEP_HEAD_LEN - _AGG_HEADER_LEN,
+        )
+    else:
+        _recv_exact_into(sock, head_scratch, _AGGSTEP_HEAD_LEN)
+    if bytes(memoryview(head_scratch)[:_AGG_HEADER_LEN]).rstrip() != AGGSTEP:
+        raise RuntimeError(
+            f"Expected {AGGSTEP!r}, got {bytes(memoryview(head_scratch)[:_AGG_HEADER_LEN]).rstrip()!r}"
+        )
 
-    nreq = _recv_int(sock)
+    nreq = _INT32.unpack_from(head_scratch, _AGG_HEADER_LEN)[0]
+    nuniq = _INT32.unpack_from(head_scratch, _AGG_HEADER_LEN + 4)[0]
+    body_len = 24 * nuniq + _AGGSTEP_RECORD_LEN * nreq
+    body_scratch = _ensure_scratch(body_scratch, body_len)
+    if body_len:
+        _recv_exact_into(sock, body_scratch, body_len)
+
+    offset = 0
+    fields: list[np.ndarray] = []
+    for _ in range(nuniq):
+        fx, fy, fz = _STRUCT_3D.unpack_from(body_scratch, offset)
+        fields.append(np.array((fx, fy, fz), dtype=float))
+        offset += 24
+
     requests: Dict[int, np.ndarray] = {}
     for _ in range(nreq):
-        mid = int(_recv_int(sock))
-        requests[mid] = _recv_array(sock, (3,), DT_FLOAT).astype(float, copy=False)
-    return requests
+        mid = int(_INT32.unpack_from(body_scratch, offset)[0])
+        field_idx = _INT32.unpack_from(body_scratch, offset + 4)[0]
+        offset += _AGGSTEP_RECORD_LEN
+        requests[mid] = fields[field_idx]
+    return requests, head_scratch, body_scratch
 
 
 def _send_aggregate_result(
-    sock: socket.socket, responses: Mapping[int, Mapping[str, object]]
-) -> None:
-    """Send grouped molecule responses back to the aggregated hub."""
+    sock: socket.socket,
+    responses: Mapping[int, Mapping[str, object]],
+    scratch: Optional[bytearray] = None,
+) -> bytearray:
+    """Send grouped molecule responses back to the aggregated hub as one frame."""
 
-    _send_msg(sock, AGGRESULT)
-    _send_int(sock, len(responses))
+    packed: list[tuple[int, tuple[float, float, float], bytes]] = []
+    total_extra = 0
     for mid, payload in responses.items():
         amp = np.asarray(payload["amp"], dtype=DT_FLOAT).reshape(3)
         extra = payload.get("extra", b"")
         if isinstance(extra, str):
             extra = extra.encode("utf-8")
         extra = bytes(extra)
-        _send_int(sock, int(mid))
-        _send_array(sock, amp, DT_FLOAT)
-        _send_bytes(sock, extra)
+        packed.append(
+            (
+                int(mid),
+                (float(amp[0]), float(amp[1]), float(amp[2])),
+                extra,
+            )
+        )
+        total_extra += len(extra)
+
+    fixed_len = _AGGRESULT_HEAD_LEN + _AGGRESULT_RECORD_LEN * len(packed)
+    frame_len = fixed_len + total_extra
+    scratch = _ensure_scratch(scratch, frame_len)
+    scratch[:_AGG_HEADER_LEN] = _AGGRESULT_HDR
+    _INT32.pack_into(scratch, _AGG_HEADER_LEN, len(packed))
+
+    offset = _AGGRESULT_HEAD_LEN
+    extra_offset = fixed_len
+    for mid, amp, extra in packed:
+        _INT32.pack_into(scratch, offset, mid)
+        _STRUCT_3D.pack_into(scratch, offset + 4, amp[0], amp[1], amp[2])
+        _INT32.pack_into(scratch, offset + 28, len(extra))
+        offset += _AGGRESULT_RECORD_LEN
+        if extra:
+            scratch[extra_offset : extra_offset + len(extra)] = extra
+            extra_offset += len(extra)
+
+    sock.sendall(memoryview(scratch)[:frame_len])
+    return scratch
 
 
-def _recv_aggregate_result(sock: socket.socket) -> Dict[int, dict]:
+def _recv_aggregate_result(
+    sock: socket.socket,
+    *,
+    head_scratch: Optional[bytearray] = None,
+    fixed_scratch: Optional[bytearray] = None,
+    extras_scratch: Optional[bytearray] = None,
+) -> tuple[Dict[int, dict], bytearray, bytearray, bytearray]:
     """Receive grouped molecule responses from a bridge."""
 
-    msg = _recv_msg(sock)
-    if msg != AGGRESULT:
-        raise RuntimeError(f"Expected {AGGRESULT!r}, got {msg!r}")
+    head_scratch = _ensure_scratch(head_scratch, _AGGRESULT_HEAD_LEN)
+    _recv_exact_into(sock, head_scratch, _AGGRESULT_HEAD_LEN)
+    if bytes(memoryview(head_scratch)[:_AGG_HEADER_LEN]).rstrip() != AGGRESULT:
+        raise RuntimeError(
+            f"Expected {AGGRESULT!r}, got {bytes(memoryview(head_scratch)[:_AGG_HEADER_LEN]).rstrip()!r}"
+        )
 
-    nresp = _recv_int(sock)
-    responses: Dict[int, dict] = {}
+    nresp = _INT32.unpack_from(head_scratch, _AGG_HEADER_LEN)[0]
+    fixed_len = _AGGRESULT_RECORD_LEN * nresp
+    fixed_scratch = _ensure_scratch(fixed_scratch, fixed_len)
+    if fixed_len:
+        _recv_exact_into(sock, fixed_scratch, fixed_len)
+
+    offset = 0
+    meta: list[tuple[int, tuple[float, float, float], int]] = []
+    total_extra = 0
     for _ in range(nresp):
-        mid = int(_recv_int(sock))
-        amp = _recv_array(sock, (3,), DT_FLOAT).astype(float, copy=False)
-        responses[mid] = {"amp": amp, "extra": _recv_bytes(sock)}
-    return responses
+        mid = int(_INT32.unpack_from(fixed_scratch, offset)[0])
+        amp = _STRUCT_3D.unpack_from(fixed_scratch, offset + 4)
+        extra_len = _INT32.unpack_from(fixed_scratch, offset + 28)[0]
+        meta.append((mid, amp, extra_len))
+        total_extra += extra_len
+        offset += _AGGRESULT_RECORD_LEN
+
+    extras_scratch = _ensure_scratch(extras_scratch, total_extra)
+    if total_extra:
+        _recv_exact_into(sock, extras_scratch, total_extra)
+
+    responses: Dict[int, dict] = {}
+    extra_offset = 0
+    for mid, amp, extra_len in meta:
+        extra = (
+            bytes(memoryview(extras_scratch)[extra_offset : extra_offset + extra_len])
+            if extra_len
+            else b""
+        )
+        responses[mid] = {
+            "amp": np.array(amp, dtype=float),
+            "extra": extra,
+        }
+        extra_offset += extra_len
+
+    return responses, head_scratch, fixed_scratch, extras_scratch
 
 
 @dataclass
@@ -270,6 +429,10 @@ class _AggregateGroupState:
     molecule_ids: list[int] = field(default_factory=list)
     init_payloads: Dict[int, dict] = field(default_factory=dict)
     bridge: Optional[_ClientState] = None
+    step_send_scratch: Optional[bytearray] = None
+    result_head_scratch: Optional[bytearray] = None
+    result_fixed_scratch: Optional[bytearray] = None
+    result_extras_scratch: Optional[bytearray] = None
 
 
 @dataclass(frozen=True)
@@ -586,6 +749,7 @@ class AggregatedSocketHub(SocketHub):
         self._bridge_counter = 0
         self.remote_bridges: list[RemoteBridgeSpec] = []
         self.remote_bridge_info: Optional[dict] = None
+        self._bridge_selector = selectors.DefaultSelector()
 
     def add_bridge(self, local_unixsocket: str) -> AggregatedBridge:
         """
@@ -764,12 +928,38 @@ class AggregatedSocketHub(SocketHub):
             self.clients.pop(st_key, None)
         for mid in group.molecule_ids:
             self.bound[mid] = st
+        self._register_bridge_sock(st.sock, group_id)
         self._log(f"CONNECTED: aggregate group {group_id!r} <- {st.address}")
+
+    def _register_bridge_sock(self, sock: socket.socket, group_id: str) -> None:
+        """Register a bridge socket for readable events with its group id."""
+
+        try:
+            self._bridge_selector.register(sock, selectors.EVENT_READ, data=group_id)
+        except (KeyError, ValueError):
+            try:
+                self._bridge_selector.unregister(sock)
+                self._bridge_selector.register(
+                    sock, selectors.EVENT_READ, data=group_id
+                )
+            except (KeyError, ValueError, OSError):
+                pass
+        except OSError:
+            pass
+
+    def _unregister_bridge_sock(self, sock: socket.socket) -> None:
+        """Unregister a bridge socket from the aggregate selector."""
+
+        try:
+            self._bridge_selector.unregister(sock)
+        except (KeyError, ValueError, OSError):
+            pass
 
     def _drop_client_locked(self, st_key, st: _ClientState, reason: str) -> None:
         """Remove a temporary or duplicate bridge client."""
 
         self.clients.pop(st_key, None)
+        self._unregister_bridge_sock(st.sock)
         self._unregister_sock(st.sock)
         st.alive = False
         try:
@@ -790,6 +980,7 @@ class AggregatedSocketHub(SocketHub):
             self.clients.pop(group_id, None)
             st.alive = False
             st.initialized = False
+            self._unregister_bridge_sock(st.sock)
             self._unregister_sock(st.sock)
             for mid in group.molecule_ids:
                 if self.bound.get(mid) is st:
@@ -965,15 +1156,18 @@ class AggregatedSocketHub(SocketHub):
         deadline = time.time() + (
             float(timeout) if timeout is not None else float(self.timeout)
         )
-        payloads = {
-            int(mid): (
-                dict(requests[mid].get("init") or {"molecule_id": int(mid)})
-            )
-            for mid in requests.keys()
-        }
 
         with self._lock:
-            self._prepare_groups_locked(payloads)
+            if any("init" in requests[mid] for mid in requests.keys()) or any(
+                int(mid) not in self._molecule_to_group for mid in requests.keys()
+            ):
+                payloads = {
+                    int(mid): (
+                        dict(requests[mid].get("init") or {"molecule_id": int(mid)})
+                    )
+                    for mid in requests.keys()
+                }
+                self._prepare_groups_locked(payloads)
             if not self.all_bound(wants, require_init=True):
                 return {}
 
@@ -990,20 +1184,30 @@ class AggregatedSocketHub(SocketHub):
             }
 
         for group_id, group_request in grouped_requests.items():
+            with self._lock:
+                group = self._groups[group_id]
             st = group_states[group_id]
             if st is None or not st.alive or not st.initialized:
                 self._pause()
                 return {}
             try:
-                _send_aggregate_step(st.sock, group_request)
+                group.step_send_scratch = _send_aggregate_step(
+                    st.sock,
+                    group_request,
+                    scratch=group.step_send_scratch,
+                )
             except (socket.timeout, _SocketClosed, OSError):
                 self._mark_group_dead(group_id, reason="send")
                 return {}
 
         responses: Dict[int, dict] = {}
-        for group_id, group_request in grouped_requests.items():
-            st = group_states[group_id]
-            if st is None:
+        pending_groups = set(grouped_requests.keys())
+        if len(pending_groups) == 1:
+            group_id = next(iter(pending_groups))
+            with self._lock:
+                group = self._groups.get(group_id)
+                st = None if group is None else group.bridge
+            if st is None or not st.alive or group is None:
                 self._pause()
                 return {}
 
@@ -1014,14 +1218,24 @@ class AggregatedSocketHub(SocketHub):
             old_timeout = st.sock.gettimeout()
             try:
                 st.sock.settimeout(remaining)
-                group_responses = _recv_aggregate_result(st.sock)
+                (
+                    group_responses,
+                    group.result_head_scratch,
+                    group.result_fixed_scratch,
+                    group.result_extras_scratch,
+                ) = _recv_aggregate_result(
+                    st.sock,
+                    head_scratch=group.result_head_scratch,
+                    fixed_scratch=group.result_fixed_scratch,
+                    extras_scratch=group.result_extras_scratch,
+                )
             except (socket.timeout, RuntimeError, _SocketClosed, OSError):
                 self._mark_group_dead(group_id, reason="recv")
                 return {}
             finally:
                 st.sock.settimeout(old_timeout)
 
-            expected = set(group_request.keys())
+            expected = set(grouped_requests[group_id].keys())
             actual = set(group_responses.keys())
             if actual != expected:
                 self._mark_group_dead(group_id, reason="protocol")
@@ -1030,6 +1244,62 @@ class AggregatedSocketHub(SocketHub):
                     f"expected {sorted(expected)}."
                 )
             responses.update(group_responses)
+            return responses
+
+        while pending_groups:
+            remaining = deadline - time.time()
+            if remaining <= 0.0:
+                return {}
+
+            try:
+                events = self._bridge_selector.select(timeout=min(remaining, 1.0))
+            except OSError:
+                return {}
+            if not events:
+                continue
+
+            for key, _mask in events:
+                group_id = key.data
+                if group_id not in pending_groups:
+                    continue
+
+                with self._lock:
+                    group = self._groups.get(group_id)
+                    st = None if group is None else group.bridge
+                if st is None or not st.alive or group is None:
+                    self._pause()
+                    return {}
+
+                old_timeout = st.sock.gettimeout()
+                try:
+                    st.sock.settimeout(max(0.0, deadline - time.time()))
+                    (
+                        group_responses,
+                        group.result_head_scratch,
+                        group.result_fixed_scratch,
+                        group.result_extras_scratch,
+                    ) = _recv_aggregate_result(
+                        st.sock,
+                        head_scratch=group.result_head_scratch,
+                        fixed_scratch=group.result_fixed_scratch,
+                        extras_scratch=group.result_extras_scratch,
+                    )
+                except (socket.timeout, RuntimeError, _SocketClosed, OSError):
+                    self._mark_group_dead(group_id, reason="recv")
+                    return {}
+                finally:
+                    st.sock.settimeout(old_timeout)
+
+                expected = set(grouped_requests[group_id].keys())
+                actual = set(group_responses.keys())
+                if actual != expected:
+                    self._mark_group_dead(group_id, reason="protocol")
+                    raise RuntimeError(
+                        f"Aggregate group {group_id!r} returned molecule ids {sorted(actual)}, "
+                        f"expected {sorted(expected)}."
+                    )
+                responses.update(group_responses)
+                pending_groups.discard(group_id)
 
         return responses
 
@@ -1096,6 +1366,7 @@ class AggregatedSocketHub(SocketHub):
                 if group is not None and group.bridge is st:
                     group.bridge = None
                 self.clients.pop(group_id, None)
+                self._unregister_bridge_sock(st.sock)
                 self._unregister_sock(st.sock)
                 st.alive = False
                 st.initialized = False
@@ -1106,6 +1377,7 @@ class AggregatedSocketHub(SocketHub):
 
             for key, st in other_clients:
                 self.clients.pop(key, None)
+                self._unregister_bridge_sock(st.sock)
                 self._unregister_sock(st.sock)
                 st.alive = False
                 sockets_to_close.append((f"client {key!r}", st.sock))
@@ -1119,6 +1391,10 @@ class AggregatedSocketHub(SocketHub):
 
         try:
             self._selector.close()
+        except Exception:
+            pass
+        try:
+            self._bridge_selector.close()
         except Exception:
             pass
 
@@ -1156,9 +1432,11 @@ class LocalSocketHubBridge:
         if not str(group_id).strip():
             raise ValueError("group_id must be a non-empty string")
         if local_unixsocket is None and local_port is None:
-            raise ValueError(
-                "LocalSocketHubBridge requires either local_unixsocket or local_port."
-            )
+            sanitized = "".join(
+                ch if ch.isalnum() or ch in ("-", "_") else "_"
+                for ch in str(group_id)
+            ).strip("_")
+            local_unixsocket = f"agg_{sanitized or 'bridge'}"
 
         self.group_id = str(group_id)
         self.upstream_host = str(upstream_host)
@@ -1178,9 +1456,13 @@ class LocalSocketHubBridge:
         )
 
         self._init_payloads: Dict[int, dict] = {}
+        self._request_cache: Dict[int, dict] = {}
         self._upstream_sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._step_head_scratch: Optional[bytearray] = None
+        self._step_body_scratch: Optional[bytearray] = None
+        self._result_send_scratch: Optional[bytearray] = None
 
     @property
     def local_endpoint(self) -> dict:
@@ -1224,17 +1506,38 @@ class LocalSocketHubBridge:
         }
         self._ensure_local_hub_ready(init_payloads)
         self._init_payloads = init_payloads
+        self._request_cache = {
+            int(mid): {"efield_au": np.zeros(3, dtype=float)}
+            for mid in init_payloads.keys()
+        }
 
     def _run_local_step(self, efields: Mapping[int, np.ndarray]) -> Dict[int, dict]:
         """Fan out one grouped step to the downstream local hub."""
 
-        requests = {
-            int(mid): {
-                "efield_au": np.asarray(efields[mid], dtype=float),
-                "init": self._init_payloads[int(mid)],
-            }
-            for mid in efields.keys()
-        }
+        if (
+            len(efields) == len(self._request_cache)
+            and self._request_cache
+            and all(int(mid) in self._request_cache for mid in efields.keys())
+        ):
+            requests = self._request_cache
+            for mid, field in efields.items():
+                np.copyto(
+                    requests[int(mid)]["efield_au"],
+                    np.asarray(field, dtype=float).reshape(3),
+                )
+        else:
+            requests = {}
+            for mid, field in efields.items():
+                molid = int(mid)
+                cached = self._request_cache.get(molid)
+                if cached is None:
+                    cached = {"efield_au": np.zeros(3, dtype=float)}
+                    self._request_cache[molid] = cached
+                np.copyto(
+                    cached["efield_au"],
+                    np.asarray(field, dtype=float).reshape(3),
+                )
+                requests[molid] = cached
 
         responses = self.local_hub.step_barrier(requests)
         while not responses:
@@ -1269,15 +1572,22 @@ class LocalSocketHubBridge:
                     _send_msg(sock, AGGREADY)
 
                 elif msg == AGGSTEP:
-                    nreq = _recv_int(sock)
-                    efields: Dict[int, np.ndarray] = {}
-                    for _ in range(nreq):
-                        mid = int(_recv_int(sock))
-                        efields[mid] = _recv_array(sock, (3,), DT_FLOAT).astype(
-                            float, copy=False
-                        )
+                    (
+                        efields,
+                        self._step_head_scratch,
+                        self._step_body_scratch,
+                    ) = _recv_aggregate_step(
+                        sock,
+                        header_already_read=True,
+                        head_scratch=self._step_head_scratch,
+                        body_scratch=self._step_body_scratch,
+                    )
                     responses = self._run_local_step(efields)
-                    _send_aggregate_result(sock, responses)
+                    self._result_send_scratch = _send_aggregate_result(
+                        sock,
+                        responses,
+                        scratch=self._result_send_scratch,
+                    )
 
                 elif msg == STOP:
                     try:
