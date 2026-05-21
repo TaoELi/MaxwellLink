@@ -333,6 +333,7 @@ class FabryPerotCavity:
                     check_finite=False,
                 ).T
             except np.linalg.LinAlgError:
+                print("[MultiModeCavity] Warning: F_x @ F_x.T is singular. Falling back to pseudo-inverse solution.")
                 abc_x = self.ftilde_k[:, :, 0] @ self.smooth_2d[None, :] @ pinv(self.ftilde_k[:, :, 0])
 
             try:
@@ -347,8 +348,9 @@ class FabryPerotCavity:
                     check_finite=False,
                 ).T
             except np.linalg.LinAlgError:
+                print("[MultiModeCavity] Warning: F_y @ F_y.T is singular. Falling back to pseudo-inverse solution.")
                 abc_y = self.ftilde_k[:, :, 1] @ self.smooth_2d[None, :] @ pinv(self.ftilde_k[:, :, 1])
-                
+
                 self.abc_x = abc_x
                 self.abc_y = abc_y
 
