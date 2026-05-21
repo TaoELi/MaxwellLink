@@ -255,9 +255,9 @@ class FabryPerotCavity:
             ** 0.5,
             -1,
         )
-        print("omega_parallel in cm-1", omega_parallel * AU_TO_CM_INV)
+        print("[MultiModeCavity] omega_parallel in cm-1", omega_parallel * AU_TO_CM_INV)
         self.omega_k = (self.frequency_au**2 + omega_parallel**2) ** 0.5
-        print("omega_k in cm-1", self.omega_k * AU_TO_CM_INV)
+        print("[MultiModeCavity] omega_k in cm-1", self.omega_k * AU_TO_CM_INV)
 
         # construct renormalized cavity mode function for each molecular grid point
         self.n_mode = n_mode_x * n_mode_y
