@@ -391,12 +391,8 @@ def test_aggregated_socket_hub_roundtrip(local_transport: str):
             local_port=downstream_port,
         )
         driver_threads = [
-            _start_driver_thread(
-                unix=False, address="127.0.0.1", port=downstream_port
-            ),
-            _start_driver_thread(
-                unix=False, address="127.0.0.1", port=downstream_port
-            ),
+            _start_driver_thread(unix=False, address="127.0.0.1", port=downstream_port),
+            _start_driver_thread(unix=False, address="127.0.0.1", port=downstream_port),
         ]
 
     bridge.start()

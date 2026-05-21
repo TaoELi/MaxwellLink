@@ -1244,7 +1244,9 @@ class AggregatedSocketHub(SocketHub):
             }
         return grouped_requests
 
-    def _send_step_to_group(self, group_id: str, group_request: Dict[int, dict]) -> bool:
+    def _send_step_to_group(
+        self, group_id: str, group_request: Dict[int, dict]
+    ) -> bool:
         """Send one grouped fan-out step; return ``False`` on a dead bridge."""
 
         group, st = self._group_and_bridge(group_id)
@@ -1511,8 +1513,7 @@ class LocalSocketHubBridge:
             raise ValueError("group_id must be a non-empty string")
         if local_unixsocket is None and local_port is None:
             sanitized = "".join(
-                ch if ch.isalnum() or ch in ("-", "_") else "_"
-                for ch in str(group_id)
+                ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(group_id)
             ).strip("_")
             local_unixsocket = f"agg_{sanitized or 'bridge'}"
 
@@ -1604,21 +1605,21 @@ class LocalSocketHubBridge:
             and all(int(mid) in self._request_cache for mid in efields.keys())
         )
         if cache_hit:
-            for mid, field in efields.items():
+            for mid, efield in efields.items():
                 np.copyto(
                     self._request_cache[int(mid)]["efield_au"],
-                    np.asarray(field, dtype=float).reshape(3),
+                    np.asarray(efield, dtype=float).reshape(3),
                 )
             return self._request_cache
 
         requests: Dict[int, dict] = {}
-        for mid, field in efields.items():
+        for mid, efield in efields.items():
             molid = int(mid)
             cached = self._request_cache.get(molid)
             if cached is None:
                 cached = {"efield_au": np.zeros(3, dtype=float)}
                 self._request_cache[molid] = cached
-            np.copyto(cached["efield_au"], np.asarray(field, dtype=float).reshape(3))
+            np.copyto(cached["efield_au"], np.asarray(efield, dtype=float).reshape(3))
             requests[molid] = cached
         return requests
 
