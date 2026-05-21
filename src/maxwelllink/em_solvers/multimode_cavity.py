@@ -324,7 +324,7 @@ class FabryPerotCavity:
             F_x = self.ftilde_k[:, :, 0]
             G_x = F_x @ F_x.T
             B_x = (F_x * self.smooth_2d[None, :]) @ F_x.T
-            eps_x = 1e-10 * np.trace(G_x) / G_x.shape[0]
+            eps_x = 1e-8 * max(np.linalg.norm(G_x, ord=2), 1.0)
             abc_x = solve(
                 G_x.T + eps_x * np.eye(G_x.shape[0]),
                 B_x.T,
@@ -335,7 +335,7 @@ class FabryPerotCavity:
             F_y = self.ftilde_k[:, :, 1]
             G_y = F_y @ F_y.T
             B_y = (F_y * self.smooth_2d[None, :]) @ F_y.T
-            eps_y = 1e-10 * np.trace(G_y) / G_y.shape[0]
+            eps_y = 1e-8 * max(np.linalg.norm(G_y, ord=2), 1.0)
             abc_y = solve(
                 G_y.T + eps_y * np.eye(G_y.shape[0]),
                 B_y.T,
