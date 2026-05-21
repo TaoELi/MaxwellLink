@@ -25,6 +25,7 @@ overview of the code structure and how to extend the framework with custom solve
    introduction
    installation
    usage
+   large_scale
    agent_skills
 
 .. toctree::

@@ -1,4 +1,5 @@
 from importlib.metadata import version, PackageNotFoundError
+import importlib
 
 try:
     __version__ = version("maxwelllink")
@@ -11,8 +12,13 @@ __all__ = [
     "update_molecules",
     "update_molecules_no_mpi",
     "update_molecules_no_socket",
+    "sockets",
     "SocketHub",
+    "AggregatedSocketHub",
+    "LocalSocketHubBridge",
+    "RemoteBridgeSpec",
     "get_available_host_port",
+    "run_bridge_node",
     "mxl_driver_main",
     "launch_driver",
     "terminate_driver",
@@ -58,6 +64,9 @@ def __getattr__(name):
     AttributeError
         If the requested attribute is not a known model class.
     """
+    if name == "sockets":
+        return importlib.import_module(".sockets", __name__)
+
     # Legacy code path (molecule_fast) kept for reference; prefer molecule_abstract + em_solvers/meep now.
     if name in {
         "TLSMolecule",
@@ -140,8 +149,22 @@ def __getattr__(name):
         )
 
         return locals()[name]
-    if name in {"SocketHub", "get_available_host_port"}:
-        from .sockets import SocketHub, get_available_host_port
+    if name in {
+        "SocketHub",
+        "AggregatedSocketHub",
+        "LocalSocketHubBridge",
+        "RemoteBridgeSpec",
+        "get_available_host_port",
+        "run_bridge_node",
+    }:
+        from .sockets import (
+            SocketHub,
+            AggregatedSocketHub,
+            LocalSocketHubBridge,
+            RemoteBridgeSpec,
+            get_available_host_port,
+            run_bridge_node,
+        )
 
         return locals()[name]
     if name in {"mxl_driver_main", "launch_driver", "terminate_driver"}:
