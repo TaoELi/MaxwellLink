@@ -8,9 +8,11 @@ wheel.
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import shutil
+import sys
 
-from setuptools import setup
+from setuptools import Extension, setup
 from setuptools.command.build_py import build_py as _build_py
 
 
@@ -78,8 +80,31 @@ class build_py(_build_py):
         _copy_workspace_payload(repo_root, payload_root)
 
 
+def _native_extensions() -> list[Extension]:
+    """Return optional native extensions built by ``pip install .``.
+
+    The native socket helpers are POSIX-oriented because MaxwellLink's high-end
+    socket use cases target Linux/macOS workstations and HPC systems. Set
+    ``MAXWELLLINK_DISABLE_NATIVE_SOCKETS=1`` to force a pure-Python build.
+    """
+
+    if os.environ.get("MAXWELLLINK_DISABLE_NATIVE_SOCKETS"):
+        return []
+    if sys.platform.startswith("win"):
+        return []
+    return [
+        Extension(
+            "maxwelllink.sockets._csockets",
+            sources=["src/maxwelllink/sockets/sockets_c.cpp"],
+            language="c++",
+            extra_compile_args=["-std=c++11"],
+        )
+    ]
+
+
 setup(
     cmdclass={
         "build_py": build_py,
-    }
+    },
+    ext_modules=_native_extensions(),
 )
