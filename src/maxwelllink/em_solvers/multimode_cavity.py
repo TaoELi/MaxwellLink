@@ -319,31 +319,38 @@ class FabryPerotCavity:
             )
             self.smooth_2d = np.reshape(self.smooth_x_2d * self.smooth_y_2d, -1)
 
-            from scipy.linalg import solve
+            from scipy.linalg import solve, pinv
 
-            F_x = self.ftilde_k[:, :, 0]
-            G_x = F_x @ F_x.T
-            B_x = (F_x * self.smooth_2d[None, :]) @ F_x.T
-            eps_x = 1e-8 * max(np.linalg.norm(G_x, ord=2), 1.0)
-            abc_x = solve(
-                G_x.T + eps_x * np.eye(G_x.shape[0]),
-                B_x.T,
-                assume_a="sym",
-                check_finite=False,
-            ).T
+            try:
+                F_x = self.ftilde_k[:, :, 0]
+                G_x = F_x @ F_x.T
+                B_x = (F_x * self.smooth_2d[None, :]) @ F_x.T
+                eps_x = 1e-8 * max(np.linalg.norm(G_x, ord=2), 1.0)
+                abc_x = solve(
+                    G_x.T + eps_x * np.eye(G_x.shape[0]),
+                    B_x.T,
+                    assume_a="sym",
+                    check_finite=False,
+                ).T
+            except np.linalg.LinAlgError:
+                abc_x = self.ftilde_k[:, :, 0] @ self.smooth_2d[None, :] @ pinv(self.ftilde_k[:, :, 0])
 
-            F_y = self.ftilde_k[:, :, 1]
-            G_y = F_y @ F_y.T
-            B_y = (F_y * self.smooth_2d[None, :]) @ F_y.T
-            eps_y = 1e-8 * max(np.linalg.norm(G_y, ord=2), 1.0)
-            abc_y = solve(
-                G_y.T + eps_y * np.eye(G_y.shape[0]),
-                B_y.T,
-                assume_a="sym",
-                check_finite=False,
-            ).T
-            self.abc_x = abc_x
-            self.abc_y = abc_y
+            try:
+                F_y = self.ftilde_k[:, :, 1]
+                G_y = F_y @ F_y.T
+                B_y = (F_y * self.smooth_2d[None, :]) @ F_y.T
+                eps_y = 1e-8 * max(np.linalg.norm(G_y, ord=2), 1.0)
+                abc_y = solve(
+                    G_y.T + eps_y * np.eye(G_y.shape[0]),
+                    B_y.T,
+                    assume_a="sym",
+                    check_finite=False,
+                ).T
+            except np.linalg.LinAlgError:
+                abc_y = self.ftilde_k[:, :, 1] @ self.smooth_2d[None, :] @ pinv(self.ftilde_k[:, :, 1])
+                
+                self.abc_x = abc_x
+                self.abc_y = abc_y
 
         self.if_abc = (abc_x is not None) and (abc_y is not None)
         print(
