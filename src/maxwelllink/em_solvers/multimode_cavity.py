@@ -351,8 +351,8 @@ class FabryPerotCavity:
                 print("[MultiModeCavity] Warning: F_y @ F_y.T is singular. Falling back to pseudo-inverse solution.")
                 abc_y = self.ftilde_k[:, :, 1] @ self.smooth_2d[None, :] @ pinv(self.ftilde_k[:, :, 1])
 
-                self.abc_x = abc_x
-                self.abc_y = abc_y
+            self.abc_x = abc_x
+            self.abc_y = abc_y
 
         self.if_abc = (abc_x is not None) and (abc_y is not None)
         print(
