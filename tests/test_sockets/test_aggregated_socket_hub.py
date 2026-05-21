@@ -20,9 +20,14 @@ SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+import maxwelllink as mxl
 from maxwelllink.mxl_drivers.python.mxl_driver import run_driver
 from maxwelllink.mxl_drivers.python.models.dummy_model import DummyModel
-from maxwelllink.sockets.aggregated import AggregatedSocketHub, LocalSocketHubBridge
+from maxwelllink.sockets.aggregated import (
+    AggregatedSocketHub,
+    LocalSocketHubBridge,
+    run_bridge_node,
+)
 
 
 def _can_create_sockets() -> bool:
@@ -100,6 +105,27 @@ def _start_driver_thread(*, unix: bool, address: str, port: int | None = None):
     thread = threading.Thread(target=run_driver, kwargs=kwargs, daemon=True)
     thread.start()
     return thread
+
+
+def _wait_for_unixsocket(name: str, timeout: float = 5.0) -> Path:
+    """Wait until one relative MaxwellLink UNIX socket name appears on disk."""
+
+    socket_path = Path(f"/tmp/socketmxl_{name}")
+    deadline = time.time() + float(timeout)
+    while time.time() < deadline:
+        if socket_path.exists():
+            return socket_path
+        time.sleep(0.01)
+    raise TimeoutError(f"Timed out waiting for unix socket {socket_path}")
+
+
+@pytest.mark.core
+def test_maxwelllink_root_exports_aggregated_helpers():
+    """The package root should expose the new aggregate helpers directly."""
+
+    assert mxl.AggregatedSocketHub is AggregatedSocketHub
+    assert mxl.run_bridge_node is run_bridge_node
+    assert mxl.sockets.AggregatedSocketHub is AggregatedSocketHub
 
 
 @pytest.mark.core
@@ -184,6 +210,139 @@ def test_aggregated_socket_hub_convenience_bridge_api():
 
     assert unixsocket_path is not None
     assert not Path(unixsocket_path).exists()
+
+
+@pytest.mark.core
+def test_init_remote_bridges_assigns_groups_and_writes_manifest(tmp_path: Path):
+    """Remote bridge planning should assign groups and save a stable manifest."""
+
+    upstream_port = _pick_free_port()
+    hub = AggregatedSocketHub(
+        host="127.0.0.1",
+        port=upstream_port,
+        timeout=10.0,
+        latency=1e-4,
+    )
+    prefix = f"bridge_{time.time_ns()}_"
+    manifest_path = tmp_path / "aggregation.json"
+    molecules = [
+        SimpleNamespace(hub=hub, init_payload={"dt_au": 0.25}) for _ in range(5)
+    ]
+
+    try:
+        specs = hub.init_remote_bridges(
+            molecules,
+            molecules_per_bridge=2,
+            unix_prefix=prefix,
+            save_file=manifest_path,
+        )
+
+        assert [spec.idx for spec in specs] == [0, 1, 2]
+        assert [spec.n_molecules for spec in specs] == [2, 2, 1]
+        assert [spec.group_id for spec in specs] == [
+            f"{prefix}0",
+            f"{prefix}1",
+            f"{prefix}2",
+        ]
+        assert [mol.init_payload["aggregate_group"] for mol in molecules] == [
+            f"{prefix}0",
+            f"{prefix}0",
+            f"{prefix}1",
+            f"{prefix}1",
+            f"{prefix}2",
+        ]
+
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert payload["version"] == 1
+        assert payload["hub_host"] == "127.0.0.1"
+        assert payload["hub_port"] == upstream_port
+        assert payload["unix_prefix"] == prefix
+        assert payload["molecules_per_bridge"] == 2
+        assert payload["bridges"] == [spec.to_dict() for spec in specs]
+    finally:
+        try:
+            hub.stop()
+        except Exception:
+            pass
+
+
+@pytest.mark.core
+def test_run_bridge_node_from_manifest(tmp_path: Path):
+    """A bridge launched from manifest info should behave like a normal bridge."""
+
+    upstream_port = _pick_free_port()
+    hub = AggregatedSocketHub(
+        host="127.0.0.1",
+        port=upstream_port,
+        timeout=10.0,
+        latency=1e-4,
+    )
+    prefix = f"bridge_{time.time_ns()}_"
+    manifest_path = tmp_path / "aggregation.json"
+    molecules = [
+        SimpleNamespace(hub=hub, init_payload={"dt_au": 0.25}) for _ in range(2)
+    ]
+    specs = hub.init_remote_bridges(
+        molecules,
+        molecules_per_bridge=2,
+        unix_prefix=prefix,
+        save_file=manifest_path,
+    )
+    bridge_thread = threading.Thread(
+        target=run_bridge_node,
+        kwargs={"info": str(manifest_path), "idx": 0},
+        daemon=True,
+    )
+    bridge_thread.start()
+    socket_path = _wait_for_unixsocket(specs[0].unixsocket, timeout=5.0)
+    driver_threads = [
+        _start_driver_thread(unix=True, address=specs[0].unixsocket),
+        _start_driver_thread(unix=True, address=specs[0].unixsocket),
+    ]
+
+    mid0 = hub.register_molecule_return_id()
+    mid1 = hub.register_molecule_return_id()
+    init_payloads = {
+        mid0: dict(molecules[0].init_payload),
+        mid1: dict(molecules[1].init_payload),
+    }
+    requests = {
+        mid0: {
+            "efield_au": np.array([2.0, -1.0, 0.5]),
+            "init": init_payloads[mid0],
+        },
+        mid1: {
+            "efield_au": np.array([-0.25, 3.5, 1.0]),
+            "init": init_payloads[mid1],
+        },
+    }
+
+    try:
+        assert hub.wait_until_bound(init_payloads, require_init=True, timeout=10.0)
+        responses = hub.step_barrier(requests, timeout=10.0)
+        assert set(responses.keys()) == {mid0, mid1}
+        np.testing.assert_allclose(
+            responses[mid0]["amp"],
+            (mid0 + 1.0) * requests[mid0]["efield_au"],
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            responses[mid1]["amp"],
+            (mid1 + 1.0) * requests[mid1]["efield_au"],
+            rtol=0.0,
+            atol=1e-12,
+        )
+    finally:
+        try:
+            hub.stop()
+        except Exception:
+            pass
+        bridge_thread.join(timeout=2.0)
+        for thread in driver_threads:
+            thread.join(timeout=2.0)
+
+    assert not socket_path.exists()
 
 
 @pytest.mark.core

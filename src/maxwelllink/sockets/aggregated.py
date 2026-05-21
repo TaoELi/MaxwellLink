@@ -30,8 +30,10 @@ communication topology:
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Iterable
 import json
+import os
 import socket
 import time
 import threading
@@ -62,6 +64,7 @@ AGGINIT = b"AGGINIT"
 AGGREADY = b"AGGREADY"
 AGGSTEP = b"AGGSTEP"
 AGGRESULT = b"AGGRESULT"
+AGGREGATION_INFO_VERSION = 1
 
 
 def _json_dumps_bytes(payload: Mapping) -> bytes:
@@ -269,6 +272,203 @@ class _AggregateGroupState:
     bridge: Optional[_ClientState] = None
 
 
+@dataclass(frozen=True)
+class RemoteBridgeSpec:
+    """
+    One remote aggregate bridge entry produced by ``init_remote_bridges``.
+
+    Parameters
+    ----------
+    idx : int
+        Zero-based bridge index used by :func:`run_bridge_node`.
+    group_id : str
+        Aggregate group identifier transmitted upstream.
+    unixsocket : str
+        Downstream UNIX-socket address local drivers should connect to.
+    n_molecules : int
+        Number of molecules assigned to this bridge.
+    """
+
+    idx: int
+    group_id: str
+    unixsocket: str
+    n_molecules: int
+
+    def to_dict(self) -> dict:
+        """Return a JSON-serializable bridge specification mapping."""
+
+        return {
+            "idx": int(self.idx),
+            "group_id": str(self.group_id),
+            "unixsocket": str(self.unixsocket),
+            "n_molecules": int(self.n_molecules),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping) -> "RemoteBridgeSpec":
+        """Build one bridge specification from JSON-decoded manifest data."""
+
+        return cls(
+            idx=int(payload["idx"]),
+            group_id=str(payload["group_id"]),
+            unixsocket=str(payload["unixsocket"]),
+            n_molecules=int(payload["n_molecules"]),
+        )
+
+
+def _as_molecule_list(molecules) -> list:
+    """Normalize one molecule or an iterable of molecules into a list."""
+
+    if hasattr(molecules, "init_payload"):
+        return [molecules]
+    if isinstance(molecules, Iterable) and not isinstance(
+        molecules, (str, bytes, bytearray)
+    ):
+        return list(molecules)
+    raise TypeError(
+        "Expected one molecule or an iterable of molecules with 'init_payload'."
+    )
+
+
+def _assign_molecule_to_group(
+    molecule,
+    *,
+    expected_hub: "AggregatedSocketHub",
+    group_id: str,
+) -> None:
+    """Assign one molecule to the given aggregate group in-place."""
+
+    if not hasattr(molecule, "init_payload"):
+        raise TypeError(
+            "Expected a molecule-like object carrying an 'init_payload' attribute."
+        )
+    molecule_hub = getattr(molecule, "hub", expected_hub)
+    if molecule_hub is not expected_hub:
+        raise ValueError(
+            "All molecules assigned to remote aggregate bridges must use the same hub."
+        )
+
+    payload = molecule.init_payload
+    if payload is None:
+        payload = {}
+        molecule.init_payload = payload
+    elif not isinstance(payload, dict):
+        payload = dict(payload)
+        molecule.init_payload = payload
+
+    previous = payload.get("aggregate_group")
+    if previous is not None and str(previous).strip() not in ("", group_id):
+        raise ValueError(
+            f"Molecule is already assigned to aggregate_group {previous!r}, "
+            f"cannot move it to {group_id!r}."
+        )
+    payload["aggregate_group"] = group_id
+
+
+def _load_aggregation_info(info="aggregation.json") -> dict:
+    """Load one JSON aggregation manifest from disk."""
+
+    with open(os.fspath(info), "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError("Aggregation info file must contain a JSON object.")
+    return payload
+
+
+def _coerce_remote_bridge_specs(payload: Mapping) -> list[RemoteBridgeSpec]:
+    """Decode and validate the ``bridges`` section of an aggregation manifest."""
+
+    raw_bridges = payload.get("bridges", [])
+    if not isinstance(raw_bridges, list):
+        raise ValueError("Aggregation info must contain a 'bridges' list.")
+    specs = [RemoteBridgeSpec.from_dict(item) for item in raw_bridges]
+    seen = set()
+    for spec in specs:
+        if spec.idx in seen:
+            raise ValueError(
+                f"Aggregation info contains duplicate bridge idx {spec.idx}."
+            )
+        seen.add(spec.idx)
+    return specs
+
+
+def run_bridge_node(info="aggregation.json", *, idx: int = 0) -> None:
+    """
+    Run one bridge node from a manifest written by ``init_remote_bridges``.
+
+    Parameters
+    ----------
+    info : str or path-like, default: ``"aggregation.json"``
+        JSON manifest written by :meth:`AggregatedSocketHub.init_remote_bridges`.
+    idx : int, default: 0
+        Zero-based bridge index identifying which bridge entry in ``info`` this
+        node should start.
+    """
+
+    payload = _load_aggregation_info(info)
+    specs = _coerce_remote_bridge_specs(payload)
+    bridge_idx = int(idx)
+    try:
+        spec = next(spec for spec in specs if spec.idx == bridge_idx)
+    except StopIteration as exc:
+        available = ", ".join(str(spec.idx) for spec in specs) or "<none>"
+        raise IndexError(
+            f"Bridge idx {bridge_idx} not found in aggregation info. "
+            f"Available bridge indices: {available}."
+        ) from exc
+
+    bridge = LocalSocketHubBridge(
+        group_id=spec.group_id,
+        upstream_host=str(payload["hub_host"]),
+        upstream_port=int(payload["hub_port"]),
+        timeout=float(payload.get("timeout", 60.0)),
+        latency=float(payload.get("latency", 0.01)),
+        local_unixsocket=spec.unixsocket,
+    )
+    thread = bridge.start()
+
+    try:
+        while thread.is_alive():
+            thread.join(timeout=1.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            bridge.stop(wait=max(2.0, 10.0 * bridge.latency))
+        except Exception:
+            pass
+
+
+def mxl_bridge_main(argv: list[str] | None = None) -> int:
+    """
+    CLI entry point for running one aggregate bridge from a manifest.
+
+    Examples
+    --------
+    ``mxl_bridge --info aggregation.json --idx 0``
+    """
+
+    parser = argparse.ArgumentParser(
+        description="Run one MaxwellLink aggregate bridge node."
+    )
+    parser.add_argument(
+        "--info",
+        type=str,
+        default="aggregation.json",
+        help="Path to the aggregation manifest written by init_remote_bridges().",
+    )
+    parser.add_argument(
+        "--idx",
+        type=int,
+        default=0,
+        help="Zero-based bridge index within the aggregation manifest.",
+    )
+    args = parser.parse_args(argv)
+
+    run_bridge_node(info=args.info, idx=args.idx)
+    return 0
+
+
 class AggregatedBridge:
     """
     Convenience handle for one hub-owned local bridge.
@@ -328,43 +528,14 @@ class AggregatedBridge:
         objects without changing solver-side logic.
         """
 
-        if hasattr(molecules, "init_payload"):
-            items = [molecules]
-        elif isinstance(molecules, Iterable) and not isinstance(
-            molecules, (str, bytes, bytearray)
-        ):
-            items = list(molecules)
-        else:
-            raise TypeError(
-                "append(...) expects one molecule or an iterable of molecules."
-            )
+        items = _as_molecule_list(molecules)
 
         for molecule in items:
-            if not hasattr(molecule, "init_payload"):
-                raise TypeError(
-                    "append(...) received an item without an 'init_payload' attribute."
-                )
-            molecule_hub = getattr(molecule, "hub", self.hub)
-            if molecule_hub is not self.hub:
-                raise ValueError(
-                    "All molecules attached to an AggregatedBridge must use the same hub."
-                )
-
-            payload = molecule.init_payload
-            if payload is None:
-                payload = {}
-                molecule.init_payload = payload
-            elif not isinstance(payload, dict):
-                payload = dict(payload)
-                molecule.init_payload = payload
-
-            previous = payload.get("aggregate_group")
-            if previous is not None and str(previous).strip() not in ("", self.group_id):
-                raise ValueError(
-                    f"Molecule is already assigned to aggregate_group {previous!r}, "
-                    f"cannot move it to {self.group_id!r}."
-                )
-            payload["aggregate_group"] = self.group_id
+            _assign_molecule_to_group(
+                molecule,
+                expected_hub=self.hub,
+                group_id=self.group_id,
+            )
 
     def start(self) -> threading.Thread:
         """Start the underlying local bridge thread."""
@@ -413,6 +584,8 @@ class AggregatedSocketHub(SocketHub):
         self._bridge_connect_port = int(port or 31415)
         self._owned_bridges: list[AggregatedBridge] = []
         self._bridge_counter = 0
+        self.remote_bridges: list[RemoteBridgeSpec] = []
+        self.remote_bridge_info: Optional[dict] = None
 
     def add_bridge(self, local_unixsocket: str) -> AggregatedBridge:
         """
@@ -453,6 +626,94 @@ class AggregatedSocketHub(SocketHub):
         if handle.unixsocket_path and handle.unixsocket_path != handle.address:
             self._log(f"UNIX PATH: {handle.unixsocket_path}")
         return handle
+
+    def init_remote_bridges(
+        self,
+        molecules,
+        *,
+        molecules_per_bridge: int,
+        unix_prefix: str = "bridge_",
+        save_file: str = "aggregation.json",
+    ) -> list[RemoteBridgeSpec]:
+        """
+        Partition molecules across remote bridge groups and save a manifest.
+
+        This helper does not start any bridge threads locally. Instead it
+        assigns ``molecule.init_payload["aggregate_group"]`` for each molecule
+        and writes one JSON manifest that bridge-node scripts can consume via
+        :func:`run_bridge_node`.
+
+        Parameters
+        ----------
+        molecules : molecule or iterable of molecules
+            Molecules to distribute across remote bridges.
+        molecules_per_bridge : int
+            Maximum number of molecules assigned to one bridge.
+        unix_prefix : str, default: ``"bridge_"``
+            Prefix used to generate downstream UNIX socket names
+            ``f"{unix_prefix}{idx}"``.
+        save_file : str, default: ``"aggregation.json"``
+            Path where the bridge manifest should be written.
+
+        Returns
+        -------
+        list[RemoteBridgeSpec]
+            The generated bridge specifications in order.
+        """
+
+        items = _as_molecule_list(molecules)
+        if not items:
+            raise ValueError("init_remote_bridges(...) requires at least one molecule.")
+        molecules_per_group = int(molecules_per_bridge)
+        if molecules_per_group <= 0:
+            raise ValueError("molecules_per_bridge must be a positive integer.")
+
+        prefix = str(unix_prefix)
+        specs: list[RemoteBridgeSpec] = []
+        for start in range(0, len(items), molecules_per_group):
+            idx = len(specs)
+            group_items = items[start : start + molecules_per_group]
+            unixsocket = f"{prefix}{idx}"
+            group_id = unixsocket
+            for molecule in group_items:
+                _assign_molecule_to_group(
+                    molecule,
+                    expected_hub=self,
+                    group_id=group_id,
+                )
+            specs.append(
+                RemoteBridgeSpec(
+                    idx=idx,
+                    group_id=group_id,
+                    unixsocket=unixsocket,
+                    n_molecules=len(group_items),
+                )
+            )
+
+        payload = {
+            "version": AGGREGATION_INFO_VERSION,
+            "hub_host": self._bridge_connect_host,
+            "hub_port": self._bridge_connect_port,
+            "timeout": float(self.timeout),
+            "latency": float(self.latency),
+            "unix_prefix": prefix,
+            "molecules_per_bridge": molecules_per_group,
+            "bridges": [spec.to_dict() for spec in specs],
+        }
+        with open(os.fspath(save_file), "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+        self.remote_bridges = list(specs)
+        self.remote_bridge_info = payload
+        self._log(
+            f"Prepared {len(specs)} remote aggregate bridge(s); manifest saved to {save_file!r}."
+        )
+        for spec in specs:
+            self._log(
+                f"REMOTE BRIDGE {spec.idx}: unix={spec.unixsocket!r} "
+                f"group={spec.group_id!r} molecules={spec.n_molecules}"
+            )
+        return specs
 
     def _extract_group_id(self, init_payload: Mapping, molecule_id: int) -> str:
         """Return the aggregate group for one molecule."""
@@ -1074,4 +1335,7 @@ __all__ = [
     "AggregatedBridge",
     "AggregatedSocketHub",
     "LocalSocketHubBridge",
+    "RemoteBridgeSpec",
+    "mxl_bridge_main",
+    "run_bridge_node",
 ]
