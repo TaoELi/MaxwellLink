@@ -137,7 +137,7 @@ class FabryPerotCavity:
         delta_omega_y_au: float = None,
         n_mode_x: int = 1,
         n_mode_y: int = 1,
-        abc_cutoff: Optional[list] = None,
+        abc_cutoff: Optional[list] | float = [0.0, 0.0],
     ):
         r"""
         Parameters
@@ -168,8 +168,8 @@ class FabryPerotCavity:
             Number of cavity modes along x-axis.
         n_mode_y : int, default: 1
             Number of cavity modes along y-axis.
-        abc_cutoff : list, optional
-            Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If None, no absorbing boundary condition is applied. If a list is provided, it should contain two values representing the cutoff distances for x and y axes respectively.
+        abc_cutoff : list or float, optional
+            Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If None, no absorbing boundary condition is applied. If a list is provided, it should contain two values representing the cutoff distances for x and y axes respectively. If a single float value is provided, it will be applied to both axes.
         """
         if frequency_au is None:
             raise ValueError("frequency_au must be provided.")
@@ -273,9 +273,16 @@ class FabryPerotCavity:
         self.x_grid_1d = x_grid_1d
         self.y_grid_1d = y_grid_1d
         abc_x, abc_y = None, None
-        if len(abc_cutoff) != 2:
-            raise ValueError("abc_cutoff must be a list of two values for x and y axes.")
-        self.abc_cutoff = abc_cutoff
+
+        if isinstance(abc_cutoff, list):
+            if len(abc_cutoff) != 2:
+                raise ValueError("abc_cutoff must be a list of two values for x and y axes.")
+            self.abc_cutoff = abc_cutoff
+        elif isinstance(abc_cutoff, float):
+            self.abc_cutoff = [abc_cutoff, abc_cutoff]
+        else:
+            raise ValueError("abc_cutoff must be either a list of two values or a single float value.")
+
         if self.abc_cutoff :
 
             r01x = self.abc_cutoff[0]
