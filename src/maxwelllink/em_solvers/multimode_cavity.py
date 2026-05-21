@@ -359,9 +359,9 @@ class FabryPerotCavity:
             self.abc_y = abc_y
 
         self.if_abc = (abc_x is not None) and (abc_y is not None)
-        print(
-            f"Applying Absorbing Boundary Condition : {self.if_abc}, cutoff: {self.abc_cutoff}"
-        )
+        print(f"[MultiModeCavity] Applying Absorbing Boundary Condition : {self.if_abc}, cutoff: {self.abc_cutoff}")
+        print(f"[MultiModeCavity] smooth_x: {self.smooth_x}")
+        print(f"[MultiModeCavity] smooth_y: {self.smooth_y}")
 
 
 class MultiModeSimulation(DummyEMSimulation):
