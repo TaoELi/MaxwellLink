@@ -137,7 +137,7 @@ class FabryPerotCavity:
         delta_omega_y_au: float = None,
         n_mode_x: int = 1,
         n_mode_y: int = 1,
-        abc_cutoff: float = 0.0,
+        abc_cutoff: Optional[list] = None,
     ):
         r"""
         Parameters
@@ -168,8 +168,8 @@ class FabryPerotCavity:
             Number of cavity modes along x-axis.
         n_mode_y : int, default: 1
             Number of cavity modes along y-axis.
-        abc_cutoff : float, default: 0.0
-            Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If 0.0, no absorbing boundary condition is applied. If > 0.0, the grid points within the cutoff distance from the boundaries will be smoothly damped to suppress unphysical reflections of the EM field at the boundaries.
+        abc_cutoff : list, optional
+            Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If None, no absorbing boundary condition is applied. If a list is provided, it should contain two values representing the cutoff distances for x and y axes respectively.
         """
         if frequency_au is None:
             raise ValueError("frequency_au must be provided.")
@@ -273,11 +273,15 @@ class FabryPerotCavity:
         self.x_grid_1d = x_grid_1d
         self.y_grid_1d = y_grid_1d
         abc_x, abc_y = None, None
-        self.abc_cutoff = float(abc_cutoff)
-        if self.abc_cutoff != 0.00:
+        if len(abc_cutoff) != 2:
+            raise ValueError("abc_cutoff must be a list of two values for x and y axes.")
+        self.abc_cutoff = abc_cutoff
+        if self.abc_cutoff :
 
-            r01 = self.abc_cutoff
-            r10 = 1 - self.abc_cutoff
+            r01x = self.abc_cutoff[0]
+            r10x = 1 - self.abc_cutoff[0]
+            r01y = self.abc_cutoff[1]
+            r10y = 1 - self.abc_cutoff[1]
 
             def abc(grid_1d, r01=0.05, r10=0.95):
 
@@ -312,8 +316,8 @@ class FabryPerotCavity:
 
                 return S
 
-            self.smooth_x = abc(self.x_grid_1d, r01=r01, r10=r10)
-            self.smooth_y = abc(self.y_grid_1d, r01=r01, r10=r10)
+            self.smooth_x = abc(self.x_grid_1d, r01=r01x, r10=r10x)
+            self.smooth_y = abc(self.y_grid_1d, r01=r01y, r10=r10y)
             self.smooth_x_2d, self.smooth_y_2d = np.meshgrid(
                 self.smooth_x, self.smooth_y
             )
