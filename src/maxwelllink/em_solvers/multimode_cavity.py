@@ -317,18 +317,42 @@ class FabryPerotCavity:
             self.smooth_x_2d, self.smooth_y_2d = np.meshgrid(
                 self.smooth_x, self.smooth_y
             )
-            self.smooth_2d = self.smooth_x_2d * self.smooth_y_2d
-            self.smooth_2d = np.diag(np.reshape(self.smooth_2d, -1))
-            from scipy.linalg import pinv
+            self.smooth_2d = np.reshape(self.smooth_x_2d * self.smooth_y_2d, -1)
 
-            abc_x = (
-                self.ftilde_k[:, :, 0] @ self.smooth_2d @ pinv(self.ftilde_k[:, :, 0])
-            )
-            abc_y = (
-                self.ftilde_k[:, :, 1] @ self.smooth_2d @ pinv(self.ftilde_k[:, :, 1])
-            )
-            self.abc_x = abc_x
-            self.abc_y = abc_y
+            from scipy.linalg import solve, pinv
+
+            try:
+                F_x = self.ftilde_k[:, :, 0]
+                G_x = F_x @ F_x.T
+                B_x = (F_x * self.smooth_2d[None, :]) @ F_x.T
+                eps_x = 1e-8 * max(np.linalg.norm(G_x, ord=2), 1.0)
+                abc_x = solve(
+                    G_x.T + eps_x * np.eye(G_x.shape[0]),
+                    B_x.T,
+                    assume_a="sym",
+                    check_finite=False,
+                ).T
+            except np.linalg.LinAlgError:
+                print("[MultiModeCavity] Warning: F_x @ F_x.T is singular. Falling back to pseudo-inverse solution.")
+                abc_x = self.ftilde_k[:, :, 0] @ self.smooth_2d[None, :] @ pinv(self.ftilde_k[:, :, 0])
+
+            try:
+                F_y = self.ftilde_k[:, :, 1]
+                G_y = F_y @ F_y.T
+                B_y = (F_y * self.smooth_2d[None, :]) @ F_y.T
+                eps_y = 1e-8 * max(np.linalg.norm(G_y, ord=2), 1.0)
+                abc_y = solve(
+                    G_y.T + eps_y * np.eye(G_y.shape[0]),
+                    B_y.T,
+                    assume_a="sym",
+                    check_finite=False,
+                ).T
+            except np.linalg.LinAlgError:
+                print("[MultiModeCavity] Warning: F_y @ F_y.T is singular. Falling back to pseudo-inverse solution.")
+                abc_y = self.ftilde_k[:, :, 1] @ self.smooth_2d[None, :] @ pinv(self.ftilde_k[:, :, 1])
+
+                self.abc_x = abc_x
+                self.abc_y = abc_y
 
         self.if_abc = (abc_x is not None) and (abc_y is not None)
         print(
@@ -678,6 +702,29 @@ class MultiModeSimulation(DummyEMSimulation):
         assert efield_vec.shape == mu.shape
         return efield_vec
 
+    def _calc_photonic_energy(self, pc, qc) -> np.ndarray:
+        """
+        Calculate the energy of the all photonic modes.
+
+        E_k = \sum_{\lambda} 0.5 * p_{k\lambda}^2 + 0.5 * omega_k^2 * q_{k\lambda}^2
+
+        Parameters
+        ----------
+        pc : numpy.ndarray of float, shape (n_mode, 3)
+            Current cavity mode momentum with shape (n_mode,3).
+        qc : numpy.ndarray of float, shape (n_mode, 3)
+            Current cavity mode coordinate with shape (n_mode,3).
+
+        Returns
+        -------
+        photonic_energy : numpy.ndarray of float, shape (n_mode,)
+            Energy of each cavity mode.
+        """
+        kinetic_energy = 0.5 * np.sum(pc**2, axis=1)
+        potential_energy = 0.5 * np.sum((self.omega_k[:, np.newaxis] * qc) ** 2, axis=1)
+        photonic_energy = kinetic_energy + potential_energy
+        return photonic_energy
+
     def _calc_energy(self, pc, qc, mu) -> float:
         """
         Calculate the total energy of the cavity + molecular system.
@@ -993,9 +1040,9 @@ class MultiModeSimulation(DummyEMSimulation):
                             pulse_record_value(self.molecule_pulse)
                         )
                     if "energy" in self.record_list:
-                        self.memmaps["energy"][record_idx, 0] = self._calc_energy(
-                            self.pc, self.qc, self.dipole
-                        )
+                        self.memmaps["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
+                    if "photonic_energy" in self.record_list:
+                        self.memmaps["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc)
                     if "effective_efield" in self.record_list:
                         self.memmaps["effective_efield"][record_idx, :, :] = (
                             self._calc_effective_efield(self.qc, self.dipole)
@@ -1033,9 +1080,9 @@ class MultiModeSimulation(DummyEMSimulation):
                             pulse_record_value(self.molecule_pulse)
                         )
                     if "energy" in self.record_list:
-                        self.h5_file["energy"][record_idx, 0] = self._calc_energy(
-                            self.pc, self.qc, self.dipole
-                        )
+                        self.h5_file["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
+                    if "photonic_energy" in self.record_list:
+                        self.h5_file["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc)
                     if "effective_efield" in self.record_list:
                         self.h5_file["effective_efield"][record_idx, :, :] = (
                             self._calc_effective_efield(self.qc, self.dipole)
@@ -1067,9 +1114,9 @@ class MultiModeSimulation(DummyEMSimulation):
                 if "molecule_pulse" in self.record_list:
                     self.molecule_pulse_history.append(self.molecule_pulse(self.time))
                 if "energy" in self.record_list:
-                    self.energy_history.append(
-                        self._calc_energy(self.pc, self.qc, self.dipole)
-                    )
+                    self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
+                if "photonic_energy" in self.record_list:
+                    self.photonic_energy_history.append(self._calc_photonic_energy(self.pc, self.qc))
                 if "molecule_response" in self.record_list:
                     self.molecule_response_history.append(self.dmudt.copy())
                 if "effective_efield" in self.record_list:
@@ -1143,35 +1190,12 @@ class MultiModeSimulation(DummyEMSimulation):
             self.record_list = []
         else:
             for item in record_list:
-                if item not in [
-                    "all",
-                    "time",
-                    "qc",
-                    "pc",
-                    "photon_drive",
-                    "molecule_pulse",
-                    "energy",
-                    "effective_efield",
-                    "molecule_response",
-                    "molecule_dipole",
-                ]:
-                    raise ValueError(
-                        f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'photon_drive', 'molecule_pulse', 'energy', 'effective_efield', 'molecule_response', 'molecule_dipole'."
-                    )
-
-            if record_list == ["all"]:
-                self.record_list = [
-                    "time",
-                    "qc",
-                    "pc",
-                    "photon_drive",
-                    "molecule_pulse",
-                    "energy",
-                    "effective_efield",
-                    "molecule_response",
-                    "molecule_dipole",
-                ]
-            else:
+                if item not in ["all", "time", "qc", "pc", "photon_drive", "molecule_pulse", "energy", "photonic_energy", "effective_efield", "molecule_response", "molecule_dipole"]:
+                    raise ValueError(f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'photon_drive', 'molecule_pulse', 'energy', 'photonic_energy', 'effective_efield', 'molecule_response', 'molecule_dipole'.")
+            
+            if record_list == ["all"]: 
+                self.record_list = ["time", "qc", "pc", "photon_drive", "molecule_pulse", "energy", "photonic_energy", "effective_efield", "molecule_response", "molecule_dipole"]
+            else : 
                 self.record_list = record_list
 
         if record_max_steps is None:
@@ -1202,11 +1226,11 @@ class MultiModeSimulation(DummyEMSimulation):
                     "pc": self.pc.shape,
                     "photon_drive": photon_drive_dim,
                     "molecule_pulse": molecule_pulse_dim,
-                    "energy": 1,
-                    "effective_efield": self.dmudt.shape,
-                    "molecule_response": self.dmudt.shape,
-                    "molecule_dipole": self.dmudt.shape,
-                }
+                    "energy": 1, 
+                    "photonic_energy": self.pc.shape[0],
+                    "effective_efield": self.dmudt.shape, 
+                    "molecule_response": self.dmudt.shape, 
+                    "molecule_dipole": self.dmudt.shape}
 
                 if self.file_format == "npz":
 
@@ -1269,6 +1293,8 @@ class MultiModeSimulation(DummyEMSimulation):
                     self.molecule_pulse_history = []
                 if "energy" in self.record_list:
                     self.energy_history = []
+                if "photonic_energy" in self.record_list:
+                    self.photonic_energy_history = []
                 if "effective_efield" in self.record_list:
                     self.effective_efield_history = []
                 if "molecule_response" in self.record_list:
