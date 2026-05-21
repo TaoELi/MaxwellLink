@@ -23,10 +23,22 @@ This module implements a lightweight socket protocol inspired by i-PI
 """
 
 from __future__ import annotations
-import socket, struct, json, time, threading, os, selectors
+
+import json
+import os
+import selectors
+import socket
+import struct
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
+
 import numpy as np
+
+# ======================================================================
+# Protocol constants and wire dtypes
+# ======================================================================
 
 _INT32 = struct.Struct("<i")
 _FLOAT64 = struct.Struct("<d")
@@ -61,6 +73,11 @@ class _SocketClosed(OSError):
     """
 
     pass
+
+
+# ======================================================================
+# Low-level wire helpers (headers, ints, arrays, byte strings)
+# ======================================================================
 
 
 def _pad12(msg: bytes) -> bytes:
@@ -125,7 +142,6 @@ def _recvall(sock: socket.socket, n: int) -> bytes:
         If the peer closes the connection before all bytes are received.
     """
 
-    """Read exactly n bytes or raise _SocketClosed."""
     buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
@@ -150,7 +166,6 @@ def _recv_msg(sock: socket.socket) -> bytes:
         The received header without trailing spaces.
     """
 
-    """Receive 12-byte ASCII header."""
     hdr = _recvall(sock, HEADER_LEN)
     return hdr.rstrip()
 
@@ -291,40 +306,9 @@ def _recv_bytes(sock: socket.socket) -> bytes:
     return _recvall(sock, n) if n else b""
 
 
-# -------- compound payloads (i-PI compatible) --------
-
-
-def _send_posdata(
-    sock: socket.socket, cell_3x3_bohr, invcell_3x3_per_bohr, positions_Nx3_bohr
-):
-    """
-    Send a POSDATA/FIELDDATA block: cell, inverse cell, natoms, positions.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    cell_3x3_bohr : array-like, shape (3, 3)
-        Lattice vectors (Bohr).
-    invcell_3x3_per_bohr : array-like, shape (3, 3)
-        Inverse lattice (1/Bohr).
-    positions_Nx3_bohr : array-like, shape (N, 3)
-        Atomic positions (Bohr).
-
-    Notes
-    -----
-    For EM use, this is also used to carry field vectors via the positions payload.
-    """
-
-    assert np.asarray(cell_3x3_bohr).shape == (3, 3)
-    assert np.asarray(invcell_3x3_per_bohr).shape == (3, 3)
-    pos = np.asarray(positions_Nx3_bohr, dtype=DT_FLOAT)
-    assert pos.ndim == 2 and pos.shape[1] == 3
-    _send_msg(sock, POSDATA)
-    _send_array(sock, np.asarray(cell_3x3_bohr, dtype=DT_FLOAT).T, DT_FLOAT)
-    _send_array(sock, np.asarray(invcell_3x3_per_bohr, dtype=DT_FLOAT).T, DT_FLOAT)
-    _send_int(sock, pos.shape[0])
-    _send_array(sock, pos, DT_FLOAT)
+# ======================================================================
+# Compound payload codecs (i-PI compatible)
+# ======================================================================
 
 
 def _recv_posdata(sock: socket.socket):
@@ -387,59 +371,9 @@ def _send_force_ready(
     _send_bytes(sock, more)
 
 
-def _recv_getforce(sock: socket.socket):
-    """
-    Receive a FORCEREADY/SOURCEREADY payload after a GETFORCE/GETSOURCE request.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-
-    Returns
-    -------
-    tuple
-        ``(energy, forces, virial, extra)`` where ``energy`` is a float, ``forces``
-        is an ``(N, 3)`` ndarray, ``virial`` is a ``(3, 3)`` ndarray, and
-        ``extra`` is raw bytes.
-    """
-
-    e = float(_recv_array(sock, (1,), DT_FLOAT)[0])
-    nat = _recv_int(sock)
-    frcs = _recv_array(sock, (nat, 3), DT_FLOAT)
-    vir = _recv_array(sock, (3, 3), DT_FLOAT).T.copy()
-    extra = _recv_bytes(sock)
-    return e, frcs, vir, extra
-
-
-# -------- convenience wrappers for EM (i-PI compatible) --------
-
-
-def _pack_em_fieldata(
-    sock: socket.socket, t_au: float, dt_au: float, efield_au_vec3, meta: dict
-):
-    """
-    Send EM field data encoded as POSDATA with ``natoms=1`` and
-    ``positions = [E_x, E_y, E_z]``.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    t_au : float
-        Current time (a.u.). (Informational; not transmitted in POSDATA.)
-    dt_au : float
-        Time step (a.u.). (Informational; not transmitted in POSDATA.)
-    efield_au_vec3 : array-like, shape (3,)
-        Electric field vector ``[E_x, E_y, E_z]`` in a.u.
-    meta : dict
-        Optional metadata carried alongside in higher-level protocols.
-    """
-
-    I = np.eye(3, dtype=DT_FLOAT)
-    exyz = np.asarray(efield_au_vec3, dtype=DT_FLOAT).reshape(1, 3)
-    _send_posdata(sock, I, I, exyz)
-    # meta/time tags can be sent back in SOURCEREADY's extra blob if needed.
+# ======================================================================
+# EM convenience wrappers (i-PI compatible)
+# ======================================================================
 
 
 def _pack_init(sock: socket.socket, init_dict: dict):
@@ -461,7 +395,9 @@ def _pack_init(sock: socket.socket, init_dict: dict):
     _send_bytes(sock, init_bytes)
 
 
-# --------- precomputed constants for the fast path ---------
+# ======================================================================
+# Fast-path constants and send/recv layout
+# ======================================================================
 
 _FIELDDATA_HDR = _pad12(FIELDDATA)
 _GETSOURCE_HDR = _pad12(GETSOURCE)
@@ -469,41 +405,6 @@ _EYE3_BYTES = bytes(
     memoryview(np.ascontiguousarray(np.eye(3, dtype=DT_FLOAT))).cast("B")
 )
 _NAT1_BYTES = _INT32.pack(1)
-
-
-def _build_step_request(efield_au) -> bytes:
-    """
-    Build a single coalesced request blob that tells a driver to advance one step.
-
-    The blob concatenates a FIELDDATA/POSDATA message carrying the electric
-    field vector followed immediately by a GETSOURCE/GETFORCE request. Sending
-    both headers in one ``sendall`` avoids a round-trip: the driver consumes
-    FIELDDATA, computes, then sees GETSOURCE waiting in its recv buffer and
-    replies with SOURCEREADY without any intervening STATUS handshake.
-
-    Parameters
-    ----------
-    efield_au : array-like, shape (3,)
-        Electric field vector in atomic units.
-
-    Returns
-    -------
-    bytes
-        A single buffer suitable for one ``sock.sendall`` call.
-    """
-
-    vec = np.ascontiguousarray(np.asarray(efield_au, dtype=DT_FLOAT).reshape(3))
-    vec_bytes = bytes(memoryview(vec).cast("B"))
-    return b"".join(
-        (
-            _FIELDDATA_HDR,
-            _EYE3_BYTES,  # cell (identity; unused by EM drivers)
-            _EYE3_BYTES,  # invcell (identity; unused by EM drivers)
-            _NAT1_BYTES,  # nat = 1
-            vec_bytes,  # positions payload = [Ex, Ey, Ez]
-            _GETSOURCE_HDR,
-        )
-    )
 
 
 # --------- fast-path send/recv layout ---------
@@ -546,39 +447,9 @@ _STRUCT_3D = struct.Struct("<3d")
 _STRUCT_I = struct.Struct("<i")
 
 
-@dataclass
-class _ClientState:
-    """
-    Dataclass storing per-client state for the socket hub.
-
-    Attributes
-    ----------
-    sock : socket.socket
-        Connected client socket.
-    address : str
-        Peer address string.
-    molecule_id : int
-        Bound molecule identifier (``-1`` if unbound).
-    last_amp : numpy.ndarray or None
-        Last source amplitude vector ``(3,)``.
-    pending_send : bool
-        Whether a field has been dispatched but not yet committed.
-    initialized : bool
-        Whether INIT has been completed.
-    alive : bool
-        Connection liveness flag.
-    extras : dict
-        Arbitrary metadata associated with the client.
-    """
-
-    sock: socket.socket
-    address: str
-    molecule_id: int
-    last_amp: Optional[np.ndarray] = None  # last source amplitude (3,)
-    pending_send: bool = False
-    initialized: bool = False
-    alive: bool = True
-    extras: dict = field(default_factory=dict)
+# ======================================================================
+# Module-level utilities (host/port discovery and MPI helpers)
+# ======================================================================
 
 
 def get_available_host_port(localhost=True, save_to_file=None) -> Tuple[str, int]:
@@ -619,6 +490,22 @@ def get_available_host_port(localhost=True, save_to_file=None) -> Tuple[str, int
     return ip, port
 
 
+def _mpi_comm():
+    """
+    Return ``MPI.COMM_WORLD`` if ``mpi4py`` is importable, otherwise ``None``.
+
+    Centralizes the optional-dependency import so the MPI helpers below can
+    treat "no mpi4py" as a single-process (rank 0) world.
+    """
+
+    try:
+        from mpi4py import MPI
+
+        return MPI.COMM_WORLD
+    except Exception:
+        return None
+
+
 # helper function to determine whether this processor is the MPI master using mpi4py
 def am_master():
     """
@@ -630,15 +517,9 @@ def am_master():
     returns ``True`` by treating the single process as rank 0.
     """
 
-    try:
-        from mpi4py import MPI as _MPI
-
-        _COMM = _MPI.COMM_WORLD
-        _RANK = _COMM.Get_rank()
-    except Exception:
-        _COMM = None
-        _RANK = 0
-    return _RANK == 0
+    comm = _mpi_comm()
+    rank = comm.Get_rank() if comm is not None else 0
+    return rank == 0
 
 
 # helper function to broadcast a value from master to all MPI ranks
@@ -657,16 +538,50 @@ def mpi_bcast_from_master(value):
         The broadcast value (unchanged when MPI is unavailable).
     """
 
-    try:
-        from mpi4py import MPI as _MPI
-
-        _COMM = _MPI.COMM_WORLD
-    except Exception:
-        _COMM = None
-
-    if _COMM is not None:
-        value = _COMM.bcast(value, root=0)
+    comm = _mpi_comm()
+    if comm is not None:
+        value = comm.bcast(value, root=0)
     return value
+
+
+# ======================================================================
+# Per-client state and the socket hub
+# ======================================================================
+
+
+@dataclass
+class _ClientState:
+    """
+    Dataclass storing per-client state for the socket hub.
+
+    Attributes
+    ----------
+    sock : socket.socket
+        Connected client socket.
+    address : str
+        Peer address string.
+    molecule_id : int
+        Bound molecule identifier (``-1`` if unbound).
+    last_amp : numpy.ndarray or None
+        Last source amplitude vector ``(3,)``.
+    pending_send : bool
+        Whether a field has been dispatched but not yet committed.
+    initialized : bool
+        Whether INIT has been completed.
+    alive : bool
+        Connection liveness flag.
+    extras : dict
+        Arbitrary metadata associated with the client.
+    """
+
+    sock: socket.socket
+    address: str
+    molecule_id: int
+    last_amp: Optional[np.ndarray] = None  # last source amplitude (3,)
+    pending_send: bool = False
+    initialized: bool = False
+    alive: bool = True
+    extras: dict = field(default_factory=dict)
 
 
 class SocketHub:
@@ -686,7 +601,7 @@ class SocketHub:
         host: Optional[str] = None,
         port: Optional[int] = 31415,
         unixsocket: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: float = 60000.0,
         latency: float = 0.01,
     ):
         """
@@ -701,7 +616,7 @@ class SocketHub:
         unixsocket : str or None, default: None
             Path (or name under ``/tmp/socketmxl_*``) for a UNIX domain socket. When
             provided, ``host`` and ``port`` are ignored.
-        timeout : float, default: 60.0
+        timeout : float, default: 60000.0
             Socket timeout (seconds) for client operations.
         latency : float, default: 0.01
             Polling sleep (seconds) between hub sweeps; can be very small for local runs.
@@ -880,23 +795,35 @@ class SocketHub:
         except (KeyError, ValueError, OSError):
             pass
 
-    def _mark_dead(self, st: _ClientState, molid: Optional[int], reason: str) -> None:
+    def _mark_dead(
+        self,
+        st: _ClientState,
+        molid: Optional[int] = None,
+        reason: Optional[str] = None,
+    ) -> bool:
         """
         Mark a client dead, unregister it from the selector, and clear binding.
 
-        This centralizes the bookkeeping that used to be duplicated across
-        every ``except`` arm of the old STATUS-based sweep. It is safe to call
-        from any phase and takes ``self._lock`` only briefly for the ``bound``
-        mutation so blocking I/O never runs while the lock is held.
+        This centralizes the bookkeeping that used to be duplicated across the
+        STATUS-based sweep and the shutdown paths. It is safe to call from any
+        phase and takes ``self._lock`` only briefly for the ``bound`` mutation
+        so blocking I/O never runs while the lock is held.
 
         Parameters
         ----------
         st : _ClientState
             The client whose socket failed.
-        molid : int or None
-            The molecule id the client was bound to (or ``None`` if unknown).
-        reason : str
-            Short tag used in the disconnect log line (e.g. ``"send"``, ``"recv"``).
+        molid : int or None, optional
+            The molecule id the client was bound to. Falls back to
+            ``st.molecule_id`` when ``None``.
+        reason : str or None, optional
+            Short tag for the disconnect log line (e.g. ``"send"``, ``"recv"``).
+            When ``None`` the bare ``DISCONNECTED: ...`` form is logged.
+
+        Returns
+        -------
+        bool
+            ``True`` if a bound molecule was actually released, else ``False``.
         """
 
         st.alive = False
@@ -906,8 +833,11 @@ class SocketHub:
         if molid is not None and molid >= 0:
             with self._lock:
                 if self.bound.get(molid) is st:
-                    self._log(f"DISCONNECTED ({reason}): mol {molid} from {st.address}")
+                    tag = f" ({reason})" if reason else ""
+                    self._log(f"DISCONNECTED{tag}: mol {molid} from {st.address}")
                     self.bound[molid] = None
+                    return True
+        return False
 
     def _dispatch_field(
         self, st: _ClientState, blob: "bytes | bytearray | memoryview", meta: dict
@@ -1004,46 +934,6 @@ class SocketHub:
         st.last_amp = amp
         st.pending_send = False
         return amp, extra
-
-    def _query_result(self, st: _ClientState) -> Tuple[np.ndarray, bytes]:
-        """
-        Request a client's source amplitude and read the READY payload.
-
-        Parameters
-        ----------
-        st : _ClientState
-            Client state to query.
-
-        Returns
-        -------
-        tuple
-            ``(amp_vec3, extra_bytes)`` where ``amp_vec3`` is a ``(3,)`` ndarray and
-            ``extra_bytes`` carries auxiliary data.
-
-        Raises
-        ------
-        _SocketClosed or OSError
-            If the client disconnects during the exchange.
-        """
-
-        try:
-            _send_msg(st.sock, GETSOURCE)
-            msg = _recv_msg(st.sock)
-            if msg != SOURCEREADY:
-                raise _SocketClosed(f"Expected {SOURCEREADY!r}, got {msg!r}")
-            e, forces, vir, extra = _recv_getforce(st.sock)
-            amp = np.array(forces[0], dtype=float)  # (3,)
-            st.last_amp = amp
-            st.pending_send = False
-            return amp, extra
-        except (socket.timeout, _SocketClosed, OSError):
-            st.alive = False
-            if st.molecule_id >= 0 and self.bound.get(st.molecule_id) is st:
-                self._log(
-                    f"DISCONNECTED (recv): mol {st.molecule_id} from {st.address}"
-                )
-                self.bound[st.molecule_id] = None
-            raise
 
     def _progress_binds_locked(self, init_payloads: Dict[int, dict]) -> None:
         """
@@ -1471,13 +1361,7 @@ class SocketHub:
                 try:
                     _send_msg(st.sock, STOP)
                 except Exception:
-                    st.alive = False
-                    self._unregister_sock(st.sock)
-                    if st.molecule_id >= 0 and self.bound.get(st.molecule_id) is st:
-                        self._log(
-                            f"DISCONNECTED: mol {st.molecule_id} from {st.address}"
-                        )
-                        self.bound[st.molecule_id] = None
+                    if self._mark_dead(st):
                         self._pause()
 
         deadline = time.time() + float(wait)
@@ -1493,16 +1377,7 @@ class SocketHub:
                         msg = _recv_msg(st.sock)
                         if msg == BYE:
                             # Clean close on our side
-                            st.alive = False
-                            self._unregister_sock(st.sock)
-                            if (
-                                st.molecule_id >= 0
-                                and self.bound.get(st.molecule_id) is st
-                            ):
-                                self._log(
-                                    f"DISCONNECTED: mol {st.molecule_id} from {st.address}"
-                                )
-                                self.bound[st.molecule_id] = None
+                            self._mark_dead(st)
                             try:
                                 st.sock.shutdown(socket.SHUT_RDWR)
                             except Exception:
