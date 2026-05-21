@@ -780,7 +780,7 @@ class AggregatedSocketHub(SocketHub):
         self,
         host: Optional[str] = None,
         port: Optional[int] = 31415,
-        timeout: float = 60.0,
+        timeout: float = 60000.0,
         latency: float = 0.01,
     ):
         super().__init__(
