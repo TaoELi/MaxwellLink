@@ -270,8 +270,6 @@ class FabryPerotCavity:
         self.ftilde_k = ftilde_k
         self.varepsilon_k = self.coupling_strength * self.omega_k / np.min(self.omega_k)
 
-        self.x_grid_1d = x_grid_1d
-        self.y_grid_1d = y_grid_1d
         abc_x, abc_y = None, None
 
         if isinstance(abc_cutoff, list):
@@ -323,52 +321,36 @@ class FabryPerotCavity:
 
                 return S
 
-            self.smooth_x = abc(self.x_grid_1d, r01=r01x, r10=r10x)
-            self.smooth_y = abc(self.y_grid_1d, r01=r01y, r10=r10y)
-            self.smooth_x_2d, self.smooth_y_2d = np.meshgrid(
-                self.smooth_x, self.smooth_y
+            smooth_x = abc(x_grid_1d, r01=r01x, r10=r10x)
+            smooth_y = abc(y_grid_1d, r01=r01y, r10=r10y)
+            print(f"[MultiModeCavity] smooth_x: \n {smooth_x}")
+            print(f"[MultiModeCavity] smooth_y: \n {smooth_y}")
+
+            from scipy.linalg import pinv
+
+            Cx = np.cos(np.outer(kx_grid_1d, x_grid_1d))
+            Sy = np.sin(np.outer(ky_grid_1d, y_grid_1d))
+            Sx = np.sin(np.outer(kx_grid_1d, x_grid_1d))
+            Cy = np.cos(np.outer(ky_grid_1d, y_grid_1d))
+
+            def project_smooth(basis, smooth):
+                return (basis * smooth[None, :]) @ pinv(basis)
+            
+            abc_x = np.kron(
+                project_smooth(Sy, smooth_y),
+                project_smooth(Cx, smooth_x),
             )
-            self.smooth_2d = np.reshape(self.smooth_x_2d * self.smooth_y_2d, -1)
 
-            from scipy.linalg import solve, pinv
-
-            try:
-                F_x = self.ftilde_k[:, :, 0]
-                G_x = F_x @ F_x.T
-                B_x = (F_x * self.smooth_2d[None, :]) @ F_x.T
-                eps_x = 1e-8 * max(np.linalg.norm(G_x, ord=2), 1.0)
-                abc_x = solve(
-                    G_x.T + eps_x * np.eye(G_x.shape[0]),
-                    B_x.T,
-                    assume_a="sym",
-                    check_finite=False,
-                ).T
-            except np.linalg.LinAlgError:
-                print("[MultiModeCavity] Warning: F_x @ F_x.T is singular. Falling back to pseudo-inverse solution.")
-                abc_x = self.ftilde_k[:, :, 0] @ self.smooth_2d[None, :] @ pinv(self.ftilde_k[:, :, 0])
-
-            try:
-                F_y = self.ftilde_k[:, :, 1]
-                G_y = F_y @ F_y.T
-                B_y = (F_y * self.smooth_2d[None, :]) @ F_y.T
-                eps_y = 1e-8 * max(np.linalg.norm(G_y, ord=2), 1.0)
-                abc_y = solve(
-                    G_y.T + eps_y * np.eye(G_y.shape[0]),
-                    B_y.T,
-                    assume_a="sym",
-                    check_finite=False,
-                ).T
-            except np.linalg.LinAlgError:
-                print("[MultiModeCavity] Warning: F_y @ F_y.T is singular. Falling back to pseudo-inverse solution.")
-                abc_y = self.ftilde_k[:, :, 1] @ self.smooth_2d[None, :] @ pinv(self.ftilde_k[:, :, 1])
+            abc_y = np.kron(
+                project_smooth(Cy, smooth_y),
+                project_smooth(Sx, smooth_x),
+            )
 
             self.abc_x = abc_x
             self.abc_y = abc_y
 
         self.if_abc = (abc_x is not None) and (abc_y is not None)
         print(f"[MultiModeCavity] Applying Absorbing Boundary Condition : {self.if_abc}, cutoff: {self.abc_cutoff}")
-        print(f"[MultiModeCavity] smooth_x: \n {self.smooth_x}")
-        print(f"[MultiModeCavity] smooth_y: \n {self.smooth_y}")
 
 
 class MultiModeSimulation(DummyEMSimulation):
