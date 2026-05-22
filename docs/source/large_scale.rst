@@ -187,6 +187,7 @@ array gives one node (and one bridge ``idx``) per array task:
    #SBATCH --array=0-9            # 10 bridges -> 10 nodes
    #SBATCH --nodes=1
    #SBATCH --ntasks-per-node=1
+   #SBATCH --cpus-per-task=8  # adjust as needed for the bridge's CPU requirements
 
    IDX=$SLURM_ARRAY_TASK_ID
 
