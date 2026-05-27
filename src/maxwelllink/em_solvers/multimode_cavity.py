@@ -138,6 +138,7 @@ class FabryPerotCavity:
         n_mode_x: int = 1,
         n_mode_y: int = 1,
         abc_cutoff: Optional[list] | float = [0.0, 0.0],
+        save_mode_functions: bool = False,
     ):
         r"""
         Parameters
@@ -170,6 +171,8 @@ class FabryPerotCavity:
             Number of cavity modes along y-axis.
         abc_cutoff : list or float, optional
             Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If None, no absorbing boundary condition is applied. If a list is provided, it should contain two values representing the cutoff distances for x and y axes respectively. If a single float value is provided, it will be applied to both axes.
+        save_mode_functions : bool, default: False
+            Whether to save the cavity mode functions evaluated at the molecular grid points. Setting this to True can consume more memory but may speed up the simulation if the mode functions are needed multiple times.
         """
         if frequency_au is None:
             raise ValueError("frequency_au must be provided.")
@@ -229,12 +232,15 @@ class FabryPerotCavity:
             y_grid_1d = np.array(y_grid_1d, dtype=float)
         else:
             raise ValueError("Either n_grid_y or y_grid_1d must be provided.")
+        
+        self.n_grid_x = len(x_grid_1d)
+        self.n_grid_y = len(y_grid_1d)
+        self.n_grid = self.n_grid_x * self.n_grid_y
 
         # generate 2D grid points of molecular bath coords in units of Lx, Ly
         x_grid_2d, y_grid_2d = np.meshgrid(x_grid_1d, y_grid_1d)
         x_grid_2d = np.reshape(x_grid_2d, -1)
         y_grid_2d = np.reshape(y_grid_2d, -1)
-        self.n_grid = np.size(x_grid_2d)
         self.grid_xy = np.column_stack((x_grid_2d, y_grid_2d))
 
         # generate 2D grid points of kx, ky in units of 1/Lx, 1/Ly
@@ -261,14 +267,25 @@ class FabryPerotCavity:
 
         # construct renormalized cavity mode function for each molecular grid point
         self.n_mode = n_mode_x * n_mode_y
-        ftilde_k = np.zeros((self.n_mode, self.n_grid, 3), dtype=float)
-        for i in range(self.n_grid):
-            x, y = x_grid_2d[i], y_grid_2d[i]
-            ftilde_k[:, i, 0] = 2.0 * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y)
-            ftilde_k[:, i, 1] = 2.0 * np.sin(kx_grid_2d * x) * np.cos(ky_grid_2d * y)
 
-        self.ftilde_k = ftilde_k
+        if save_mode_functions:
+            ftilde_k = np.zeros((self.n_mode, self.n_grid, 3), dtype=float)
+            for i in range(self.n_grid):
+                x, y = x_grid_2d[i], y_grid_2d[i]
+                ftilde_k[:, i, 0] = 2.0 * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y)
+                ftilde_k[:, i, 1] = 2.0 * np.sin(kx_grid_2d * x) * np.cos(ky_grid_2d * y)
+            self.ftilde_k = ftilde_k
+
+        self.Cx = np.cos(np.outer(kx_grid_1d, x_grid_1d))  # (n_mode_x, n_grid_x)
+        self.Sy = np.sin(np.outer(ky_grid_1d, y_grid_1d))  # (n_mode_y, n_grid_y)
+        self.Sx = np.sin(np.outer(kx_grid_1d, x_grid_1d))  # (n_mode_x, n_grid_x)
+        self.Cy = np.cos(np.outer(ky_grid_1d, y_grid_1d))  # (n_mode_y, n_grid_y)
+        self.mode_prefactor = 2.0
+
         self.varepsilon_k = self.coupling_strength * self.omega_k / np.min(self.omega_k)
+
+        self.omega_k2 = self.omega_k**2
+        self.dse_coeff = self.varepsilon_k**2 / self.omega_k2
 
         if isinstance(abc_cutoff, list):
             if len(abc_cutoff) != 2:
@@ -331,31 +348,26 @@ class FabryPerotCavity:
 
             from scipy.linalg import pinv
 
-            Cx = np.cos(np.outer(kx_grid_1d, x_grid_1d))
-            Sy = np.sin(np.outer(ky_grid_1d, y_grid_1d))
-            Sx = np.sin(np.outer(kx_grid_1d, x_grid_1d))
-            Cy = np.cos(np.outer(ky_grid_1d, y_grid_1d))
-
             def project_smooth(basis, smooth):
                 return (basis * smooth[None, :]) @ pinv(basis)
             '''
             abc_x = np.kron(
-                project_smooth(Sy, smooth_y),
-                project_smooth(Cx, smooth_x),
+                project_smooth(self.Sy, smooth_y),
+                project_smooth(self.Cx, smooth_x),
             )
 
             abc_y = np.kron(
-                project_smooth(Cy, smooth_y),
-                project_smooth(Sx, smooth_x),
+                project_smooth(self.Cy, smooth_y),
+                project_smooth(self.Sx, smooth_x),
             )
 
             self.abc_x = abc_x
             self.abc_y = abc_y
             '''
-            self.abc_x_x = project_smooth(Cx, smooth_x)
-            self.abc_x_y = project_smooth(Sy, smooth_y)
-            self.abc_y_x = project_smooth(Sx, smooth_x)
-            self.abc_y_y = project_smooth(Cy, smooth_y)
+            self.abc_x_x = project_smooth(self.Cx, smooth_x)
+            self.abc_x_y = project_smooth(self.Sy, smooth_y)
+            self.abc_y_x = project_smooth(self.Sx, smooth_x)
+            self.abc_y_y = project_smooth(self.Cy, smooth_y)
 
         print(f"[MultiModeCavity] Applying Absorbing Boundary Condition: {self.apply_abc}, cutoff: {self.abc_cutoff}")
 
@@ -632,6 +644,67 @@ class MultiModeSimulation(DummyEMSimulation):
             responses = self.hub.step_barrier(requests)
         return responses
 
+    def _calc_mu_dot_f_subspace(self, mu: np.ndarray) -> np.ndarray:
+        """
+        Project the molecular dipole from the real-space grid to the mode space.
+
+        This is the separable-basis equivalent of
+        ``np.einsum("ijk,jk->ik", self.ftilde_k, mu)``.  The full mode
+        function is not formed explicitly; instead, the x and y components use
+        the factorized mode functions
+        ``2 cos(kx x) sin(ky y)`` and ``2 sin(kx x) cos(ky y)``.  The reshape
+        order follows the default C-order flattening used after
+        ``np.meshgrid(x_grid_1d, y_grid_1d)`` and
+        ``np.meshgrid(kx_grid_1d, ky_grid_1d)``:
+        ``(n_grid_y, n_grid_x, 3)`` maps to ``(n_mode_y, n_mode_x, 3)``.
+
+        Parameters
+        ----------
+        mu : numpy.ndarray of float, shape (n_grid, 3)
+            Current total molecular dipole vector with shape (n_grid, 3).
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (n_mode, 3)
+            The calculated dot product mu \cdot f_tilde.
+        """
+        mu_dot_f = np.zeros((self.n_mode_y, self.n_mode_x, 3), dtype=mu.dtype)
+        mu_grid = mu.reshape(self.n_grid_y, self.n_grid_x, 3)
+        mu_dot_f[:, :, 0] = self.mode_prefactor * self.Sy @ mu_grid[:, :, 0] @ self.Cx.T
+        mu_dot_f[:, :, 1] = self.mode_prefactor * self.Cy @ mu_grid[:, :, 1] @ self.Sx.T
+        return mu_dot_f.reshape(self.n_mode, 3)
+
+    def _calc_efield_subspace(self, varepsilon_dot_qc: np.ndarray) -> np.ndarray:
+        """
+        Project weighted cavity-mode coordinates back to the real-space grid.
+
+        This is the separable-basis equivalent of
+        ``np.einsum("ijk,ik,k->jk", self.ftilde_k, varepsilon_dot_qc,
+        self.axis, optimize=True)``.  It applies the transpose projection of
+        :meth:`_calc_mu_dot_f_subspace`: mode-space arrays are reshaped as
+        ``(n_mode_y, n_mode_x, 3)`` and mapped back to
+        ``(n_grid_y, n_grid_x, 3)``.  Only enabled polarization components in
+        ``self.axis`` are evaluated.
+
+        Parameters
+        ----------
+        varepsilon_dot_qc : numpy.ndarray of float, shape (n_mode, 3)
+            Mode-space field amplitudes after multiplying by the effective
+            light-matter coupling and any dipole self-energy correction.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (n_grid, 3)
+            Effective electric field on the molecular real-space grid.
+        """
+        v_mode = varepsilon_dot_qc.reshape(self.n_mode_y, self.n_mode_x, 3)
+        efield = np.zeros((self.n_grid_y, self.n_grid_x, 3), dtype=varepsilon_dot_qc.dtype)
+        if self.axis[0]: 
+            efield[:, :, 0] = self.mode_prefactor * self.Sy.T @ v_mode[:, :, 0] @ self.Cx
+        if self.axis[1]: 
+            efield[:, :, 1] = self.mode_prefactor * self.Cy.T @ v_mode[:, :, 1] @ self.Sx
+        return efield.reshape(self.n_grid, 3)
+
     def _calc_acceleration(
         self, time: float, mu: np.ndarray, qc: np.ndarray
     ) -> np.ndarray:
@@ -652,10 +725,9 @@ class MultiModeSimulation(DummyEMSimulation):
         float
             The calculated acceleration.
         """
-        mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
-        acceleration = -np.einsum("i,ik->ik", self.varepsilon_k, mu_dot_f) - np.einsum(
-            "i,ik->ik", self.omega_k**2, qc
-        )
+        #mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
+        mu_dot_f = self._calc_mu_dot_f_subspace(mu)
+        acceleration = - self.varepsilon_k[:, None] * mu_dot_f - self.omega_k2[:, None] * qc
         if self.excited_mode_list:
             acceleration[self.excited_mode_list, :] += self._eval_pulse_field(
                 pulse=self.photon_drive,
@@ -665,7 +737,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 time=time,
             )
         # print("In Function, Cavity acceleration:", acceleration)
-        acceleration = np.einsum("ik, k->ik", acceleration, self.axis)
+        acceleration *= self.axis
         return acceleration
 
     def _calc_effective_efield(self, qc: np.ndarray, mu: np.ndarray) -> np.ndarray:
@@ -684,21 +756,15 @@ class MultiModeSimulation(DummyEMSimulation):
         numpy.ndarray of float, shape (n_grid, 3)
             Effective electric field vector in atomic units.
         """
-        varepsilon_dot_qc = -np.einsum("i,ij->ij", self.varepsilon_k, qc)
+        varepsilon_dot_qc = -self.varepsilon_k[:, None] * qc
 
         # add dipole self-energy term for the electric field if enabled
         if self.include_dse:
-            mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
-            varepsilon_dot_qc -= np.einsum(
-                "i,ik,i->ik",
-                self.varepsilon_k**2,
-                mu_dot_f,
-                1.0 / (self.omega_k**2),
-                optimize=True,
-            )
-        efield_vec = np.einsum(
-            "ijk,ik,k->jk", self.ftilde_k, varepsilon_dot_qc, self.axis, optimize=True
-        )
+            #mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
+            mu_dot_f = self._calc_mu_dot_f_subspace(mu)
+            varepsilon_dot_qc -= self.dse_coeff[:, None] * mu_dot_f
+        #efield_vec = np.einsum("ijk,ik,k->jk", self.ftilde_k, varepsilon_dot_qc, self.axis, optimize=True)
+        efield_vec = self._calc_efield_subspace(varepsilon_dot_qc)
         assert efield_vec.shape == mu.shape
         return efield_vec
 
@@ -721,7 +787,7 @@ class MultiModeSimulation(DummyEMSimulation):
             Energy of each cavity mode.
         """
         kinetic_energy = 0.5 * np.sum(pc**2, axis=1)
-        potential_energy = 0.5 * np.sum((self.omega_k[:, np.newaxis] * qc) ** 2, axis=1)
+        potential_energy = 0.5 * np.sum(self.omega_k2[:, None] * qc**2, axis=1)
         photonic_energy = kinetic_energy + potential_energy
         return photonic_energy
 
@@ -744,14 +810,15 @@ class MultiModeSimulation(DummyEMSimulation):
             Total energy of the cavity + molecular system.
         """
         kinetic_energy = 0.5 * pc**2
-        mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
-        potential_energy = 0.5 * np.einsum(
-            "i,ij->ij", self.omega_k**2, qc**2
-        ) + np.einsum("i,ij,ij->ij", self.varepsilon_k, qc, mu_dot_f)
+        #mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
+        mu_dot_f = self._calc_mu_dot_f_subspace(mu)
+        potential_energy = (
+            0.5 * self.omega_k2[:, None] * qc**2
+            + self.varepsilon_k[:, None] * qc * mu_dot_f
+        )
+
         if self.include_dse:
-            potential_energy += 0.5 * np.einsum(
-                "i,ij->ij", self.varepsilon_k**2 / self.omega_k**2, mu_dot_f**2
-            )
+            potential_energy += 0.5 * self.dse_coeff[:, None] * mu_dot_f**2
 
         e_molecule = sum(
             wrapper.additional_data_history[-1]["energy_au"]
@@ -760,7 +827,6 @@ class MultiModeSimulation(DummyEMSimulation):
         total_energy = (
             np.sum((kinetic_energy + potential_energy) * self.axis) + e_molecule
         )
-
         return total_energy
 
     def _calc_dipole_vec(self) -> np.ndarray:
@@ -1142,7 +1208,7 @@ class MultiModeSimulation(DummyEMSimulation):
         if self.gauge == "dipole":
             self._step_dipole_gauge(savedata=savedata, step_idx=step_idx)
         else:
-            raise ValueError("gauge must be either 'dipole' or 'velocity'.")
+            raise ValueError("gauge must be 'dipole'.")
 
     def storage_initialization(
         self,
