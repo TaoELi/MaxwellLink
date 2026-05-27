@@ -270,18 +270,21 @@ class FabryPerotCavity:
         self.ftilde_k = ftilde_k
         self.varepsilon_k = self.coupling_strength * self.omega_k / np.min(self.omega_k)
 
-        abc_x, abc_y = None, None
-
         if isinstance(abc_cutoff, list):
             if len(abc_cutoff) != 2:
                 raise ValueError("abc_cutoff must be a list of two values for x and y axes.")
+            if any(c < 0.0 or c > 0.5 for c in abc_cutoff):
+                raise ValueError("abc_cutoff values must be between 0.0 and 0.5 (in units of cavity length).")
             self.abc_cutoff = abc_cutoff
         elif isinstance(abc_cutoff, float):
+            if abc_cutoff < 0.0 or abc_cutoff > 0.5:
+                raise ValueError("abc_cutoff value must be between 0.0 and 0.5 (in units of cavity length).")
             self.abc_cutoff = [abc_cutoff, abc_cutoff]
         else:
             raise ValueError("abc_cutoff must be either a list of two values or a single float value.")
 
-        if self.abc_cutoff :
+        self.apply_abc = any(c > 0.0 and c < 0.5 for c in self.abc_cutoff)
+        if self.apply_abc:
 
             r01x = self.abc_cutoff[0]
             r10x = 1 - self.abc_cutoff[0]
@@ -335,7 +338,7 @@ class FabryPerotCavity:
 
             def project_smooth(basis, smooth):
                 return (basis * smooth[None, :]) @ pinv(basis)
-            
+            '''
             abc_x = np.kron(
                 project_smooth(Sy, smooth_y),
                 project_smooth(Cx, smooth_x),
@@ -348,9 +351,13 @@ class FabryPerotCavity:
 
             self.abc_x = abc_x
             self.abc_y = abc_y
+            '''
+            self.abc_x_x = project_smooth(Cx, smooth_x)
+            self.abc_x_y = project_smooth(Sy, smooth_y)
+            self.abc_y_x = project_smooth(Sx, smooth_x)
+            self.abc_y_y = project_smooth(Cy, smooth_y)
 
-        self.if_abc = (abc_x is not None) and (abc_y is not None)
-        print(f"[MultiModeCavity] Applying Absorbing Boundary Condition : {self.if_abc}, cutoff: {self.abc_cutoff}")
+        print(f"[MultiModeCavity] Applying Absorbing Boundary Condition: {self.apply_abc}, cutoff: {self.abc_cutoff}")
 
 
 class MultiModeSimulation(DummyEMSimulation):
@@ -986,9 +993,15 @@ class MultiModeSimulation(DummyEMSimulation):
         # 3. update momentum from half step to full step
         # apply absorbing boundary condition to the cavity field if enabled
         self.pc = pc_half + 0.5 * self.dt * acceleration
-        if self.if_abc:
-            self.pc[:, 0] = self.pc[:, 0] @ self.abc_x
-            self.pc[:, 1] = self.pc[:, 1] @ self.abc_y
+        if self.apply_abc:
+            #self.pc[:, 0] = self.pc[:, 0] @ self.abc_x
+            #self.pc[:, 1] = self.pc[:, 1] @ self.abc_y
+            pc_x = self.pc[:, 0].reshape(self.n_mode_y, self.n_mode_x)
+            pc_y = self.pc[:, 1].reshape(self.n_mode_y, self.n_mode_x)
+            pc_x = self.abc_x_y.T @ pc_x @ self.abc_x_x.T
+            pc_y = self.abc_y_y.T @ pc_y @ self.abc_y_x.T
+            self.pc[:, 0] = pc_x.reshape(-1)
+            self.pc[:, 1] = pc_y.reshape(-1)
 
         self.pc *= np.exp(-self.damping * self.dt)
         self.pc = self.thermostat.apply_kick(self.pc)
