@@ -998,8 +998,8 @@ class MultiModeSimulation(DummyEMSimulation):
             #self.pc[:, 1] = self.pc[:, 1] @ self.abc_y
             pc_x = self.pc[:, 0].reshape(self.n_mode_y, self.n_mode_x)
             pc_y = self.pc[:, 1].reshape(self.n_mode_y, self.n_mode_x)
-            pc_x = self.abc_x_y.T @ pc_x @ self.abc_x_x.T
-            pc_y = self.abc_y_y.T @ pc_y @ self.abc_y_x.T
+            pc_x = self.abc_x_y.T @ pc_x @ self.abc_x_x
+            pc_y = self.abc_y_y.T @ pc_y @ self.abc_y_x
             self.pc[:, 0] = pc_x.reshape(-1)
             self.pc[:, 1] = pc_y.reshape(-1)
 
