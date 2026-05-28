@@ -819,7 +819,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
         if self.include_dse:
             potential_energy += 0.5 * self.dse_coeff[:, None] * mu_dot_f**2
-        return kinetic_energy + potential_energy
+        return np.sum(kinetic_energy + potential_energy, axis=1)
 
     def _calc_energy(self, pc, qc, mu) -> float:
         """
