@@ -1114,7 +1114,7 @@ class MultiModeSimulation(DummyEMSimulation):
                     if "energy" in self.record_list:
                         self.memmaps["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
                     if "photonic_energy" in self.record_list:
-                        self.memmaps["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc, self.dipole)
+                        self.memmaps["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc)
                     if "effective_efield" in self.record_list:
                         self.memmaps["effective_efield"][record_idx, :, :] = (
                             self._calc_effective_efield(self.qc, self.dipole)
@@ -1154,7 +1154,7 @@ class MultiModeSimulation(DummyEMSimulation):
                     if "energy" in self.record_list:
                         self.h5_file["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
                     if "photonic_energy" in self.record_list:
-                        self.h5_file["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc, self.dipole)
+                        self.h5_file["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc)
                     if "effective_efield" in self.record_list:
                         self.h5_file["effective_efield"][record_idx, :, :] = (
                             self._calc_effective_efield(self.qc, self.dipole)
@@ -1188,7 +1188,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 if "energy" in self.record_list:
                     self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
                 if "photonic_energy" in self.record_list:
-                    self.photonic_energy_history.append(self._calc_photonic_energy(self.pc, self.qc, self.dipole))
+                    self.photonic_energy_history.append(self._calc_photonic_energy(self.pc, self.qc))
                 if "molecule_response" in self.record_list:
                     self.molecule_response_history.append(self.dmudt.copy())
                 if "effective_efield" in self.record_list:
