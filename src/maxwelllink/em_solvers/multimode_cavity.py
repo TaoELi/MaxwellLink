@@ -768,7 +768,7 @@ class MultiModeSimulation(DummyEMSimulation):
         assert efield_vec.shape == mu.shape
         return efield_vec
 
-    def _calc_photonic_energy_bak(self, pc, qc) -> np.ndarray:
+    def _calc_photonic_energy(self, pc, qc) -> np.ndarray:
         """
         Calculate the energy of the all photonic modes.
 
@@ -790,36 +790,6 @@ class MultiModeSimulation(DummyEMSimulation):
         potential_energy = 0.5 * np.sum(self.omega_k2[:, None] * qc**2, axis=1)
         photonic_energy = kinetic_energy + potential_energy
         return photonic_energy
-    
-    def _calc_photonic_energy(self, pc, qc, mu) -> np.ndarray:
-        """
-        Calculate the total energy of the cavity + molecular system.
-
-        Parameters
-        ----------
-        pc : numpy.ndarray of float, shape (n_mode, 3)
-            Current cavity mode momentum with shape (n_mode,3).
-        qc : numpy.ndarray of float, shape (n_mode, 3)
-            Current cavity mode coordinate with shape (n_mode,3).
-        mu : numpy.ndarray of float, shape (n_grid, 3)
-            Current total molecular dipole along the coupling axis with shape (n_grid,3).
-
-        Returns
-        -------
-        float
-            Total energy of the cavity + molecular system.
-        """
-        kinetic_energy = 0.5 * pc**2
-        #mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
-        mu_dot_f = self._calc_mu_dot_f_subspace(mu)
-        potential_energy = (
-            0.5 * self.omega_k2[:, None] * qc**2
-            + self.varepsilon_k[:, None] * qc * mu_dot_f
-        )
-
-        if self.include_dse:
-            potential_energy += 0.5 * self.dse_coeff[:, None] * mu_dot_f**2
-        return np.sum(kinetic_energy + potential_energy, axis=1)
 
     def _calc_energy(self, pc, qc, mu) -> float:
         """
