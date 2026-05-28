@@ -768,7 +768,7 @@ class MultiModeSimulation(DummyEMSimulation):
         assert efield_vec.shape == mu.shape
         return efield_vec
 
-    def _calc_photonic_energy(self, pc, qc) -> np.ndarray:
+    def _calc_photonic_energy_bak(self, pc, qc) -> np.ndarray:
         """
         Calculate the energy of the all photonic modes.
 
@@ -790,6 +790,36 @@ class MultiModeSimulation(DummyEMSimulation):
         potential_energy = 0.5 * np.sum(self.omega_k2[:, None] * qc**2, axis=1)
         photonic_energy = kinetic_energy + potential_energy
         return photonic_energy
+    
+    def _calc_photonic_energy(self, pc, qc, mu) -> np.ndarray:
+        """
+        Calculate the total energy of the cavity + molecular system.
+
+        Parameters
+        ----------
+        pc : numpy.ndarray of float, shape (n_mode, 3)
+            Current cavity mode momentum with shape (n_mode,3).
+        qc : numpy.ndarray of float, shape (n_mode, 3)
+            Current cavity mode coordinate with shape (n_mode,3).
+        mu : numpy.ndarray of float, shape (n_grid, 3)
+            Current total molecular dipole along the coupling axis with shape (n_grid,3).
+
+        Returns
+        -------
+        float
+            Total energy of the cavity + molecular system.
+        """
+        kinetic_energy = 0.5 * pc**2
+        #mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
+        mu_dot_f = self._calc_mu_dot_f_subspace(mu)
+        potential_energy = (
+            0.5 * self.omega_k2[:, None] * qc**2
+            + self.varepsilon_k[:, None] * qc * mu_dot_f
+        )
+
+        if self.include_dse:
+            potential_energy += 0.5 * self.dse_coeff[:, None] * mu_dot_f**2
+        return kinetic_energy + potential_energy
 
     def _calc_energy(self, pc, qc, mu) -> float:
         """
@@ -1114,7 +1144,7 @@ class MultiModeSimulation(DummyEMSimulation):
                     if "energy" in self.record_list:
                         self.memmaps["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
                     if "photonic_energy" in self.record_list:
-                        self.memmaps["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc)
+                        self.memmaps["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc, self.dipole)
                     if "effective_efield" in self.record_list:
                         self.memmaps["effective_efield"][record_idx, :, :] = (
                             self._calc_effective_efield(self.qc, self.dipole)
@@ -1154,7 +1184,7 @@ class MultiModeSimulation(DummyEMSimulation):
                     if "energy" in self.record_list:
                         self.h5_file["energy"][record_idx, 0] = self._calc_energy(self.pc, self.qc, self.dipole)
                     if "photonic_energy" in self.record_list:
-                        self.h5_file["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc)
+                        self.h5_file["photonic_energy"][record_idx, :] = self._calc_photonic_energy(self.pc, self.qc, self.dipole)
                     if "effective_efield" in self.record_list:
                         self.h5_file["effective_efield"][record_idx, :, :] = (
                             self._calc_effective_efield(self.qc, self.dipole)
@@ -1188,7 +1218,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 if "energy" in self.record_list:
                     self.energy_history.append(self._calc_energy(self.pc, self.qc, self.dipole))
                 if "photonic_energy" in self.record_list:
-                    self.photonic_energy_history.append(self._calc_photonic_energy(self.pc, self.qc))
+                    self.photonic_energy_history.append(self._calc_photonic_energy(self.pc, self.qc, self.dipole))
                 if "molecule_response" in self.record_list:
                     self.molecule_response_history.append(self.dmudt.copy())
                 if "effective_efield" in self.record_list:
