@@ -420,7 +420,7 @@ def k_parallel_pulse(
         axis_index = 0 if axis == "x" else 1
         spatial_phase = k_norm * selected_rel[:, axis_index]
     else:  # axis == "xy"
-        spatial_phase = selected_rel @ k_norm
+        spatial_phase = selected_rel[:,0] * k_norm[0] + selected_rel[:,1] * k_norm[1]
 
     excited_grid_list = selected.astype(int).tolist()
     excited_mode_list: list[int] = []
