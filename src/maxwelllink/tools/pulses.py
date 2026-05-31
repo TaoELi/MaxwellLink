@@ -182,7 +182,7 @@ def cosine_drive(
 def _parse_k_parallel_direction(direction: str) -> tuple[str, float]:
     direction = str(direction).strip().lower()
     if not direction:
-        raise ValueError("direction must be 'x', 'y', '+x', '-x', '+y', or '-y'.")
+        raise ValueError("direction must be 'x', 'y', 'xy', '+x', '-x', '+y', '-y', '+xy', or '-xy'.")
 
     sign = 1.0
     if direction[0] == "+":
@@ -191,9 +191,60 @@ def _parse_k_parallel_direction(direction: str) -> tuple[str, float]:
         sign = -1.0
         direction = direction[1:]
 
-    if direction not in {"x", "y"}:
-        raise ValueError("direction must be 'x', 'y', '+x', '-x', '+y', or '-y'.")
+    if direction not in {"x", "y", "xy"}:
+        raise ValueError("direction must be 'x', 'y', 'xy', '+x', '-x', '+y', '-y', '+xy', or '-xy'.")
     return direction, sign
+
+def _get_k_vector(cavity, k_parallel_au: Union[float, Sequence[float]], direction: str):
+
+    axis, direction_sign = _parse_k_parallel_direction(direction)
+
+    if axis == "x" or axis == "y":
+        delta_name = f"delta_omega_{axis}_au"
+        delta_omega_axis = float(getattr(cavity, delta_name))
+        if isinstance(k_parallel_au, (int, float)):
+            k_parallel = direction_sign * float(k_parallel_au)
+        else :
+            raise ValueError("k_parallel_au must be a scalar when axis is 'x' or 'y'.")
+        if not math.isfinite(k_parallel):
+            raise ValueError("k_parallel_au must be finite.")
+        if delta_omega_axis == 0.0 and k_parallel != 0.0:
+            raise ValueError(
+                f"{delta_name} is zero, so nonzero k_parallel_au is undefined."
+            )
+        k_order = 0.0 if delta_omega_axis == 0.0 else k_parallel / delta_omega_axis
+        if abs(k_order) > cavity.n_mode_x if axis == "x" else cavity.n_mode_y:
+            raise ValueError(
+                f"Absolute k_parallel_au is too large for the cavity mode spacing along {axis}. "
+                f"Maximum allowed is {delta_omega_axis * (cavity.n_mode_x if axis == 'x' else cavity.n_mode_y):.3e}."
+            )
+        
+    elif axis == "xy":
+        delta_omega_x_au = float(getattr(cavity, "delta_omega_x_au"))
+        delta_omega_y_au = float(getattr(cavity, "delta_omega_y_au"))
+        if isinstance(k_parallel_au, list) and len(k_parallel_au) == 2:
+            k_parallel = direction_sign * np.array(k_parallel_au, dtype=float)
+        else :
+            raise ValueError("k_parallel_au must be a length-2 list when axis is 'xy'.")
+        if not np.all(np.isfinite(k_parallel)):
+            raise ValueError("k_parallel_au must be finite.")
+        if delta_omega_x_au == 0.0 and k_parallel[0] != 0.0:
+            raise ValueError("delta_omega_x_au is zero, so nonzero kx is undefined.")
+        if delta_omega_y_au == 0.0 and k_parallel[1] != 0.0:
+            raise ValueError("delta_omega_y_au is zero, so nonzero ky is undefined.")
+        k_order = np.zeros(2, dtype=float)
+        if delta_omega_x_au != 0.0 : k_order[0] = k_parallel[0] / delta_omega_x_au
+        if delta_omega_y_au != 0.0 : k_order[1] = k_parallel[1] / delta_omega_y_au
+        if abs(k_order[0]) > cavity.n_mode_x or abs(k_order[1]) > cavity.n_mode_y:
+            raise ValueError(
+                f"Absolute k_parallel_au is too large for the cavity mode spacing along {axis}. "
+                f"Maximum allowed is ({delta_omega_x_au * cavity.n_mode_x:.3e}, {delta_omega_y_au * cavity.n_mode_y:.3e})."
+            )
+    else:
+        raise ValueError("direction must be 'x', 'y', 'xy', '+x', '-x', '+y', '-y', '+xy', or '-xy'.")
+
+    k_norm = math.pi * k_order
+    return axis, direction_sign, k_parallel, k_order, k_norm
 
 
 def _parse_axis(name: str, value: str) -> str:
@@ -226,7 +277,7 @@ def k_parallel_pulse(
     cavity,
     envelope: Union[Callable[[float], float], float],
     omega_au: float,
-    k_parallel_au: float,
+    k_parallel_au: Union[float, Sequence[float]],
     direction: str = "y",
     center: Sequence[float] = (0.5, 0.5),
     size: Sequence[float] = (0.1, 0.1),
@@ -251,9 +302,22 @@ def k_parallel_pulse(
 
         \omega_k = \sqrt{\omega_c^2 + k_{\parallel,x}^2 + k_{\parallel,y}^2}.
 
-    For ``direction="y"``, ``k_parallel_au`` is mapped to the normalized
-    fractional-coordinate phase by
-    ``ky_norm = pi * k_parallel_au / cavity.delta_omega_y_au``.
+    For ``direction="x"`` or ``"y"``, ``k_parallel_au`` is mapped to the
+    normalized fractional-coordinate phase by
+
+    .. math::
+
+        k_{\mathrm{norm},i} = \pi k_{\parallel,i} / \Delta\omega_i,
+
+    where ``i`` is the selected axis. For ``direction="xy"``,
+    ``k_parallel_au`` must be a length-2 list ``[kx_au, ky_au]`` and the
+    spatial phase is
+
+    .. math::
+
+        \phi(x, y) =
+        \pi k_{x,\mathrm{au}} (x - x_0) / \Delta\omega_x
+        + \pi k_{y,\mathrm{au}} (y - y_0) / \Delta\omega_y.
 
     Parameters
     ----------
@@ -269,10 +333,13 @@ def k_parallel_pulse(
         Carrier angular frequency in atomic units.
     k_parallel_au
         Physical in-plane wave-vector contribution in atomic units, in the
-        same units as ``delta_omega_x_au`` / ``delta_omega_y_au``.
+        same units as ``delta_omega_x_au`` / ``delta_omega_y_au``. For
+        ``direction="x"`` or ``"y"``, this must be a scalar. For
+        ``direction="xy"``, this must be a length-2 list ``[kx_au, ky_au]``.
     direction
-        In-plane propagation direction: ``"x"``, ``"y"``, ``"+x"``, ``"-x"``,
-        ``"+y"``, or ``"-y"``.
+        In-plane propagation direction: ``"x"``, ``"y"``, ``"xy"``, ``"+x"``,
+        ``"-x"``, ``"+y"``, ``"-y"``, ``"+xy"``, or ``"-xy"``. For ``"xy"``,
+        the optional sign is applied to both list components.
     center
         Source center ``(x, y)`` in fractional cavity coordinates.
     size
@@ -314,31 +381,12 @@ def k_parallel_pulse(
     if grid_xy.ndim != 2 or grid_xy.shape[1] != 2:
         raise ValueError("cavity must expose grid_xy with shape (n_grid, 2).")
 
-    axis, direction_sign = _parse_k_parallel_direction(direction)
-    axis_index = 0 if axis == "x" else 1
+    axis, direction_sign, k_parallel, k_order, k_norm = _get_k_vector(cavity, k_parallel_au, direction)
+
     center_pair = _as_pair("center", center)
     size_pair = _as_pair("size", size)
     if size_pair[0] <= 0.0 or size_pair[1] <= 0.0:
         raise ValueError("size values must be positive.")
-
-    delta_name = f"delta_omega_{axis}_au"
-    delta_omega_axis = float(getattr(cavity, delta_name))
-    k_parallel = direction_sign * float(k_parallel_au)
-    if not math.isfinite(k_parallel):
-        raise ValueError("k_parallel_au must be finite.")
-    if delta_omega_axis == 0.0 and k_parallel != 0.0:
-        raise ValueError(
-            f"{delta_name} is zero, so nonzero k_parallel_au is undefined."
-        )
-
-    k_order = 0.0 if delta_omega_axis == 0.0 else k_parallel / delta_omega_axis
-    # k_order should not exceed the number of cavity modes along the axis, and we need to enforce it
-    if abs(k_order) > cavity.n_mode_x if axis == "x" else cavity.n_mode_y:
-        raise ValueError(
-            f"Absolute k_parallel_au is too large for the cavity mode spacing along {axis}. "
-            f"Maximum allowed is {delta_omega_axis * (cavity.n_mode_x if axis == 'x' else cavity.n_mode_y):.3e}."
-        )
-    k_norm = math.pi * k_order
 
     half_size = np.array(size_pair, dtype=float) * 0.5
     center_arr = np.array(center_pair, dtype=float)
@@ -367,8 +415,12 @@ def k_parallel_pulse(
             "The selected source grid points all lie on the smooth-window "
             "boundary. Increase size or move center."
         )
-
-    spatial_phase = k_norm * selected_rel[:, axis_index]
+    
+    if axis == "x" or axis == "y":
+        axis_index = 0 if axis == "x" else 1
+        spatial_phase = k_norm * selected_rel[:, axis_index]
+    else:  # axis == "xy"
+        spatial_phase = selected_rel[:,0] * k_norm[0] + selected_rel[:,1] * k_norm[1]
 
     excited_grid_list = selected.astype(int).tolist()
     excited_mode_list: list[int] = []
@@ -428,7 +480,7 @@ def k_parallel_pulse(
     _drive.projection_norm = projection_norm
     _drive.k_parallel_au = k_parallel
     _drive.k_order = k_order
-    _drive.direction = ("-" if k_order < 0.0 else "+") + axis
+    _drive.direction = ("-" if direction_sign < 0.0 else "+") + axis
     _drive.projection_axis = projection_axis_clean
     _drive.center = center_pair
     _drive.size = size_pair
