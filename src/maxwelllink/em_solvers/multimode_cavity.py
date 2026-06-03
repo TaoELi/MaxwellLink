@@ -582,13 +582,13 @@ class MultiModeSimulation(DummyEMSimulation):
         if not np.any(self.photon_pulse_axis):
             raise ValueError("At least one pulse axis (x, y, or z) must be specified.")
 
-        if isinstance(self.photon_drive, (int, float)):
+        if isinstance(photon_partial_charge, (int, float)):
             if photon_partial_charge < 0.0:
                 raise ValueError("photon_partial_charge must be a positive value.")
             else:
                 self.photon_partial_charge = float(photon_partial_charge)
         else:
-            raise ValueError("photon_pulse_drive must be a constant value if photon_partial_charge is specified.")
+            raise ValueError("photon_partial_charge must be a value representing the partial charge for the photon pulse.")
 
         self.molecule_pulse_axis = np.array([False, False, False], dtype=bool)
         if "x" in molecule_pulse_axis.lower():
