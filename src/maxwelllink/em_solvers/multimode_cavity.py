@@ -404,6 +404,7 @@ class MultiModeSimulation(DummyEMSimulation):
         excited_mode_list: Optional[list] = [],
         photon_pulse_drive: Optional[Union[float, Callable[[float], float]]] = None,
         photon_pulse_axis: str = "y",
+        photon_partial_charge: float = 1.0,
         excited_grid_list: Optional[list] = [],
         molecule_pulse_drive: Optional[Union[float, Callable[[float], float]]] = None,
         molecule_pulse_axis: str = "y",
@@ -446,6 +447,8 @@ class MultiModeSimulation(DummyEMSimulation):
             Constant photon pulse drive term or function ``photon_pulse_drive(t_au)``.
         photon_pulse_axis : str, default: "y"
             pulse axis for the photon pulse.
+        photon_partial_charge : float, default: 1.0
+            Partial charge for the photon pulse (a.u.). This is a prefactor applied to the photon pulse drive term, which can be used to effectively scale the strength of the photon pulse without changing its time dependence.
         excited_grid_list : list, optional
             List of grid point indices that are excited by the molecule pulse. The excitation is applied by adding the molecule pulse drive to the effective electric field at these grid points.
         molecule_pulse_drive : float or callable, optional
@@ -578,6 +581,14 @@ class MultiModeSimulation(DummyEMSimulation):
         # we need True in at least one axis
         if not np.any(self.photon_pulse_axis):
             raise ValueError("At least one pulse axis (x, y, or z) must be specified.")
+
+        if isinstance(self.photon_drive, (int, float)):
+            if photon_partial_charge < 0.0:
+                raise ValueError("photon_partial_charge must be a positive value.")
+            else:
+                self.photon_partial_charge = float(photon_partial_charge)
+        else:
+            raise ValueError("photon_pulse_drive must be a constant value if photon_partial_charge is specified.")
 
         self.molecule_pulse_axis = np.array([False, False, False], dtype=bool)
         if "x" in molecule_pulse_axis.lower():
@@ -729,7 +740,7 @@ class MultiModeSimulation(DummyEMSimulation):
         mu_dot_f = self._calc_mu_dot_f_subspace(mu)
         acceleration = - self.varepsilon_k[:, None] * mu_dot_f - self.omega_k2[:, None] * qc
         if self.excited_mode_list:
-            acceleration[self.excited_mode_list, :] += self._eval_pulse_field(
+            acceleration[self.excited_mode_list, :] += self.photon_partial_charge * self._eval_pulse_field(
                 pulse=self.photon_drive,
                 selected=self.excited_mode_list,
                 axis=self.photon_pulse_axis,
