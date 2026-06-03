@@ -740,7 +740,7 @@ class MultiModeSimulation(DummyEMSimulation):
         mu_dot_f = self._calc_mu_dot_f_subspace(mu)
         acceleration = - self.varepsilon_k[:, None] * mu_dot_f - self.omega_k2[:, None] * qc
         if self.excited_mode_list:
-            acceleration[self.excited_mode_list, :] += self.photon_partial_charge * self._eval_pulse_field(
+            acceleration[self.excited_mode_list, :] -= self.photon_partial_charge * self._eval_pulse_field(
                 pulse=self.photon_drive,
                 selected=self.excited_mode_list,
                 axis=self.photon_pulse_axis,
