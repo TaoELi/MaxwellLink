@@ -213,7 +213,8 @@ def _get_k_vector(cavity, k_parallel_au: Union[float, Sequence[float]], directio
                 f"{delta_name} is zero, so nonzero k_parallel_au is undefined."
             )
         k_order = 0.0 if delta_omega_axis == 0.0 else k_parallel / delta_omega_axis
-        if abs(k_order) > cavity.n_mode_x if axis == "x" else cavity.n_mode_y:
+        k_order_limit = cavity.n_mode_x if axis == "x" else cavity.n_mode_y
+        if abs(k_order) > k_order_limit:
             raise ValueError(
                 f"Absolute k_parallel_au is too large for the cavity mode spacing along {axis}. "
                 f"Maximum allowed is {delta_omega_axis * (cavity.n_mode_x if axis == 'x' else cavity.n_mode_y):.3e}."

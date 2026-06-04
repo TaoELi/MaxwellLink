@@ -138,7 +138,7 @@ class FabryPerotCavity:
         n_mode_x: int = 1,
         n_mode_y: int = 1,
         abc_cutoff: Optional[list] | float = [0.0, 0.0],
-        save_mode_functions: bool = False,
+        save_mode_functions: bool = True,
     ):
         r"""
         Parameters
@@ -171,7 +171,7 @@ class FabryPerotCavity:
             Number of cavity modes along y-axis.
         abc_cutoff : list or float, optional
             Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If None, no absorbing boundary condition is applied. If a list is provided, it should contain two values representing the cutoff distances for x and y axes respectively. If a single float value is provided, it will be applied to both axes.
-        save_mode_functions : bool, default: False
+        save_mode_functions : bool, default: True
             Whether to save the cavity mode functions evaluated at the molecular grid points. Setting this to True can consume more memory but may speed up the simulation if the mode functions are needed multiple times.
         """
         if frequency_au is None:
