@@ -130,8 +130,8 @@ class LangevinThermostat:
         random_seed : int, optional
             Random seed for reproducible results.
         """
-        if temperature_au <= 0:
-            raise ValueError("Temperature must be positive.")
+        if temperature_au < 0:
+            raise ValueError("Temperature must be non-negative.")
         self.temperature_au = temperature_au
 
         if dt_au <= 0:

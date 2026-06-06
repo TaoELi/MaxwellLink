@@ -797,9 +797,9 @@ class MultiModeSimulation(DummyEMSimulation):
         photonic_energy : numpy.ndarray of float, shape (n_mode,)
             Energy of each cavity mode.
         """
-        kinetic_energy = 0.5 * np.sum(pc**2, axis=1)
-        potential_energy = 0.5 * np.sum(self.omega_k2[:, None] * qc**2, axis=1)
-        photonic_energy = kinetic_energy + potential_energy
+        kinetic_energy = 0.5 * pc**2
+        potential_energy = 0.5 * self.omega_k2[:, None] * qc**2
+        photonic_energy = np.sum((kinetic_energy + potential_energy) * self.axis, axis=1)
         return photonic_energy
 
     def _calc_energy(self, pc, qc, mu) -> float:
