@@ -17,6 +17,7 @@ from .aggregated import (
     RemoteBridgeSpec,
     run_bridge_node,
 )
+from .susceptibility import SusceptibilitySocketHub
 
 __all__ = [
     "get_available_host_port",
@@ -27,4 +28,5 @@ __all__ = [
     "LocalSocketHubBridge",
     "RemoteBridgeSpec",
     "run_bridge_node",
+    "SusceptibilitySocketHub",
 ]

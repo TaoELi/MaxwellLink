@@ -15,6 +15,7 @@ __all__ = [
     "sockets",
     "SocketHub",
     "AggregatedSocketHub",
+    "SusceptibilitySocketHub",
     "LocalSocketHubBridge",
     "RemoteBridgeSpec",
     "get_available_host_port",
@@ -152,6 +153,7 @@ def __getattr__(name):
     if name in {
         "SocketHub",
         "AggregatedSocketHub",
+        "SusceptibilitySocketHub",
         "LocalSocketHubBridge",
         "RemoteBridgeSpec",
         "get_available_host_port",
@@ -160,6 +162,7 @@ def __getattr__(name):
         from .sockets import (
             SocketHub,
             AggregatedSocketHub,
+            SusceptibilitySocketHub,
             LocalSocketHubBridge,
             RemoteBridgeSpec,
             get_available_host_port,

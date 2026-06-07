@@ -99,7 +99,24 @@ _RESULT_EXTRALEN_OFF = _INT32_LEN + _FIELD_LEN  # extra_len follows amp
 
 
 def _json_dumps_bytes(payload: Mapping) -> bytes:
-    """Encode a mapping into compact UTF-8 JSON bytes."""
+    """
+    Encode a mapping into compact, sorted UTF-8 JSON bytes.
+
+    Parameters
+    ----------
+    payload : Mapping
+        JSON-serializable mapping to encode.
+
+    Returns
+    -------
+    bytes
+        Compact UTF-8 JSON encoding with sorted keys and no extra whitespace.
+
+    Notes
+    -----
+    Keys are sorted so that the same payload always produces identical bytes,
+    which keeps the HELLO/INIT framing deterministic across hub and bridge.
+    """
 
     return json.dumps(
         payload,
@@ -110,7 +127,20 @@ def _json_dumps_bytes(payload: Mapping) -> bytes:
 
 
 def _json_loads_bytes(payload: bytes) -> dict:
-    """Decode a UTF-8 JSON payload, defaulting empty content to ``{}``."""
+    """
+    Decode a UTF-8 JSON payload, defaulting empty content to ``{}``.
+
+    Parameters
+    ----------
+    payload : bytes
+        UTF-8 encoded JSON bytes. An empty buffer is treated as an empty
+        object.
+
+    Returns
+    -------
+    dict
+        The decoded JSON object.
+    """
 
     return json.loads(payload.decode("utf-8") or "{}")
 
@@ -121,6 +151,26 @@ def _recv_msg_with_timeout(sock: socket.socket, timeout: float) -> bytes:
 
     This is used while discovering fresh bridge clients so the hub can poll
     for their HELLO payload without blocking the whole EM-side wait loop.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Socket to read one header banner from.
+    timeout : float
+        Temporary receive timeout (seconds) applied for the duration of the
+        read; the socket's previous timeout is restored on return.
+
+    Returns
+    -------
+    bytes
+        The right-stripped 12-byte header banner.
+
+    Raises
+    ------
+    socket.timeout
+        If no header arrives within ``timeout`` seconds.
+    _SocketClosed
+        If the peer closes the connection mid-read.
     """
 
     old_timeout = sock.gettimeout()
@@ -137,7 +187,15 @@ _SELECTOR_ERRORS = (KeyError, ValueError, OSError)
 
 
 def _close_socket(sock: Optional[socket.socket]) -> None:
-    """Close a socket, ignoring the error if it is already gone."""
+    """
+    Close a socket, ignoring the error if it is already gone.
+
+    Parameters
+    ----------
+    sock : socket.socket or None
+        Socket to close. ``None`` is accepted and ignored so callers can close
+        optional/best-effort handles without guarding first.
+    """
 
     if sock is None:
         return
@@ -148,7 +206,24 @@ def _close_socket(sock: Optional[socket.socket]) -> None:
 
 
 def _recv_exact_into(sock: socket.socket, buf, nbytes: int) -> None:
-    """Read exactly ``nbytes`` into the start of ``buf``."""
+    """
+    Read exactly ``nbytes`` into the start of ``buf``.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Socket to read from.
+    buf : bytearray or writable buffer
+        Destination buffer; the first ``nbytes`` bytes are overwritten.
+    nbytes : int
+        Number of bytes to read. The call loops until exactly this many bytes
+        have been received.
+
+    Raises
+    ------
+    _SocketClosed
+        If the peer closes the connection before ``nbytes`` bytes arrive.
+    """
 
     mv = memoryview(buf)
     got = 0
@@ -160,7 +235,22 @@ def _recv_exact_into(sock: socket.socket, buf, nbytes: int) -> None:
 
 
 def _expect_header(buf, expected: bytes) -> None:
-    """Validate the 12-byte banner at the start of ``buf``."""
+    """
+    Validate the 12-byte banner at the start of ``buf``.
+
+    Parameters
+    ----------
+    buf : bytes-like
+        Buffer whose first 12 bytes hold a right-padded header banner.
+    expected : bytes
+        The banner the caller requires (compared after trailing whitespace is
+        stripped).
+
+    Raises
+    ------
+    RuntimeError
+        If the decoded banner does not match ``expected``.
+    """
 
     got = bytes(memoryview(buf)[:_AGG_HEADER_LEN]).rstrip()
     if got != expected:
@@ -168,7 +258,32 @@ def _expect_header(buf, expected: bytes) -> None:
 
 
 def _connect_tcp_with_retry(address: str, port: int, timeout: float) -> socket.socket:
-    """Connect to a TCP server with bounded retries."""
+    """
+    Connect to a TCP server with bounded retries.
+
+    Parameters
+    ----------
+    address : str
+        Host name or IP address of the upstream server.
+    port : int
+        TCP port of the upstream server.
+    timeout : float
+        Total budget (seconds) for establishing the connection. The call
+        retries with exponential backoff until this deadline; the returned
+        socket is left configured with this value as its operation timeout.
+
+    Returns
+    -------
+    socket.socket
+        A connected TCP socket with ``TCP_NODELAY`` and ``SO_KEEPALIVE`` set
+        where supported.
+
+    Raises
+    ------
+    TimeoutError
+        If no connection can be established before the deadline; the last
+        underlying connection error is chained as the cause.
+    """
 
     deadline = time.monotonic() + float(timeout)
     delay = 0.05
@@ -211,7 +326,17 @@ def _connect_tcp_with_retry(address: str, port: int, timeout: float) -> socket.s
 
 
 def _send_aggregate_hello(sock: socket.socket, *, group_id: str) -> None:
-    """Send the bridge HELLO banner used by the aggregate protocol."""
+    """
+    Send the bridge HELLO banner used by the aggregate protocol.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Upstream connection to the :class:`AggregatedSocketHub`.
+    group_id : str
+        Aggregate group identifier this bridge serves; sent in the JSON
+        payload so the hub can match the connection to a configured group.
+    """
 
     _send_msg(sock, AGGHELLO)
     _send_bytes(sock, _json_dumps_bytes({"group_id": str(group_id), "version": 1}))
@@ -223,7 +348,19 @@ def _send_aggregate_init(
     group_id: str,
     init_payloads: Mapping[int, dict],
 ) -> None:
-    """Send group membership plus per-molecule INIT payloads to a bridge."""
+    """
+    Send group membership plus per-molecule INIT payloads to a bridge.
+
+    Parameters
+    ----------
+    sock : socket.socket
+        Upstream connection to the bridge being initialized.
+    group_id : str
+        Aggregate group identifier the payload applies to.
+    init_payloads : Mapping[int, dict]
+        Mapping from molecule ID to its INIT payload. Each payload is copied
+        and stamped with its own ``"molecule_id"`` before transmission.
+    """
 
     payload = {
         "group_id": str(group_id),
@@ -255,7 +392,24 @@ class _FrameCodec:
         self._scratch_buffers: Dict[str, bytearray] = {}
 
     def _scratch(self, name: str, size: int) -> bytearray:
-        """Return a reusable named buffer holding at least ``size`` bytes."""
+        """
+        Return a reusable named buffer holding at least ``size`` bytes.
+
+        Parameters
+        ----------
+        name : str
+            Logical name of the scratch slot (e.g. ``"send"``, ``"head"``).
+            Each name maps to one persistent buffer reused across calls.
+        size : int
+            Minimum capacity required. The buffer is grown (reallocated) only
+            when the existing one is too small.
+
+        Returns
+        -------
+        bytearray
+            A buffer of length at least ``size``; its leading bytes may hold
+            stale data and must be overwritten by the caller.
+        """
 
         buf = self._scratch_buffers.get(name)
         if buf is None or len(buf) < size:
@@ -283,7 +437,23 @@ class _StepCodec(_FrameCodec):
     def send(
         self, sock: socket.socket, requests: Mapping[int, Mapping[str, np.ndarray]]
     ) -> None:
-        """Pack and send one grouped fan-out step as a single frame."""
+        """
+        Pack and send one grouped fan-out step as a single frame.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Bridge connection to write the frame to.
+        requests : Mapping[int, Mapping[str, np.ndarray]]
+            Mapping from molecule ID to a request dict carrying an
+            ``"efield_au"`` array-like ``(3,)`` field vector in a.u.
+
+        Notes
+        -----
+        Identical field vectors are de-duplicated: each unique field is packed
+        once and molecules sharing it reference it by index, which shrinks the
+        frame when many molecules see the same field.
+        """
 
         unique_fields: list[tuple[float, float, float]] = []
         field_to_idx: dict[tuple[float, float, float], int] = {}
@@ -325,9 +495,27 @@ class _StepCodec(_FrameCodec):
         """
         Receive one grouped fan-out step.
 
-        ``header_already_read`` is set when the caller already consumed the
-        12-byte banner (e.g. the bridge's main dispatch loop) so only the rest
-        of the header is read here.
+        Parameters
+        ----------
+        sock : socket.socket
+            Bridge connection to read the frame from.
+        header_already_read : bool, default: False
+            Set when the caller already consumed the 12-byte banner (e.g. the
+            bridge's main dispatch loop) so only the rest of the header is read
+            here.
+
+        Returns
+        -------
+        dict[int, np.ndarray]
+            Mapping from molecule ID to its ``(3,)`` field vector. Molecules
+            that shared a field upstream point at separate array copies here.
+
+        Raises
+        ------
+        RuntimeError
+            If the decoded banner is not ``AGGSTEP``.
+        _SocketClosed
+            If the peer closes the connection mid-frame.
         """
 
         head = self._scratch("head", _AGGSTEP_HEAD_LEN)
@@ -381,7 +569,25 @@ class _ResultCodec(_FrameCodec):
     def send(
         self, sock: socket.socket, responses: Mapping[int, Mapping[str, object]]
     ) -> None:
-        """Pack and send grouped molecule responses as a single frame."""
+        """
+        Pack and send grouped molecule responses as a single frame.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Hub connection to write the frame to.
+        responses : Mapping[int, Mapping[str, object]]
+            Mapping from molecule ID to a response dict with keys:
+            - ``"amp"`` : array-like ``(3,)`` source amplitude vector.
+            - ``"extra"`` : bytes or str, optional opaque per-molecule payload
+              (``str`` is UTF-8 encoded; defaults to empty).
+
+        Notes
+        -----
+        The fixed-size records (id, amplitude, extra length) are packed first
+        and the variable-length ``extra`` blobs are concatenated afterwards, so
+        the receiver can size its reads from the record table alone.
+        """
 
         packed: list[tuple[int, tuple[float, float, float], bytes]] = []
         total_extra = 0
@@ -416,7 +622,26 @@ class _ResultCodec(_FrameCodec):
         sock.sendall(memoryview(buf)[:frame_len])
 
     def recv(self, sock: socket.socket) -> Dict[int, dict]:
-        """Receive grouped molecule responses from a bridge."""
+        """
+        Receive grouped molecule responses from a bridge.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Bridge connection to read the frame from.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping from molecule ID to ``{"amp": ndarray(3,), "extra": bytes}``.
+
+        Raises
+        ------
+        RuntimeError
+            If the decoded banner is not ``AGGRESULT``.
+        _SocketClosed
+            If the peer closes the connection mid-frame.
+        """
 
         head = self._scratch("head", _AGGRESULT_HEAD_LEN)
         _recv_exact_into(sock, head, _AGGRESULT_HEAD_LEN)
@@ -463,7 +688,26 @@ class _ResultCodec(_FrameCodec):
 
 @dataclass
 class _AggregateGroupState:
-    """Per-bridge group state tracked by :class:`AggregatedSocketHub`."""
+    """
+    Per-bridge group state tracked by :class:`AggregatedSocketHub`.
+
+    Attributes
+    ----------
+    group_id : str
+        Aggregate group identifier shared by every molecule in this group.
+    molecule_ids : list[int]
+        Molecule IDs assigned to the group, in first-seen order.
+    init_payloads : dict[int, dict]
+        Mapping from molecule ID to its INIT payload, replayed to the bridge
+        on (re)connection.
+    bridge : _ClientState or None
+        The currently bound bridge connection, or ``None`` while no bridge is
+        attached.
+    step_codec : _StepCodec
+        Reusable encoder for outgoing AGGSTEP fan-out frames.
+    result_codec : _ResultCodec
+        Reusable decoder for incoming AGGRESULT reply frames.
+    """
 
     group_id: str
     molecule_ids: list[int] = field(default_factory=list)
@@ -478,7 +722,7 @@ class RemoteBridgeSpec:
     """
     One remote aggregate bridge entry produced by ``init_remote_bridges``.
 
-    Parameters
+    Attributes
     ----------
     idx : int
         Zero-based bridge index used by :func:`run_bridge_node`.
@@ -496,7 +740,15 @@ class RemoteBridgeSpec:
     n_molecules: int
 
     def to_dict(self) -> dict:
-        """Return a JSON-serializable bridge specification mapping."""
+        """
+        Return a JSON-serializable bridge specification mapping.
+
+        Returns
+        -------
+        dict
+            Mapping with the ``idx``, ``group_id``, ``unixsocket``, and
+            ``n_molecules`` fields coerced to plain JSON types.
+        """
 
         return {
             "idx": int(self.idx),
@@ -507,7 +759,25 @@ class RemoteBridgeSpec:
 
     @classmethod
     def from_dict(cls, payload: Mapping) -> "RemoteBridgeSpec":
-        """Build one bridge specification from JSON-decoded manifest data."""
+        """
+        Build one bridge specification from JSON-decoded manifest data.
+
+        Parameters
+        ----------
+        payload : Mapping
+            Mapping carrying ``idx``, ``group_id``, ``unixsocket``, and
+            ``n_molecules`` entries, as written by :meth:`to_dict`.
+
+        Returns
+        -------
+        RemoteBridgeSpec
+            The reconstructed, type-coerced specification.
+
+        Raises
+        ------
+        KeyError
+            If a required field is missing from ``payload``.
+        """
 
         return cls(
             idx=int(payload["idx"]),
@@ -518,7 +788,26 @@ class RemoteBridgeSpec:
 
 
 def _as_molecule_list(molecules) -> list:
-    """Normalize one molecule or an iterable of molecules into a list."""
+    """
+    Normalize one molecule or an iterable of molecules into a list.
+
+    Parameters
+    ----------
+    molecules : molecule or iterable of molecules
+        Either a single molecule-like object exposing ``init_payload`` or an
+        iterable of such objects (strings and byte buffers are rejected).
+
+    Returns
+    -------
+    list
+        A list of molecules; a single molecule is wrapped in a one-element
+        list.
+
+    Raises
+    ------
+    TypeError
+        If ``molecules`` is neither molecule-like nor a non-text iterable.
+    """
 
     if hasattr(molecules, "init_payload"):
         return [molecules]
@@ -537,7 +826,27 @@ def _assign_molecule_to_group(
     expected_hub: "AggregatedSocketHub",
     group_id: str,
 ) -> None:
-    """Assign one molecule to the given aggregate group in-place."""
+    """
+    Assign one molecule to the given aggregate group in-place.
+
+    Parameters
+    ----------
+    molecule : molecule-like
+        Object carrying a mutable ``init_payload`` attribute. Its
+        ``init_payload["aggregate_group"]`` entry is set to ``group_id``.
+    expected_hub : AggregatedSocketHub
+        Hub the molecule must belong to; used to reject cross-hub assignments.
+    group_id : str
+        Aggregate group identifier to assign.
+
+    Raises
+    ------
+    TypeError
+        If ``molecule`` does not expose an ``init_payload`` attribute.
+    ValueError
+        If the molecule is bound to a different hub, or is already assigned to
+        a different non-empty aggregate group.
+    """
 
     if not hasattr(molecule, "init_payload"):
         raise TypeError(
@@ -567,7 +876,25 @@ def _assign_molecule_to_group(
 
 
 def _load_aggregation_info(info="aggregation.json") -> dict:
-    """Load one JSON aggregation manifest from disk."""
+    """
+    Load one JSON aggregation manifest from disk.
+
+    Parameters
+    ----------
+    info : str or path-like, default: ``"aggregation.json"``
+        Path to the manifest written by
+        :meth:`AggregatedSocketHub.init_remote_bridges`.
+
+    Returns
+    -------
+    dict
+        The decoded manifest object.
+
+    Raises
+    ------
+    ValueError
+        If the file does not contain a JSON object.
+    """
 
     with open(os.fspath(info), "r", encoding="utf-8") as f:
         payload = json.load(f)
@@ -577,7 +904,24 @@ def _load_aggregation_info(info="aggregation.json") -> dict:
 
 
 def _coerce_remote_bridge_specs(payload: Mapping) -> list[RemoteBridgeSpec]:
-    """Decode and validate the ``bridges`` section of an aggregation manifest."""
+    """
+    Decode and validate the ``bridges`` section of an aggregation manifest.
+
+    Parameters
+    ----------
+    payload : Mapping
+        Decoded manifest object containing a ``"bridges"`` list.
+
+    Returns
+    -------
+    list[RemoteBridgeSpec]
+        The decoded bridge specifications, in manifest order.
+
+    Raises
+    ------
+    ValueError
+        If ``"bridges"`` is not a list or contains duplicate ``idx`` values.
+    """
 
     raw_bridges = payload.get("bridges", [])
     if not isinstance(raw_bridges, list):
@@ -609,6 +953,16 @@ def run_bridge_node(info="aggregation.json", *, idx: int = 0) -> None:
     idx : int, default: 0
         Zero-based bridge index identifying which bridge entry in ``info`` this
         node should start.
+
+    Raises
+    ------
+    IndexError
+        If no bridge entry in ``info`` has the requested ``idx``.
+
+    Notes
+    -----
+    The call blocks until the bridge thread exits or a ``KeyboardInterrupt``
+    is received, after which the bridge is stopped on a best-effort basis.
     """
 
     payload = _load_aggregation_info(info)
@@ -648,6 +1002,17 @@ def run_bridge_node(info="aggregation.json", *, idx: int = 0) -> None:
 def mxl_bridge_main(argv: list[str] | None = None) -> int:
     """
     CLI entry point for running one aggregate bridge from a manifest.
+
+    Parameters
+    ----------
+    argv : list[str] or None, optional
+        Argument vector to parse. ``None`` (the default) parses
+        ``sys.argv[1:]``.
+
+    Returns
+    -------
+    int
+        Process exit code; ``0`` on a clean shutdown.
 
     Examples
     --------
@@ -691,6 +1056,22 @@ class AggregatedBridge:
     1. create bridge handles from the hub,
     2. attach molecules to a handle via :meth:`append`, and
     3. launch downstream drivers against ``address``.
+
+    Parameters
+    ----------
+    hub : AggregatedSocketHub
+        Owning hub that created this handle.
+    group_id : str
+        Aggregate group identifier this handle manages.
+    bridge : LocalSocketHubBridge
+        The underlying node-local bridge this handle wraps.
+
+    Attributes
+    ----------
+    hub : AggregatedSocketHub
+        The owning hub.
+    group_id : str
+        The aggregate group identifier this handle manages.
     """
 
     def __init__(
@@ -706,7 +1087,19 @@ class AggregatedBridge:
 
     @property
     def address(self) -> str:
-        """Address string downstream UNIX-socket drivers should use."""
+        """
+        Address string downstream UNIX-socket drivers should use.
+
+        Returns
+        -------
+        str
+            The configured UNIX-socket address for local drivers.
+
+        Raises
+        ------
+        RuntimeError
+            If this bridge was not configured with a UNIX socket.
+        """
 
         if self._bridge.local_unixsocket is None:
             raise RuntimeError("This convenience bridge does not use a UNIX socket.")
@@ -714,19 +1107,42 @@ class AggregatedBridge:
 
     @property
     def unixsocket(self) -> Optional[str]:
-        """Configured UNIX-socket driver address, if any."""
+        """
+        Configured UNIX-socket driver address, if any.
+
+        Returns
+        -------
+        str or None
+            The configured UNIX-socket address, or ``None`` when the bridge
+            uses TCP downstream.
+        """
 
         return self._bridge.local_unixsocket
 
     @property
     def unixsocket_path(self) -> Optional[str]:
-        """Resolved filesystem path for the local UNIX socket."""
+        """
+        Resolved filesystem path for the local UNIX socket.
+
+        Returns
+        -------
+        str or None
+            The resolved socket path, or ``None`` when no UNIX socket is used.
+        """
 
         return self._bridge.local_hub.unixsocket_path
 
     @property
     def local_endpoint(self) -> dict:
-        """Return the downstream endpoint mapping for driver launch code."""
+        """
+        Return the downstream endpoint mapping for driver launch code.
+
+        Returns
+        -------
+        dict
+            A copy of the downstream endpoint mapping, with either a
+            ``"unixsocket"`` key or ``"host"``/``"port"`` keys.
+        """
 
         return dict(self._bridge.local_endpoint)
 
@@ -737,6 +1153,19 @@ class AggregatedBridge:
         The helper only mutates ``molecule.init_payload["aggregate_group"]`` and
         therefore works with existing ``mxl.Molecule`` / ``SocketMolecule``
         objects without changing solver-side logic.
+
+        Parameters
+        ----------
+        molecules : molecule or iterable of molecules
+            One molecule or an iterable of molecules to assign to this group.
+
+        Raises
+        ------
+        TypeError
+            If an item does not expose an ``init_payload`` attribute.
+        ValueError
+            If a molecule belongs to a different hub or is already assigned to
+            a different aggregate group.
         """
 
         for molecule in _as_molecule_list(molecules):
@@ -747,12 +1176,26 @@ class AggregatedBridge:
             )
 
     def start(self) -> threading.Thread:
-        """Start the underlying local bridge thread."""
+        """
+        Start the underlying local bridge thread.
+
+        Returns
+        -------
+        threading.Thread
+            The (daemon) thread running the bridge loop.
+        """
 
         return self._bridge.start()
 
     def stop(self, wait: float = 2.0) -> None:
-        """Stop the underlying local bridge."""
+        """
+        Stop the underlying local bridge.
+
+        Parameters
+        ----------
+        wait : float, default: 2.0
+            Maximum time (seconds) to wait for the bridge thread to join.
+        """
 
         self._bridge.stop(wait=wait)
 
@@ -774,6 +1217,19 @@ class AggregatedSocketHub(SocketHub):
     Molecules are assigned to a bridge group through
     ``init_payload["aggregate_group"]``. All molecules sharing the same group
     are sent together to one :class:`LocalSocketHubBridge`.
+
+    Parameters
+    ----------
+    host : str or None, optional
+        Interface to bind the upstream TCP server to. ``None``, ``""``, or
+        ``"0.0.0.0"`` bind all interfaces; bridges then connect back over
+        ``127.0.0.1``.
+    port : int or None, default: 31415
+        TCP port for the upstream server.
+    timeout : float, default: 60000.0
+        Default operation timeout (seconds) used for binding and stepping.
+    latency : float, default: 0.01
+        Polling interval (seconds) for the bind/step loops.
     """
 
     def __init__(
@@ -811,6 +1267,22 @@ class AggregatedSocketHub(SocketHub):
         This is the convenience entry point intended for minimal edits when
         migrating an existing single-layer ``SocketHub`` script to the new
         two-layer transport.
+
+        Parameters
+        ----------
+        local_unixsocket : str
+            Non-empty downstream UNIX-socket address local drivers connect to.
+
+        Returns
+        -------
+        AggregatedBridge
+            A started handle wrapping the new node-local bridge.
+
+        Raises
+        ------
+        ValueError
+            If ``local_unixsocket`` is empty or already owned by another
+            bridge on this hub.
         """
 
         unix_name = str(local_unixsocket).strip()
@@ -876,6 +1348,18 @@ class AggregatedSocketHub(SocketHub):
         -------
         list[RemoteBridgeSpec]
             The generated bridge specifications in order.
+
+        Raises
+        ------
+        ValueError
+            If no molecules are supplied or ``molecules_per_bridge`` is not a
+            positive integer.
+
+        Notes
+        -----
+        This method records the generated specs on ``self.remote_bridges`` and
+        the full manifest on ``self.remote_bridge_info`` as a side effect, but
+        does not start any bridge threads.
         """
 
         items = _as_molecule_list(molecules)
@@ -936,16 +1420,48 @@ class AggregatedSocketHub(SocketHub):
     # -- Group bookkeeping -------------------------------------------------
 
     def _deadline(self, timeout: Optional[float]) -> float:
-        """Return an absolute monotonic-wall deadline for ``timeout`` seconds.
+        """
+        Return an absolute wall-clock deadline ``timeout`` seconds from now.
 
-        Falls back to the hub-wide ``self.timeout`` when ``timeout`` is ``None``.
+        Parameters
+        ----------
+        timeout : float or None
+            Span in seconds from now. Falls back to the hub-wide
+            ``self.timeout`` when ``None``.
+
+        Returns
+        -------
+        float
+            Absolute ``time.time()`` deadline.
         """
 
         span = float(timeout) if timeout is not None else float(self.timeout)
         return time.time() + span
 
     def _extract_group_id(self, init_payload: Mapping, molecule_id: int) -> str:
-        """Return the aggregate group for one molecule."""
+        """
+        Return the aggregate group for one molecule.
+
+        Parameters
+        ----------
+        init_payload : Mapping
+            INIT payload for the molecule, optionally carrying an
+            ``"aggregate_group"`` entry.
+        molecule_id : int
+            Molecule ID, used to synthesize a default solo group name when no
+            ``"aggregate_group"`` is present.
+
+        Returns
+        -------
+        str
+            The resolved group identifier (``f"molecule-{molecule_id}"`` when
+            unset).
+
+        Raises
+        ------
+        ValueError
+            If ``"aggregate_group"`` is present but blank.
+        """
 
         group_id = init_payload.get("aggregate_group")
         if group_id is None:
@@ -958,7 +1474,25 @@ class AggregatedSocketHub(SocketHub):
         return group_id
 
     def _prepare_groups_locked(self, init_payloads: Mapping[int, dict]) -> None:
-        """Build or update aggregate group metadata from solver INIT payloads."""
+        """
+        Build or update aggregate group metadata from solver INIT payloads.
+
+        Parameters
+        ----------
+        init_payloads : Mapping[int, dict]
+            Mapping from molecule ID to its INIT payload.
+
+        Raises
+        ------
+        ValueError
+            If a molecule would be reassigned to a different group than the one
+            it already belongs to.
+
+        Notes
+        -----
+        Must be called while holding ``self._lock``. Updates
+        ``self._molecule_to_group`` and ``self._groups`` in place.
+        """
 
         for mid, raw_payload in init_payloads.items():
             molid = int(mid)
@@ -983,7 +1517,20 @@ class AggregatedSocketHub(SocketHub):
     def _group_and_bridge(
         self, group_id: str
     ) -> tuple[Optional[_AggregateGroupState], Optional[_ClientState]]:
-        """Return ``(group, bridge)`` for ``group_id`` under the hub lock."""
+        """
+        Return ``(group, bridge)`` for ``group_id`` under the hub lock.
+
+        Parameters
+        ----------
+        group_id : str
+            Aggregate group identifier to look up.
+
+        Returns
+        -------
+        tuple[_AggregateGroupState or None, _ClientState or None]
+            The group state and its bound bridge. Either element is ``None``
+            when the group is unknown or has no bridge attached.
+        """
 
         with self._lock:
             group = self._groups.get(group_id)
@@ -993,7 +1540,17 @@ class AggregatedSocketHub(SocketHub):
     # -- Bridge socket registration ---------------------------------------
 
     def _register_bridge_sock(self, sock: socket.socket, group_id: str) -> None:
-        """Register a bridge socket for readable events with its group id."""
+        """
+        Register a bridge socket for readable events with its group id.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Bridge socket to watch for ``EVENT_READ``.
+        group_id : str
+            Aggregate group identifier stored as the selector key data so
+            ready events can be routed back to the right group.
+        """
 
         self._unregister_bridge_sock(sock)
         try:
@@ -1002,7 +1559,15 @@ class AggregatedSocketHub(SocketHub):
             pass
 
     def _unregister_bridge_sock(self, sock: socket.socket) -> None:
-        """Unregister a bridge socket from the aggregate selector."""
+        """
+        Unregister a bridge socket from the aggregate selector.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Bridge socket to detach. A socket that is unknown or already closed
+            is ignored.
+        """
 
         try:
             self._bridge_selector.unregister(sock)
@@ -1010,8 +1575,16 @@ class AggregatedSocketHub(SocketHub):
             pass
 
     def _detach_sock_locked(self, st: _ClientState) -> None:
-        """Unregister a client from both selectors and mark it dead.
+        """
+        Unregister a client from both selectors and mark it dead.
 
+        Parameters
+        ----------
+        st : _ClientState
+            Client state to detach and mark dead.
+
+        Notes
+        -----
         Caller must hold ``self._lock`` and is responsible for closing the
         socket afterwards (typically outside the lock).
         """
@@ -1022,7 +1595,24 @@ class AggregatedSocketHub(SocketHub):
         st.initialized = False
 
     def _bind_group_locked(self, group_id: str, st_key, st: _ClientState) -> None:
-        """Attach one accepted bridge socket to a configured group."""
+        """
+        Attach one accepted bridge socket to a configured group.
+
+        Parameters
+        ----------
+        group_id : str
+            Aggregate group the bridge belongs to.
+        st_key : hashable
+            Current key under which ``st`` is registered in ``self.clients``;
+            re-keyed to ``group_id`` if different.
+        st : _ClientState
+            Accepted bridge client to bind.
+
+        Notes
+        -----
+        Caller must hold ``self._lock``. Binds every molecule in the group to
+        this bridge and registers the socket on the aggregate selector.
+        """
 
         group = self._groups[group_id]
         group.bridge = st
@@ -1038,7 +1628,23 @@ class AggregatedSocketHub(SocketHub):
         self._log(f"CONNECTED: aggregate group {group_id!r} <- {st.address}")
 
     def _drop_client_locked(self, st_key, st: _ClientState, reason: str) -> None:
-        """Remove a temporary or duplicate bridge client."""
+        """
+        Remove a temporary or duplicate bridge client.
+
+        Parameters
+        ----------
+        st_key : hashable
+            Key under which ``st`` is registered in ``self.clients``.
+        st : _ClientState
+            Client state to drop; its socket is detached and closed.
+        reason : str
+            Short reason logged with the drop, e.g. ``"hello"`` or
+            ``"duplicate-group"``.
+
+        Notes
+        -----
+        Caller must hold ``self._lock``.
+        """
 
         self.clients.pop(st_key, None)
         self._detach_sock_locked(st)
@@ -1046,7 +1652,22 @@ class AggregatedSocketHub(SocketHub):
         self._log(f"DROPPED ({reason}): {st.address}")
 
     def _mark_group_dead(self, group_id: str, reason: str) -> None:
-        """Mark an aggregate group as disconnected and clear all molecule bindings."""
+        """
+        Mark an aggregate group as disconnected and clear molecule bindings.
+
+        Parameters
+        ----------
+        group_id : str
+            Aggregate group whose bridge has failed.
+        reason : str
+            Short reason logged with the disconnect, e.g. ``"send"`` or
+            ``"recv"``.
+
+        Notes
+        -----
+        Acquires ``self._lock`` internally, then closes the socket and pauses
+        the hub outside the lock.
+        """
 
         with self._lock:
             group = self._groups.get(group_id)
@@ -1067,11 +1688,21 @@ class AggregatedSocketHub(SocketHub):
     # -- Binding handshake -------------------------------------------------
 
     def _snapshot_unbound_clients(self, *, identified: bool) -> list:
-        """Snapshot still-unbound bridge clients under the hub lock.
+        """
+        Snapshot still-unbound bridge clients under the hub lock.
 
-        ``identified`` selects clients that have already announced their
-        ``aggregate_group`` via HELLO (``True``) versus those still awaiting it
-        (``False``). Returns a list of ``(client_key, client_state)`` pairs.
+        Parameters
+        ----------
+        identified : bool
+            Select clients that have already announced their
+            ``aggregate_group`` via HELLO (``True``) versus those still
+            awaiting it (``False``).
+
+        Returns
+        -------
+        list[tuple]
+            A list of ``(client_key, client_state)`` pairs for matching
+            unbound clients.
         """
 
         with self._lock:
@@ -1090,6 +1721,12 @@ class AggregatedSocketHub(SocketHub):
 
         A bridge sends HELLO immediately after connecting. We keep the read
         timeout short here so one slow client cannot stall the entire hub.
+
+        Notes
+        -----
+        On success the client's ``aggregate_group`` is recorded in its
+        ``extras``; malformed or closed clients are dropped. Clients that have
+        not yet sent HELLO are skipped and retried on the next poll.
         """
 
         for st_key, st in self._snapshot_unbound_clients(identified=False):
@@ -1123,7 +1760,15 @@ class AggregatedSocketHub(SocketHub):
                 st.extras["aggregate_group"] = group_id
 
     def _progress_group_binds(self) -> None:
-        """Bind identified bridge clients to configured groups whenever possible."""
+        """
+        Bind identified bridge clients to configured groups when possible.
+
+        Notes
+        -----
+        Acquires ``self._lock``. Identified clients whose group has no bridge
+        yet are bound; a second client claiming an already-bound group is
+        dropped as a duplicate; clients for unknown groups are left pending.
+        """
 
         with self._lock:
             for st_key, st in self._snapshot_unbound_clients(identified=True):
@@ -1137,7 +1782,21 @@ class AggregatedSocketHub(SocketHub):
                     self._drop_client_locked(st_key, st, reason="duplicate-group")
 
     def _initialize_group(self, group_id: str) -> bool:
-        """Send AGGINIT to a bound bridge and wait for AGGREADY."""
+        """
+        Send AGGINIT to a bound bridge and wait for AGGREADY.
+
+        Parameters
+        ----------
+        group_id : str
+            Aggregate group to initialize.
+
+        Returns
+        -------
+        bool
+            ``True`` if the bridge acknowledged with AGGREADY and is still the
+            group's live bridge; ``False`` if it was missing or the handshake
+            failed (in which case the group is marked dead).
+        """
 
         with self._lock:
             group = self._groups[group_id]
@@ -1172,6 +1831,23 @@ class AggregatedSocketHub(SocketHub):
 
         Molecules are grouped through ``init_payload["aggregate_group"]`` and each
         group must be backed by exactly one connected bridge.
+
+        Parameters
+        ----------
+        init_payloads : dict[int, dict]
+            Mapping from molecule ID to INIT payload to use on bind.
+        require_init : bool, default: True
+            Also require that each backing bridge completed its AGGINIT
+            handshake.
+        timeout : float or None, optional
+            Maximum time to wait (seconds). Uses the hub default if ``None``.
+
+        Returns
+        -------
+        bool
+            ``True`` if every requested molecule became bound (and, when
+            ``require_init`` is set, initialized) within the time limit, else
+            ``False``.
         """
 
         wanted = {int(mid) for mid in init_payloads.keys()}
@@ -1217,8 +1893,21 @@ class AggregatedSocketHub(SocketHub):
         """
         Validate a step request and group it by aggregate group.
 
-        Returns a ``{group_id: {molecule_id: {"efield_au": ndarray}}}`` mapping,
-        or ``None`` if not every requested molecule is bound and initialized.
+        Parameters
+        ----------
+        requests : dict[int, dict]
+            Mapping from molecule ID to a request dict with keys:
+            - ``"efield_au"`` : array-like ``(3,)`` field vector in a.u.
+            - ``"init"`` : dict, optional INIT payload used for a first bind.
+
+        Returns
+        -------
+        dict[str, dict[int, dict]] or None
+            A ``{group_id: {molecule_id: {"efield_au": ndarray}}}`` mapping, or
+            ``None`` if not every requested molecule is bound and initialized.
+
+        Notes
+        -----
         Must be called while holding ``self._lock``.
         """
 
@@ -1247,7 +1936,23 @@ class AggregatedSocketHub(SocketHub):
     def _send_step_to_group(
         self, group_id: str, group_request: Dict[int, dict]
     ) -> bool:
-        """Send one grouped fan-out step; return ``False`` on a dead bridge."""
+        """
+        Send one grouped fan-out step to a single bridge.
+
+        Parameters
+        ----------
+        group_id : str
+            Aggregate group to send to.
+        group_request : dict[int, dict]
+            Mapping from molecule ID to its ``{"efield_au": ndarray}`` request.
+
+        Returns
+        -------
+        bool
+            ``True`` if the frame was sent; ``False`` if the bridge was not
+            ready or the send failed (the hub is paused / the group marked dead
+            as appropriate).
+        """
 
         group, st = self._group_and_bridge(group_id)
         if group is None or st is None or not st.alive or not st.initialized:
@@ -1266,9 +1971,26 @@ class AggregatedSocketHub(SocketHub):
         """
         Receive and validate one group's reply.
 
-        Returns the per-molecule responses, or ``None`` if the bridge died or
-        the deadline passed (failure side effects are handled internally).
-        Raises ``RuntimeError`` if the bridge returns the wrong molecule ids.
+        Parameters
+        ----------
+        group_id : str
+            Aggregate group to read a reply from.
+        expected_ids : set[int]
+            Molecule IDs the reply must contain, exactly.
+        deadline : float
+            Absolute ``time.time()`` deadline for the receive.
+
+        Returns
+        -------
+        dict[int, dict] or None
+            The per-molecule responses, or ``None`` if the bridge died or the
+            deadline passed (failure side effects are handled internally).
+
+        Raises
+        ------
+        RuntimeError
+            If the bridge returns a molecule-id set other than
+            ``expected_ids`` (the group is also marked dead in that case).
         """
 
         group, st = self._group_and_bridge(group_id)
@@ -1305,8 +2027,34 @@ class AggregatedSocketHub(SocketHub):
         """
         Dispatch all requested fields group-by-group and collect grouped replies.
 
-        The caller-facing contract matches ``SocketHub.step_barrier``:
-        ``responses[molid]`` contains ``{"amp": ndarray(3,), "extra": bytes}``.
+        Parameters
+        ----------
+        requests : dict[int, dict]
+            Mapping from molecule ID to a request dict with keys:
+            - ``"efield_au"`` : array-like ``(3,)`` field vector in a.u.
+            - ``"init"`` : dict, optional INIT payload for a first bind.
+        timeout : float, optional
+            Maximum time (seconds) to wait for every group to reply. Defaults
+            to the hub's ``timeout`` setting.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping ``molid -> {"amp": ndarray(3,), "extra": bytes}``, matching
+            the ``SocketHub.step_barrier`` contract. Returns ``{}`` when paused,
+            when a molecule is not yet bound, or on a mid-step disconnect or
+            timeout.
+
+        Raises
+        ------
+        RuntimeError
+            If a bridge replies with the wrong set of molecule ids.
+
+        Notes
+        -----
+        A single pending group is served by a direct blocking receive; multiple
+        groups are awaited on the aggregate selector so whichever bridge becomes
+        readable first is collected next.
         """
 
         if self.paused:
@@ -1370,9 +2118,17 @@ class AggregatedSocketHub(SocketHub):
         """
         Snapshot the bridge groups and any stray clients to tear down.
 
-        Returns ``(group_clients, other_clients)`` where ``group_clients`` is a
-        list of ``(group_id, bridge_state, molecule_ids)`` and ``other_clients``
-        is a list of ``(client_key, client_state)`` not already covered above.
+        Returns
+        -------
+        tuple[list, list]
+            ``(group_clients, other_clients)`` where ``group_clients`` is a
+            list of ``(group_id, bridge_state, molecule_ids)`` and
+            ``other_clients`` is a list of ``(client_key, client_state)`` not
+            already covered above.
+
+        Notes
+        -----
+        Acquires ``self._lock`` to take a consistent snapshot.
         """
 
         with self._lock:
@@ -1391,7 +2147,15 @@ class AggregatedSocketHub(SocketHub):
         return group_clients, other_clients
 
     def _request_bridge_shutdown(self, group_clients) -> None:
-        """Send ``STOP`` to every live bridge group."""
+        """
+        Send ``STOP`` to every live bridge group.
+
+        Parameters
+        ----------
+        group_clients : list
+            ``(group_id, bridge_state, molecule_ids)`` tuples as returned by
+            :meth:`_snapshot_stop_targets`. Send errors are ignored.
+        """
 
         for _group_id, st, _molecule_ids in group_clients:
             if not st.alive:
@@ -1402,7 +2166,17 @@ class AggregatedSocketHub(SocketHub):
                 pass
 
     def _await_bridge_byes(self, group_clients) -> None:
-        """Wait briefly for each bridge to acknowledge ``STOP`` with ``BYE``."""
+        """
+        Wait briefly for each bridge to acknowledge ``STOP`` with ``BYE``.
+
+        Parameters
+        ----------
+        group_clients : list
+            ``(group_id, bridge_state, molecule_ids)`` tuples as returned by
+            :meth:`_snapshot_stop_targets`. Each acknowledging bridge is marked
+            no longer alive; the wait ends once all are done or a short deadline
+            elapses.
+        """
 
         deadline = time.time() + max(2.0, 10.0 * self.latency)
         while time.time() < deadline:
@@ -1422,7 +2196,22 @@ class AggregatedSocketHub(SocketHub):
             time.sleep(self.latency)
 
     def _teardown_stop_targets(self, group_clients, other_clients) -> None:
-        """Clear all bridge/molecule state and close every snapshotted socket."""
+        """
+        Clear all bridge/molecule state and close every snapshotted socket.
+
+        Parameters
+        ----------
+        group_clients : list
+            ``(group_id, bridge_state, molecule_ids)`` tuples to tear down.
+        other_clients : list
+            ``(client_key, client_state)`` tuples for stray clients not bound
+            to any group.
+
+        Notes
+        -----
+        Group/molecule bookkeeping is cleared under ``self._lock``; the actual
+        socket closes happen afterwards outside the lock.
+        """
 
         sockets_to_close = []
         with self._lock:
@@ -1495,6 +2284,32 @@ class LocalSocketHubBridge:
     Downstream:
         one ordinary :class:`SocketHub` using either TCP or UNIX sockets,
         connected to many existing MaxwellLink socket drivers.
+
+    Parameters
+    ----------
+    group_id : str
+        Non-empty aggregate group identifier this bridge serves.
+    upstream_host : str
+        Host of the upstream :class:`AggregatedSocketHub`.
+    upstream_port : int
+        TCP port of the upstream hub.
+    timeout : float, default: 60.0
+        Operation timeout (seconds) for both the upstream link and the
+        downstream local hub.
+    latency : float, default: 0.01
+        Polling interval (seconds) propagated to the downstream local hub.
+    local_host : str, default: ``"127.0.0.1"``
+        Downstream bind host, used only when ``local_unixsocket`` is ``None``.
+    local_port : int or None, optional
+        Downstream TCP port. Ignored when a UNIX socket is used.
+    local_unixsocket : str or None, optional
+        Downstream UNIX-socket address. When both this and ``local_port`` are
+        ``None``, a sanitized name derived from ``group_id`` is used.
+
+    Raises
+    ------
+    ValueError
+        If ``group_id`` is empty.
     """
 
     def __init__(
@@ -1544,14 +2359,35 @@ class LocalSocketHubBridge:
 
     @property
     def local_endpoint(self) -> dict:
-        """Return the downstream socket endpoint local drivers should connect to."""
+        """
+        Return the downstream socket endpoint local drivers should connect to.
+
+        Returns
+        -------
+        dict
+            ``{"unixsocket": <name>}`` when a UNIX socket is configured,
+            otherwise ``{"host": <host>, "port": <port>}``.
+        """
 
         if self.local_unixsocket is not None:
             return {"unixsocket": self.local_unixsocket}
         return {"host": self.local_host, "port": self.local_port}
 
     def _ensure_local_hub_ready(self, init_payloads: Mapping[int, dict]) -> None:
-        """Register downstream molecule ids and wait until local drivers bind."""
+        """
+        Register downstream molecule ids and wait until local drivers bind.
+
+        Parameters
+        ----------
+        init_payloads : Mapping[int, dict]
+            Mapping from molecule ID to its INIT payload for the downstream
+            local hub.
+
+        Raises
+        ------
+        RuntimeError
+            If the downstream local drivers do not all bind in time.
+        """
 
         for mid in init_payloads.keys():
             try:
@@ -1570,7 +2406,26 @@ class LocalSocketHubBridge:
             )
 
     def _handle_group_init(self, payload: dict) -> None:
-        """Accept a new group membership assignment from the upstream hub."""
+        """
+        Accept a new group membership assignment from the upstream hub.
+
+        Parameters
+        ----------
+        payload : dict
+            Decoded AGGINIT payload carrying ``"group_id"`` and a per-molecule
+            ``"init_payloads"`` mapping.
+
+        Raises
+        ------
+        RuntimeError
+            If the payload's group id does not match this bridge, or the
+            downstream drivers fail to bind.
+
+        Notes
+        -----
+        On success ``self._init_payloads`` and the reusable
+        ``self._request_cache`` are (re)initialized for the new membership.
+        """
 
         incoming_group = str(payload.get("group_id", "")).strip()
         if incoming_group != self.group_id:
@@ -1595,8 +2450,22 @@ class LocalSocketHubBridge:
         """
         Map upstream efields onto the reusable downstream request cache.
 
-        When the requested molecule set matches the cache exactly we update the
-        cached arrays in place; otherwise we patch/extend the cache as needed.
+        Parameters
+        ----------
+        efields : Mapping[int, np.ndarray]
+            Mapping from molecule ID to its ``(3,)`` field vector.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping from molecule ID to a ``{"efield_au": ndarray}`` request
+            backed by the reusable cache.
+
+        Notes
+        -----
+        When the requested molecule set matches the cache exactly the cached
+        arrays are updated in place; otherwise the cache is patched/extended as
+        needed.
         """
 
         cache_hit = (
@@ -1624,7 +2493,24 @@ class LocalSocketHubBridge:
         return requests
 
     def _run_local_step(self, efields: Mapping[int, np.ndarray]) -> Dict[int, dict]:
-        """Fan out one grouped step to the downstream local hub."""
+        """
+        Fan out one grouped step to the downstream local hub.
+
+        Parameters
+        ----------
+        efields : Mapping[int, np.ndarray]
+            Mapping from molecule ID to its ``(3,)`` field vector.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping from molecule ID to ``{"amp": ndarray(3,), "extra": bytes}``.
+
+        Notes
+        -----
+        If the downstream barrier returns empty (e.g. a driver dropped) the
+        local hub is re-bound and the step retried until results arrive.
+        """
 
         requests = self._build_local_requests(efields)
         responses = self.local_hub.step_barrier(requests)
@@ -1634,7 +2520,20 @@ class LocalSocketHubBridge:
         return responses
 
     def run(self) -> None:
-        """Run the bridge loop until the hub sends ``STOP`` or disconnects."""
+        """
+        Run the bridge loop until the hub sends ``STOP`` or disconnects.
+
+        Raises
+        ------
+        RuntimeError
+            If the upstream hub sends an unrecognized aggregate header.
+
+        Notes
+        -----
+        Connects upstream (with retry), sends HELLO, then services AGGINIT,
+        AGGSTEP, and STOP frames in a loop. Upstream transport errors end the
+        loop quietly; the downstream local hub is always stopped on exit.
+        """
 
         sock = _connect_tcp_with_retry(
             address=self.upstream_host,
@@ -1680,7 +2579,15 @@ class LocalSocketHubBridge:
             self.local_hub.stop()
 
     def start(self) -> threading.Thread:
-        """Start the bridge loop in a daemon thread and return the thread handle."""
+        """
+        Start the bridge loop in a daemon thread and return the thread handle.
+
+        Returns
+        -------
+        threading.Thread
+            The running daemon thread. If a thread is already alive it is
+            returned unchanged rather than starting a second one.
+        """
 
         if self._thread is not None and self._thread.is_alive():
             return self._thread
@@ -1690,7 +2597,15 @@ class LocalSocketHubBridge:
         return self._thread
 
     def stop(self, wait: float = 2.0) -> None:
-        """Stop the bridge loop and close the downstream local hub."""
+        """
+        Stop the bridge loop and close the downstream local hub.
+
+        Parameters
+        ----------
+        wait : float, default: 2.0
+            Maximum time (seconds) to wait for the bridge thread to join after
+            signalling it to stop.
+        """
 
         self._stop_event.set()
 
