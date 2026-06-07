@@ -13,7 +13,10 @@ from .pulses import (
     cosine_drive,
     k_parallel_pulse,
 )
-from .transverse_components import calc_transverse_components_3d
+from .transverse_components import (
+    calc_transverse_components_3d,
+    project_transverse_field_3d,
+)
 
 __all__ = [
     "ir_spectrum",
@@ -24,4 +27,5 @@ __all__ = [
     "cosine_drive",
     "k_parallel_pulse",
     "calc_transverse_components_3d",
+    "project_transverse_field_3d",
 ]

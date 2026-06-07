@@ -23,7 +23,7 @@ from ..sockets import SocketHub
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper
 from ..molecule import Molecule, Vector3
 from ..units import EV_TO_CM_INV, FS_TO_AU
-from maxwelllink.tools import calc_transverse_components_3d
+from maxwelllink.tools import calc_transverse_components_3d, project_transverse_field_3d
 
 try:
     import meep as mp
@@ -107,6 +107,127 @@ def _make_custom_time_src(key):
 
     # MEEP calls this each time step; stream from the global accumulator
     return mp.CustomSource(lambda t: instantaneous_source_amplitudes[key])
+
+
+def _transverse_source_key(fingerprint_hash, field_tag, molecule_axis):
+    """
+    Return the accumulator key for one transverse source component.
+
+    One molecular dipole axis produces a vector transverse kernel.  Meep stores
+    that vector kernel as three scalar Ex/Ey/Ez sources, so the key must keep
+    both the emitted field component and the molecular dipole axis.
+
+    Parameters
+    ----------
+    fingerprint_hash : int
+        Hash identifying the molecule's shared polarization kernel.
+    field_tag : str
+        Meep electric-field component tag, one of ``"Ex"``, ``"Ey"``, or
+        ``"Ez"``.
+    molecule_axis : str
+        Molecular dipole axis that drives the transverse vector kernel, one of
+        ``"x"``, ``"y"``, or ``"z"``.
+
+    Returns
+    -------
+    tuple
+        Key used in ``instantaneous_source_amplitudes`` for one transverse
+        source component.
+    """
+
+    return (fingerprint_hash, "transverse", field_tag, molecule_axis)
+
+
+def _accumulate_source_amplitudes(m, amp_mu, touched):
+    """
+    Add one molecule's current amplitudes to the Meep source accumulators.
+
+    For ordinary 3D kernels, amp_mu[0], amp_mu[1], and amp_mu[2] drive Ex, Ey,
+    and Ez directly.  For transverse 3D kernels, each molecular axis drives a
+    full vector kernel.  The vector shape is stored in amp_data; this function
+    only streams the scalar time-dependent molecular amplitude.
+
+    Parameters
+    ----------
+    m : MoleculeMeepWrapper
+        Wrapped molecule whose source accumulators should be updated.
+    amp_mu : array-like of float, shape (3,)
+        Molecular source amplitude vector in Meep units.
+    touched : set
+        Accumulator keys already reset during the current Meep time step.  This
+        set is mutated in place so shared sources are reset once before all
+        molecules add their contributions.
+
+    Returns
+    -------
+    None
+        The global ``instantaneous_source_amplitudes`` mapping is updated in
+        place.
+    """
+
+    def add(key, val):
+        if key not in touched:
+            instantaneous_source_amplitudes[key] = 0.0
+            touched.add(key)
+        instantaneous_source_amplitudes[key] += float(val)
+
+    if m.dimensions in (1, 2):
+        add((m.polarization_fingerprint_hash, "Ez"), amp_mu[2])
+    elif m.polarization_type == "transverse":
+        for molecule_axis, val in (
+            ("x", amp_mu[0]),
+            ("y", amp_mu[1]),
+            ("z", amp_mu[2]),
+        ):
+            for field_tag in ("Ex", "Ey", "Ez"):
+                key = _transverse_source_key(
+                    m.polarization_fingerprint_hash,
+                    field_tag,
+                    molecule_axis,
+                )
+                add(key, val)
+    else:
+        for tag, val in (
+            ("Ex", amp_mu[0]),
+            ("Ey", amp_mu[1]),
+            ("Ez", amp_mu[2]),
+        ):
+            add((m.polarization_fingerprint_hash, tag), val)
+
+
+def _center_crop_array(data, shape):
+    """
+    Crop a Meep field array to the central source-kernel grid.
+
+    Meep's ``get_array`` can include endpoint samples outside the ``amp_data``
+    grid used by a source.  The transverse readback must use the same discrete
+    kernel shape as the source emission, so we keep the centered block.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        Field component array sampled from Meep.
+    shape : tuple of int
+        Desired centered output shape, usually the shape of the source
+        ``amp_data`` kernel.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``data`` if it already has ``shape``; otherwise the centered crop with
+        the requested shape.
+    """
+
+    if data.shape == shape:
+        return data
+    if len(data.shape) != len(shape) or any(n < m for n, m in zip(data.shape, shape)):
+        raise ValueError(
+            "Transverse E-field array shape does not contain polarization kernel shape."
+        )
+    slices = tuple(
+        slice((n - m) // 2, (n - m) // 2 + m) for n, m in zip(data.shape, shape)
+    )
+    return data[slices]
 
 
 class MeepUnits(DummyEMUnits):
@@ -289,8 +410,15 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         self.dt_au = self.m.dt_au
         self.polarization_type = self.m.polarization_type
 
-        # if polarization_type is "numerical" or "transverse", self.m.resolution must be set to a positive number
-        if self.polarization_type in ["numerical", "transverse", "point", "point-raw"]:
+        # if polarization_type is "numerical", "transverse", "point", or "point-raw",
+        # self.m.resolution must be set to a positive number.
+        needs_resolution = self.polarization_type in [
+            "numerical",
+            "transverse",
+            "point",
+            "point-raw",
+        ]
+        if needs_resolution:
             if (
                 not hasattr(self.m, "resolution")
                 or self.m.resolution is None
@@ -641,67 +769,41 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                 )
             srcs.append(_fingerprint_source[key])
         else:  # 3D
-            for comp, tag in (
-                (mp.Ex, "Ex"),
-                (mp.Ey, "Ey"),
-                (mp.Ez, "Ez"),
-            ):
-                cutoff = 30
-                key = (self.polarization_fingerprint_hash, tag)
-                if key not in _fingerprint_source:
-                    # create polarization amp data numerically
-                    X = np.arange(-self.size.x / 2, self.size.x / 2, dx)
-                    Y = np.arange(-self.size.y / 2, self.size.y / 2, dx)
-                    Z = np.arange(-self.size.z / 2, self.size.z / 2, dx)
-
-                    XX, YY, ZZ = np.meshgrid(X, Y, Z, indexing="ij")
-
-                    if tag == "Ex":
-                        _, px_t, py_t, pz_t = calc_transverse_components_3d(
-                            size=(self.size.x, self.size.y, self.size.z),
-                            dx=dx,
-                            sigma=self.sigma,
-                            mu12=self.rescaling_factor,
-                            local_size=self.size.x * cutoff,
-                            component="x",
-                        )
-
-                        amp_data = px_t
-                    elif tag == "Ey":
-                        _, px_t, py_t, pz_t = calc_transverse_components_3d(
-                            size=(self.size.x, self.size.y, self.size.z),
-                            dx=dx,
-                            sigma=self.sigma,
-                            mu12=self.rescaling_factor,
-                            local_size=self.size.x * cutoff,
-                            component="y",
-                        )
-
-                        amp_data = py_t
-                    else:
-                        _, px_t, py_t, pz_t = calc_transverse_components_3d(
-                            size=(self.size.x, self.size.y, self.size.z),
-                            dx=dx,
-                            sigma=self.sigma,
-                            mu12=self.rescaling_factor,
-                            local_size=self.size.x * cutoff,
-                            component="z",
-                        )
-
-                        amp_data = pz_t
-
-                    amp_data = np.copy(amp_data.astype(np.complex128), order="C")
-
-                    instantaneous_source_amplitudes[key] = 0.0
-                    _fingerprint_source[key] = mp.Source(
-                        src=_make_custom_time_src(key),
-                        component=comp,
-                        center=center,
-                        size=size,
-                        amplitude=1.0,
-                        amp_data=amp_data,
+            cutoff = 15
+            # A molecular x/y/z dipole produces a transverse vector kernel.
+            # Meep stores that vector kernel as separate scalar Ex/Ey/Ez sources.
+            for molecule_axis in ("x", "y", "z"):
+                _, px_t, py_t, pz_t = calc_transverse_components_3d(
+                    size=(self.size.x, self.size.y, self.size.z),
+                    dx=dx,
+                    sigma=self.sigma,
+                    mu12=self.rescaling_factor,
+                    local_size=self.size.x * cutoff,
+                    component=molecule_axis,
+                )
+                for comp, field_tag, amp_data in (
+                    (mp.Ex, "Ex", px_t),
+                    (mp.Ey, "Ey", py_t),
+                    (mp.Ez, "Ez", pz_t),
+                ):
+                    key = _transverse_source_key(
+                        self.polarization_fingerprint_hash,
+                        field_tag,
+                        molecule_axis,
                     )
-                srcs.append(_fingerprint_source[key])
+                    if key not in _fingerprint_source:
+                        amp_data = np.copy(amp_data.astype(np.complex128), order="C")
+
+                        instantaneous_source_amplitudes[key] = 0.0
+                        _fingerprint_source[key] = mp.Source(
+                            src=_make_custom_time_src(key),
+                            component=comp,
+                            center=center,
+                            size=size,
+                            amplitude=1.0,
+                            amp_data=amp_data,
+                        )
+                    srcs.append(_fingerprint_source[key])
 
         self.sources = srcs
 
@@ -904,6 +1006,9 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                 raise ValueError(
                     "For uniform polarization_type, the size of the molecule should be positive in all dimensions."
                 )
+            amplitude = self.rescaling_factor / (
+                self.size.x * self.size.y * self.size.z
+            )
             for comp, tag in (
                 (mp.Ex, "Ex"),
                 (mp.Ey, "Ey"),
@@ -917,8 +1022,7 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                         component=comp,
                         center=center,
                         size=size,
-                        amplitude=self.rescaling_factor
-                        / (self.size.x * self.size.y * self.size.z),
+                        amplitude=amplitude,
                     )
                 srcs.append(_fingerprint_source[key])
 
@@ -938,8 +1042,10 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         list of float
             Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
         """
-        if self.polarization_type in ["analytical", "numerical", "transverse"]:
+        if self.polarization_type in ["analytical", "numerical"]:
             return self._calculate_ep_integral_gaussian_analytical(sim)
+        elif self.polarization_type == "transverse":
+            return self._calculate_ep_integral_transverse(sim)
         elif self.polarization_type == "point":
             return self._calculate_ep_integral_point(sim)
         elif self.polarization_type == "point-raw":
@@ -1045,6 +1151,59 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                 * (ey),
                 vol,
             )
+        return [np.real(x), np.real(y), np.real(z)]
+
+    def _calculate_ep_integral_transverse(self, sim: mp.Simulation):
+        """
+        Compute the regularized E-field integral over the transverse kernel.
+
+        Parameters
+        ----------
+        sim : meep.Simulation
+            Active Meep simulation.
+
+        Returns
+        -------
+        list of float
+            Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
+        """
+
+        if self.dimensions != 3:
+            raise ValueError(
+                "Transverse polarization_type is currently only supported in 3D simulations."
+            )
+
+        vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
+        dx = 1.0 / self.m.resolution
+        cutoff = 15
+
+        ex = np.asarray(sim.get_array(mp.Ex, vol))
+        ey = np.asarray(sim.get_array(mp.Ey, vol))
+        ez = np.asarray(sim.get_array(mp.Ez, vol))
+        ex, ey, ez = project_transverse_field_3d(ex, ey, ez, dx)
+
+        x = y = z = 0.0
+        for mol_tag in ("x", "y", "z"):
+            _, px_t, py_t, pz_t = calc_transverse_components_3d(
+                size=(self.size.x, self.size.y, self.size.z),
+                dx=dx,
+                sigma=self.sigma,
+                mu12=self.rescaling_factor,
+                local_size=self.size.x * cutoff,
+                component=mol_tag,
+            )
+            ex_t = _center_crop_array(ex, px_t.shape)
+            ey_t = _center_crop_array(ey, py_t.shape)
+            ez_t = _center_crop_array(ez, pz_t.shape)
+            # Read back with the same transverse vector kernel used for emission.
+            int_ep = dx**3 * np.sum(ex_t * px_t + ey_t * py_t + ez_t * pz_t)
+            if mol_tag == "x":
+                x = int_ep
+            elif mol_tag == "y":
+                y = int_ep
+            else:
+                z = int_ep
+
         return [np.real(x), np.real(y), np.real(z)]
 
     def _calculate_ep_integral_point(self, sim: mp.Simulation):
@@ -1323,24 +1482,7 @@ def update_molecules_no_socket(
         for m in molecules:
             amp_au = np.asarray(m.calc_amp_vector(), dtype=float)
             amp_mu = m.em_units.source_amp_au_to_em(amp_au)
-
-            if m.dimensions in (1, 2):
-                key = (m.polarization_fingerprint_hash, "Ez")
-                if key not in touched:
-                    instantaneous_source_amplitudes[key] = 0.0
-                    touched.add(key)
-                instantaneous_source_amplitudes[key] += float(amp_mu[2])
-            else:
-                for tag, val in (
-                    ("Ex", amp_mu[0]),
-                    ("Ey", amp_mu[1]),
-                    ("Ez", amp_mu[2]),
-                ):
-                    key = (m.polarization_fingerprint_hash, tag)
-                    if key not in touched:
-                        instantaneous_source_amplitudes[key] = 0.0
-                        touched.add(key)
-                    instantaneous_source_amplitudes[key] += float(val)
+            _accumulate_source_amplitudes(m, amp_mu, touched)
 
             extra_blob = m.d_f.append_additional_data()
             if extra_blob:
@@ -1462,24 +1604,7 @@ def update_molecules_no_mpi(
                 continue
             amp_au = np.asarray(responses[m.molecule_id]["amp"], dtype=float)
             amp_mu = m.em_units.source_amp_au_to_em(amp_au)
-
-            if m.dimensions in (1, 2):
-                key = (m.polarization_fingerprint_hash, "Ez")
-                if key not in touched:
-                    instantaneous_source_amplitudes[key] = 0.0
-                    touched.add(key)
-                instantaneous_source_amplitudes[key] += float(amp_mu[2])
-            else:
-                for tag, val in (
-                    ("Ex", amp_mu[0]),
-                    ("Ey", amp_mu[1]),
-                    ("Ez", amp_mu[2]),
-                ):
-                    key = (m.polarization_fingerprint_hash, tag)
-                    if key not in touched:
-                        instantaneous_source_amplitudes[key] = 0.0
-                        touched.add(key)
-                    instantaneous_source_amplitudes[key] += float(val)
+            _accumulate_source_amplitudes(m, amp_mu, touched)
 
             extra_blob = responses[m.molecule_id].get("extra", b"")
             if extra_blob:
@@ -1676,24 +1801,7 @@ def update_molecules(
             amp_au = amps_flat[off : off + 3]
             off += 3
             amp_mu = m.em_units.source_amp_au_to_em(amp_au)
-
-            if m.dimensions in (1, 2):
-                key = (m.polarization_fingerprint_hash, "Ez")
-                if key not in touched:
-                    instantaneous_source_amplitudes[key] = 0.0
-                    touched.add(key)
-                instantaneous_source_amplitudes[key] += float(amp_mu[2])
-            else:
-                for tag, val in (
-                    ("Ex", amp_mu[0]),
-                    ("Ey", amp_mu[1]),
-                    ("Ez", amp_mu[2]),
-                ):
-                    key = (m.polarization_fingerprint_hash, tag)
-                    if key not in touched:
-                        instantaneous_source_amplitudes[key] = 0.0
-                        touched.add(key)
-                    instantaneous_source_amplitudes[key] += float(val)
+            _accumulate_source_amplitudes(m, amp_mu, touched)
 
             if _is_master:
                 extra_blob = extras_by_id.get(m.molecule_id, b"")

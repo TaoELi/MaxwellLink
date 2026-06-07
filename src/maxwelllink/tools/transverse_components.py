@@ -14,7 +14,54 @@ import numpy as np
 transverse_component_dir = {}
 
 
-def calc_transverse_components_3d(
+def project_transverse_field_3d(ex, ey, ez, dx):
+    """
+    Return the transverse part of a sampled 3D electric field.
+
+    Parameters
+    ----------
+    ex, ey, ez : numpy.ndarray
+        Matching 3D arrays containing the sampled electric-field components.
+    dx : float
+        Uniform grid spacing used to build the FFT wave vectors.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Transverse-projected electric-field components ``(ex_t, ey_t, ez_t)``
+        on the same grid as the inputs.
+    """
+
+    if ex.shape != ey.shape or ex.shape != ez.shape:
+        raise ValueError("E-field component arrays must have matching shapes.")
+
+    kx = 2.0 * np.pi * np.fft.fftfreq(ex.shape[0], d=dx)
+    ky = 2.0 * np.pi * np.fft.fftfreq(ex.shape[1], d=dx)
+    kz = 2.0 * np.pi * np.fft.fftfreq(ex.shape[2], d=dx)
+    Kx, Ky, Kz = np.meshgrid(kx, ky, kz, indexing="ij")
+    K2 = Kx**2 + Ky**2 + Kz**2
+
+    fex = np.fft.fftn(ex)
+    fey = np.fft.fftn(ey)
+    fez = np.fft.fftn(ez)
+    field_div = Kx * fex + Ky * fey + Kz * fez
+
+    mask = K2 > 0.0
+    fex_t = fex.copy()
+    fey_t = fey.copy()
+    fez_t = fez.copy()
+    fex_t[mask] -= Kx[mask] * field_div[mask] / K2[mask]
+    fey_t[mask] -= Ky[mask] * field_div[mask] / K2[mask]
+    fez_t[mask] -= Kz[mask] * field_div[mask] / K2[mask]
+
+    return (
+        np.real(np.fft.ifftn(fex_t)),
+        np.real(np.fft.ifftn(fey_t)),
+        np.real(np.fft.ifftn(fez_t)),
+    )
+
+
+def _calc_transverse_components_3d(
     size=(20, 20, 20), dx=1.0, sigma=1.0, mu12=0.10, local_size=100, component="z"
 ):
     """
@@ -152,3 +199,64 @@ def calc_transverse_components_3d(
     transverse_component_dir[key] = (Pz, Px_t, Py_t, Pz_t)
 
     return Pz, Px_t, Py_t, Pz_t
+
+
+def calc_transverse_components_3d(
+    size=(20, 20, 20), dx=1.0, sigma=1.0, mu12=0.10, local_size=100, component="z"
+):
+    """
+    Calculate the transverse components of a 3D Gaussian polarization distribution with optional MPI optimization.
+
+    Parameters
+    ----------
+    size : tuple of float of length 3
+        The size of the simulation box in each dimension.
+    dx : float
+        The spatial resolution (grid spacing) = 1 / resolution.
+    sigma : float
+        The width of the Gaussian distribution.
+    mu12 : float
+        The transition dipole moment scaling factor.
+    local_size : float
+        The size of the local box for FFT calculations, which should be larger than `size` for convergence.
+    component : str
+        The component of the polarization to calculate ('x', 'y', or 'z').  Default is 'z'.
+    """
+
+    key = (size, dx, sigma, mu12, local_size, component)
+    if key in transverse_component_dir:
+        return transverse_component_dir[key]
+
+    try:
+        from mpi4py import MPI
+
+        comm = MPI.COMM_WORLD
+        has_mpi = comm.Get_size() > 1
+    except Exception:
+        has_mpi = False
+
+    if not has_mpi:
+        return _calc_transverse_components_3d(
+            size=size,
+            dx=dx,
+            sigma=sigma,
+            mu12=mu12,
+            local_size=local_size,
+            component=component,
+        )
+
+    if comm.Get_rank() == 0:
+        result = _calc_transverse_components_3d(
+            size=size,
+            dx=dx,
+            sigma=sigma,
+            mu12=mu12,
+            local_size=local_size,
+            component=component,
+        )
+    else:
+        result = None
+
+    result = comm.bcast(result, root=0)
+    transverse_component_dir[key] = result
+    return result

@@ -92,7 +92,8 @@ class Molecule:
         store_additional_data : bool, default: True
             Whether to store additional data history as a growing list (if True) or only keep the latest five frames (if False).
         polarization_type : str or None, optional
-            Type of polarization to use in EM FDTD propagation. Six options: ``analytical``, ``numerical``, ``transverse``, ``point``, ``point-raw``, ``anisotropic``.
+            Type of polarization to use in EM FDTD propagation. Options include ``analytical``, ``numerical``, ``transverse``,
+            ``point``, ``point-raw``, ``anisotropic``, and ``uniform``.
             Default is ``analytical``. ``analytical`` uses analytical Gaussian polarization profile;
             ``numerical`` uses numerical Gaussian polarization profile;
             ``transverse`` uses approximate transverse components of numerical Gaussian polarization profile from FFT;
