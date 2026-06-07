@@ -448,7 +448,7 @@ class MultiModeSimulation(DummyEMSimulation):
         photon_pulse_axis : str, default: "y"
             pulse axis for the photon pulse.
         photon_partial_charge : float, default: 1.0
-            Partial charge for the photon pulse (a.u.). This is a prefactor applied to the photon pulse drive term, which can be used to effectively scale the strength of the photon pulse without changing its time dependence.
+            Partial charge for the photon pulse (a.u.). This partial charge defines the magnitude of cavity normal modes' response to external pulses, in a manner similar to partial charges of atoms.
         excited_grid_list : list, optional
             List of grid point indices that are excited by the molecule pulse. The excitation is applied by adding the molecule pulse drive to the effective electric field at these grid points.
         molecule_pulse_drive : float or callable, optional
@@ -583,10 +583,7 @@ class MultiModeSimulation(DummyEMSimulation):
             raise ValueError("At least one pulse axis (x, y, or z) must be specified.")
 
         if isinstance(photon_partial_charge, (int, float)):
-            if photon_partial_charge < 0.0:
-                raise ValueError("photon_partial_charge must be a positive value.")
-            else:
-                self.photon_partial_charge = float(photon_partial_charge)
+            self.photon_partial_charge = float(photon_partial_charge)
         else:
             raise ValueError("photon_partial_charge must be a value representing the partial charge for the photon pulse.")
 
