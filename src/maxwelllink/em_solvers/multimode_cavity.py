@@ -404,6 +404,7 @@ class MultiModeSimulation(DummyEMSimulation):
         excited_mode_list: Optional[list] = [],
         photon_pulse_drive: Optional[Union[float, Callable[[float], float]]] = None,
         photon_pulse_axis: str = "y",
+        photon_partial_charge: float = 1.0,
         excited_grid_list: Optional[list] = [],
         molecule_pulse_drive: Optional[Union[float, Callable[[float], float]]] = None,
         molecule_pulse_axis: str = "y",
@@ -446,6 +447,8 @@ class MultiModeSimulation(DummyEMSimulation):
             Constant photon pulse drive term or function ``photon_pulse_drive(t_au)``.
         photon_pulse_axis : str, default: "y"
             pulse axis for the photon pulse.
+        photon_partial_charge : float, default: 1.0
+            Partial charge for the photon pulse (a.u.). This partial charge defines the magnitude of cavity normal modes' response to external pulses, in a manner similar to partial charges of atoms.
         excited_grid_list : list, optional
             List of grid point indices that are excited by the molecule pulse. The excitation is applied by adding the molecule pulse drive to the effective electric field at these grid points.
         molecule_pulse_drive : float or callable, optional
@@ -578,6 +581,11 @@ class MultiModeSimulation(DummyEMSimulation):
         # we need True in at least one axis
         if not np.any(self.photon_pulse_axis):
             raise ValueError("At least one pulse axis (x, y, or z) must be specified.")
+
+        if isinstance(photon_partial_charge, (int, float)):
+            self.photon_partial_charge = float(photon_partial_charge)
+        else:
+            raise ValueError("photon_partial_charge must be a value representing the partial charge for the photon pulse.")
 
         self.molecule_pulse_axis = np.array([False, False, False], dtype=bool)
         if "x" in molecule_pulse_axis.lower():
@@ -729,7 +737,7 @@ class MultiModeSimulation(DummyEMSimulation):
         mu_dot_f = self._calc_mu_dot_f_subspace(mu)
         acceleration = - self.varepsilon_k[:, None] * mu_dot_f - self.omega_k2[:, None] * qc
         if self.excited_mode_list:
-            acceleration[self.excited_mode_list, :] += self._eval_pulse_field(
+            acceleration[self.excited_mode_list, :] -= self.photon_partial_charge * self._eval_pulse_field(
                 pulse=self.photon_drive,
                 selected=self.excited_mode_list,
                 axis=self.photon_pulse_axis,
@@ -786,9 +794,9 @@ class MultiModeSimulation(DummyEMSimulation):
         photonic_energy : numpy.ndarray of float, shape (n_mode,)
             Energy of each cavity mode.
         """
-        kinetic_energy = 0.5 * np.sum(pc**2, axis=1)
-        potential_energy = 0.5 * np.sum(self.omega_k2[:, None] * qc**2, axis=1)
-        photonic_energy = kinetic_energy + potential_energy
+        kinetic_energy = 0.5 * pc**2
+        potential_energy = 0.5 * self.omega_k2[:, None] * qc**2
+        photonic_energy = np.sum((kinetic_energy + potential_energy) * self.axis, axis=1)
         return photonic_energy
 
     def _calc_energy(self, pc, qc, mu) -> float:
