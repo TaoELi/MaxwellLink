@@ -27,6 +27,7 @@ import shlex
 import socket
 import threading
 import time
+from collections import Counter
 from typing import Dict, Optional
 
 import numpy as np
@@ -40,6 +41,7 @@ from .aggregated import (
     RemoteBridgeSpec,
     _ResultCodec,
     _StepCodec,
+    _close_socket,
     _json_loads_bytes,
 )
 from .sockets import (
@@ -64,6 +66,81 @@ from .susceptibility import (
 )
 
 
+def _aggregation_manifest(
+    *,
+    hub_host,
+    hub_port,
+    timeout: float,
+    latency: float,
+    unix_prefix: str,
+    molecules_per_bridge: Optional[int],
+    bridges: list,
+) -> dict:
+    """
+    Build one aggregation manifest payload in the canonical key order.
+
+    This is the single place that defines the manifest schema shared by the
+    child hub's ``bridge_info``, the finalized on-disk manifest, and the public
+    hub's ``init_remote_bridges`` placeholder.
+
+    Parameters
+    ----------
+    hub_host : str
+        Host name or IP that bridge processes connect back to.
+    hub_port : int
+        TCP port of the upstream aggregate hub.
+    timeout : float
+        Operation timeout (seconds) recorded for downstream bridge nodes;
+        coerced to ``float``.
+    latency : float
+        Polling interval (seconds) recorded for downstream bridge nodes;
+        coerced to ``float``.
+    unix_prefix : str
+        Prefix used to generate the per-bridge UNIX-socket names.
+    molecules_per_bridge : int or None
+        Target molecule count per bridge, or ``None`` when partitioning is still
+        deferred (placeholder manifest).
+    bridges : list
+        Per-bridge specification dicts, as produced by
+        :meth:`RemoteBridgeSpec.to_dict`.
+
+    Returns
+    -------
+    dict
+        Manifest mapping with ``version``, ``hub_host``, ``hub_port``,
+        ``timeout``, ``latency``, ``unix_prefix``, ``molecules_per_bridge``, and
+        ``bridges`` entries, in that key order.
+    """
+
+    return {
+        "version": AGGREGATION_INFO_VERSION,
+        "hub_host": hub_host,
+        "hub_port": hub_port,
+        "timeout": float(timeout),
+        "latency": float(latency),
+        "unix_prefix": unix_prefix,
+        "molecules_per_bridge": molecules_per_bridge,
+        "bridges": bridges,
+    }
+
+
+def _write_manifest(path: str, payload: dict) -> None:
+    """
+    Write one aggregation manifest to ``path`` as pretty, sorted JSON.
+
+    Parameters
+    ----------
+    path : str or path-like
+        Destination file path; any existing content is overwritten.
+    payload : dict
+        Manifest mapping to serialize, typically from
+        :func:`_aggregation_manifest`.
+    """
+
+    with open(os.fspath(path), "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+
 def _run_aggregated_susceptibility_socket_hub_server(
     host: Optional[str],
     port: int,
@@ -79,6 +156,41 @@ def _run_aggregated_susceptibility_socket_hub_server(
 ) -> None:
     """
     Child-process entry point for :class:`AggregatedSusceptibilitySocketHub`.
+
+    Parameters
+    ----------
+    host : str or None
+        Interface the upstream TCP server binds to.
+    port : int
+        TCP port for the upstream server.
+    timeout : float
+        Operation timeout (seconds) for binding and stepping.
+    latency : float
+        Polling interval (seconds) for the bind/step loops.
+    num_bridges : int
+        Initial number of aggregate bridge groups.
+    unix_prefix : str
+        Prefix used to generate aggregate bridge group ids.
+    init_grace_seconds : float
+        Grace period (seconds) for collecting the first burst of rank INITs when
+        the expected molecule total is not announced up front.
+    ready_queue : multiprocessing.Queue
+        Startup channel: the child puts ``{"host", "port", "bridge_info"}`` on
+        success or ``{"error": ...}`` on failure.
+    stats_queue : multiprocessing.Queue
+        Channel the child pushes per-rank statistics snapshots onto whenever they
+        change, plus a final snapshot on shutdown.
+    control_queue : multiprocessing.Queue
+        Channel the parent uses to send control commands (e.g.
+        ``init_remote_bridges``) into the running hub.
+    stop_event : multiprocessing.Event
+        Event set by the parent to request shutdown.
+
+    Notes
+    -----
+    Runs until ``stop_event`` is set, then stops the hub and flushes a final
+    statistics snapshot. A startup exception is reported through ``ready_queue``
+    instead of raised, so the parent process can surface it.
     """
 
     server = None
@@ -133,6 +245,37 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         unix_prefix: str = "mxl_bridge_",
         init_grace_seconds: float = 0.5,
     ):
+        """
+        Bind the upstream TCP server and initialize hub bookkeeping.
+
+        Parameters
+        ----------
+        host : str or None, optional
+            Interface to bind the upstream TCP server to. ``None``, ``""``,
+            ``"0.0.0.0"``, or ``"::"`` bind all interfaces; bridges and ranks
+            then connect back over ``127.0.0.1``.
+        port : int or None, default: 31415
+            TCP port for the upstream server. ``0`` selects an ephemeral port.
+        timeout : float, default: 60000.0
+            Operation timeout (seconds) for binding and stepping.
+        latency : float, default: 0.05
+            Polling interval (seconds) for the bind/step loops.
+        num_bridges : int, default: 1
+            Initial number of aggregate bridge groups (overridden later if a
+            remote-bridge policy is configured).
+        unix_prefix : str, default: ``"mxl_bridge_"``
+            Prefix used to generate aggregate bridge group ids
+            ``f"{unix_prefix}{idx}"``.
+        init_grace_seconds : float, default: 0.5
+            Grace period (seconds) for collecting the first burst of rank INITs
+            when the expected molecule total is not announced up front.
+
+        Raises
+        ------
+        ValueError
+            If ``num_bridges`` is not positive.
+        """
+
         nbridge = int(num_bridges)
         if nbridge <= 0:
             raise ValueError("num_bridges must be positive.")
@@ -140,8 +283,6 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         self._rank_threads: list[threading.Thread] = []
         self._classifier_threads: list[threading.Thread] = []
         self._rank_sockets: list[socket.socket] = []
-        self._rank_payloads: dict[int, dict] = {}
-        self._rank_init_payloads: dict[int, dict[int, dict]] = {}
         self._client_init_payloads: dict[int, dict[int, dict]] = {}
         self._client_ranks: dict[int, int] = {}
         self._next_client_id = 0
@@ -155,8 +296,8 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         self._global_results: dict[int, dict[int, dict]] = {}
         self._global_error: Optional[BaseException] = None
         self._global_running = False
-        self._global_step_index = 0
-        self._group_ids = [f"{unix_prefix}{idx}" for idx in range(nbridge)]
+        self._unix_prefix = str(unix_prefix)
+        self._group_ids = [f"{self._unix_prefix}{idx}" for idx in range(nbridge)]
         self._group_loads = {group_id: 0 for group_id in self._group_ids}
         self._mxl_molecule_to_group: dict[int, str] = {}
         self._request_caches: dict[int, dict[int, dict]] = {}
@@ -181,19 +322,25 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
     def bridge_info(self) -> dict:
         """
         Manifest payload consumed by ``mxl_bridge --info ...``.
+
+        Returns
+        -------
+        dict
+            A copy of the finalized manifest once it has been written, otherwise
+            a placeholder manifest enumerating the currently configured groups
+            with zero molecules each.
         """
 
         if self._bridge_manifest_info is not None:
             return dict(self._bridge_manifest_info)
-        return {
-            "version": AGGREGATION_INFO_VERSION,
-            "hub_host": self._bridge_connect_host,
-            "hub_port": self._bridge_connect_port,
-            "timeout": float(self.timeout),
-            "latency": float(self.latency),
-            "unix_prefix": self._group_ids[0].rsplit("0", 1)[0] if self._group_ids else "",
-            "molecules_per_bridge": None,
-            "bridges": [
+        return _aggregation_manifest(
+            hub_host=self._bridge_connect_host,
+            hub_port=self._bridge_connect_port,
+            timeout=self.timeout,
+            latency=self.latency,
+            unix_prefix=self._unix_prefix,
+            molecules_per_bridge=None,
+            bridges=[
                 RemoteBridgeSpec(
                     idx=idx,
                     group_id=group_id,
@@ -202,7 +349,7 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 ).to_dict()
                 for idx, group_id in enumerate(self._group_ids)
             ],
-        }
+        )
 
     def configure_remote_bridges(
         self,
@@ -213,6 +360,26 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
     ) -> None:
         """
         Record the ``init_remote_bridges`` policy sent by the public hub.
+
+        Parameters
+        ----------
+        molecules_per_bridge : int
+            Target number of socket molecules per aggregate bridge.
+        unix_prefix : str
+            Prefix used to generate aggregate bridge group ids.
+        save_file : str or path-like
+            Path where the finalized bridge manifest will be written.
+
+        Raises
+        ------
+        ValueError
+            If ``molecules_per_bridge`` is not a positive integer.
+
+        Notes
+        -----
+        If the expected molecule total is already known, the group layout is
+        recomputed immediately; otherwise it is deferred until the first
+        ``MXLINIT`` reports ``expected_total_molecules``.
         """
 
         per_bridge = int(molecules_per_bridge)
@@ -230,6 +397,18 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 )
 
     def drain_control_queue(self) -> None:
+        """
+        Apply any pending control commands from the parent process.
+
+        Notes
+        -----
+        Drains the control queue non-blockingly and handles
+        ``init_remote_bridges`` commands by forwarding them to
+        :meth:`configure_remote_bridges`. Called both from the child's main loop
+        and from rank handlers so a late policy still takes effect. A no-op when
+        no control queue is attached.
+        """
+
         q = self._control_queue
         if q is None:
             return
@@ -246,6 +425,22 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 )
 
     def _configure_remote_bridge_layout_locked(self, total_molecules: int) -> None:
+        """
+        Recompute group ids and loads from the remote-bridge policy.
+
+        Parameters
+        ----------
+        total_molecules : int
+            Expected total number of socket molecules across all ranks, used to
+            size the bridge count as ``ceil(total / molecules_per_bridge)``.
+
+        Notes
+        -----
+        Caller must hold ``self._meep_lock``. A no-op when no remote-bridge
+        policy is set, when molecules have already been assigned to groups, or
+        when ``total_molecules`` is non-positive.
+        """
+
         if self._remote_bridge_policy is None or self._mxl_molecule_to_group:
             return
         total = int(total_molecules)
@@ -253,11 +448,32 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             return
         per_bridge = int(self._remote_bridge_policy["molecules_per_bridge"])
         nbridge = max(1, int(math.ceil(total / per_bridge)))
-        prefix = str(self._remote_bridge_policy["unix_prefix"])
-        self._group_ids = [f"{prefix}{idx}" for idx in range(nbridge)]
+        self._unix_prefix = str(self._remote_bridge_policy["unix_prefix"])
+        self._group_ids = [f"{self._unix_prefix}{idx}" for idx in range(nbridge)]
         self._group_loads = {group_id: 0 for group_id in self._group_ids}
 
     def _note_expected_total_molecules_locked(self, init_payload: dict) -> None:
+        """
+        Record the expected molecule total advertised in an INIT payload.
+
+        Parameters
+        ----------
+        init_payload : dict
+            MXLINIT payload, optionally carrying an ``"expected_total_molecules"``
+            entry.
+
+        Raises
+        ------
+        RuntimeError
+            If two INIT payloads report different positive totals.
+
+        Notes
+        -----
+        Caller must hold ``self._meep_lock``. A no-op when the payload omits the
+        total or reports a non-positive value. On the first valid total it also
+        triggers the deferred group-layout computation.
+        """
+
         raw_total = init_payload.get("expected_total_molecules")
         if raw_total is None:
             return
@@ -276,9 +492,34 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         self._configure_remote_bridge_layout_locked(total)
 
     def _registered_molecule_count_locked(self) -> int:
+        """
+        Count socket molecules registered across all Meep clients so far.
+
+        Returns
+        -------
+        int
+            Total number of molecules across every client's INIT payload set.
+
+        Notes
+        -----
+        Caller must hold ``self._meep_lock``.
+        """
+
         return sum(len(payloads) for payloads in self._client_init_payloads.values())
 
     def _write_final_bridge_manifest_locked(self) -> None:
+        """
+        Write the finalized bridge manifest once all molecules are registered.
+
+        Notes
+        -----
+        Caller must hold ``self._meep_lock``. Idempotent and a no-op until a
+        remote-bridge policy is configured and every expected molecule has been
+        registered; on success it records the per-group molecule counts, writes
+        the manifest to disk, caches it on ``self._bridge_manifest_info``, and
+        latches ``self._bridge_manifest_written`` so it runs at most once.
+        """
+
         if self._remote_bridge_policy is None or self._bridge_manifest_written:
             return
         expected = self._expected_total_molecules
@@ -293,21 +534,17 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             )
             for idx, group_id in enumerate(self._group_ids)
         ]
-        payload = {
-            "version": AGGREGATION_INFO_VERSION,
-            "hub_host": self._bridge_connect_host,
-            "hub_port": self._bridge_connect_port,
-            "timeout": float(self.timeout),
-            "latency": float(self.latency),
-            "unix_prefix": str(self._remote_bridge_policy["unix_prefix"]),
-            "molecules_per_bridge": int(
-                self._remote_bridge_policy["molecules_per_bridge"]
-            ),
-            "bridges": [spec.to_dict() for spec in specs],
-        }
+        payload = _aggregation_manifest(
+            hub_host=self._bridge_connect_host,
+            hub_port=self._bridge_connect_port,
+            timeout=self.timeout,
+            latency=self.latency,
+            unix_prefix=str(self._remote_bridge_policy["unix_prefix"]),
+            molecules_per_bridge=int(self._remote_bridge_policy["molecules_per_bridge"]),
+            bridges=[spec.to_dict() for spec in specs],
+        )
         path = os.fspath(self._remote_bridge_policy["save_file"])
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        _write_manifest(path, payload)
         self._bridge_manifest_info = payload
         self._bridge_manifest_written = True
         print(
@@ -318,7 +555,16 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         )
 
     def _accept_loop(self) -> None:
-        """Accept aggregate bridge clients and Meep susceptibility clients."""
+        """
+        Accept aggregate bridge clients and Meep susceptibility clients.
+
+        Notes
+        -----
+        Overrides the base accept loop. Each accepted socket is handed to a
+        daemon classifier thread (:meth:`_classify_socket`) so a single slow peer
+        cannot stall the listener, and dead classifier threads are reaped on each
+        new connection.
+        """
 
         while not self._stop:
             try:
@@ -350,16 +596,26 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
     def _classify_socket(self, csock: socket.socket, peer: str) -> None:
         """
         Route one accepted socket by its first protocol header.
+
+        Parameters
+        ----------
+        csock : socket.socket
+            Freshly accepted connection awaiting classification.
+        peer : str
+            Human-readable peer address used for logging.
+
+        Notes
+        -----
+        An ``MXLINIT`` header routes to :meth:`_register_meep_rank_socket`, an
+        ``AGGHELLO`` header to :meth:`_register_bridge_socket_after_hello`, and
+        anything else (or a read error/timeout) closes the socket.
         """
 
         csock.settimeout(max(self.latency, 0.25))
         try:
             header = _recv_msg(csock)
-        except socket.timeout:
-            self._close_unclassified(csock)
-            return
-        except (_SocketClosed, OSError, RuntimeError):
-            self._close_unclassified(csock)
+        except (socket.timeout, _SocketClosed, OSError, RuntimeError):
+            _close_socket(csock)
             return
 
         if header == MXLINIT:
@@ -368,29 +624,36 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         elif header == AGGHELLO:
             self._register_bridge_socket_after_hello(csock, peer)
         else:
-            self._close_unclassified(csock)
-
-    @staticmethod
-    def _close_unclassified(sock: socket.socket) -> None:
-        try:
-            sock.close()
-        except OSError:
-            pass
+            _close_socket(csock)
 
     def _register_bridge_socket_after_hello(self, csock: socket.socket, peer: str) -> None:
         """
         Register an aggregate bridge after its ``AGGHELLO`` header.
+
+        Parameters
+        ----------
+        csock : socket.socket
+            Bridge connection that has already sent its ``AGGHELLO`` banner.
+        peer : str
+            Human-readable peer address used for logging.
+
+        Notes
+        -----
+        Reads the HELLO JSON payload and registers the socket as an unbound
+        client tagged with its ``aggregate_group``; the bind-loop later promotes
+        it to a group. The socket is closed if the payload is malformed, names an
+        unknown group, or arrives while the hub is stopping.
         """
 
         try:
             hello = _json_loads_bytes(_recv_bytes(csock))
         except (_SocketClosed, OSError, RuntimeError):
-            self._close_unclassified(csock)
+            _close_socket(csock)
             return
 
         group_id = str(hello.get("group_id", "")).strip()
         if group_id not in self._group_ids or self._stop:
-            self._close_unclassified(csock)
+            _close_socket(csock)
             return
 
         csock.settimeout(self.timeout)
@@ -403,10 +666,22 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
     def _register_meep_rank_socket(self, csock: socket.socket, peer: str) -> None:
         """
         Track a Meep rank socket and spawn its handler thread.
+
+        Parameters
+        ----------
+        csock : socket.socket
+            Meep rank connection that has already sent its ``MXLINIT`` banner.
+        peer : str
+            Human-readable peer address used for logging.
+
+        Notes
+        -----
+        Records the socket and starts a daemon :meth:`_serve_meep_rank` thread to
+        handle the connection. The socket is closed if the hub is stopping.
         """
 
         if self._stop:
-            self._close_unclassified(csock)
+            _close_socket(csock)
             return
         with self._meep_lock:
             self._rank_sockets.append(csock)
@@ -422,6 +697,23 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
     def _serve_meep_rank(self, sock: socket.socket, peer: str) -> None:
         """
         Handle one Meep rank connection after its ``MXLINIT`` header.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Meep rank connection positioned just past its ``MXLINIT`` banner.
+        peer : str
+            Human-readable peer address used for logging and statistics.
+
+        Notes
+        -----
+        Reads the INIT payload, registers the rank's molecules onto aggregate
+        groups, waits for the bridge set to come up, replies ``MXLREADY``, then
+        serves ``AGGSTEP`` frames in a loop, decoding e-fields, running the
+        global timestep barrier, and returning packed amplitudes until the peer
+        disconnects or the hub stops. Enforces one connection per rank, since the
+        global barrier would otherwise deadlock. The socket is always closed and
+        de-registered on exit.
         """
 
         try:
@@ -456,8 +748,6 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 self._next_client_id += 1
                 self._client_init_payloads[client_id] = init_payloads
                 self._client_ranks[client_id] = rank
-                self._rank_payloads[rank] = init_payload
-                self._rank_init_payloads[rank] = init_payloads
                 self.rank_stats[rank] = {
                     "molecule_count": len(molecule_ids),
                     "steps": 0,
@@ -468,10 +758,9 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                     ),
                 }
 
-            group_counts: dict[str, int] = {}
-            for payload in init_payloads.values():
-                group_id = str(payload["aggregate_group"])
-                group_counts[group_id] = group_counts.get(group_id, 0) + 1
+            group_counts = Counter(
+                str(payload["aggregate_group"]) for payload in init_payloads.values()
+            )
             for group_id, count in sorted(group_counts.items()):
                 print(
                     f"[AggregatedSusceptibilitySocketHub] Meep rank {rank} requested "
@@ -519,10 +808,7 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 flush=True,
             )
         finally:
-            try:
-                sock.close()
-            except OSError:
-                pass
+            _close_socket(sock)
             with self._meep_lock:
                 try:
                     self._rank_sockets.remove(sock)
@@ -530,7 +816,27 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                     pass
 
     def _recv_mxl_init_payload(self, sock: socket.socket) -> dict:
-        payload = json.loads(_recv_bytes(sock).decode("utf-8") or "{}")
+        """
+        Read and validate one ``MXLINIT`` JSON payload.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Meep rank connection positioned at the INIT JSON frame.
+
+        Returns
+        -------
+        dict
+            The decoded INIT payload.
+
+        Raises
+        ------
+        RuntimeError
+            If the payload's ``"protocol"`` is not
+            ``"mxl_socket_susceptibility_v1"``.
+        """
+
+        payload = _json_loads_bytes(_recv_bytes(sock))
         if payload.get("protocol") != "mxl_socket_susceptibility_v1":
             raise RuntimeError(
                 "Expected protocol='mxl_socket_susceptibility_v1' in MXLINIT."
@@ -538,6 +844,18 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         return payload
 
     def _wait_for_initial_rank_burst(self) -> None:
+        """
+        Sleep through the configured grace window for the first INIT burst.
+
+        Notes
+        -----
+        Only relevant when the expected molecule total is unknown: ranks then
+        connect in a short burst, so the handler pauses until
+        ``init_grace_seconds`` after the first INIT to let the full molecule set
+        arrive before the bridge layout is frozen. A no-op once an expected total
+        is known or when the grace period is zero.
+        """
+
         if self._expected_total_molecules is not None:
             return
         if self._init_grace_seconds <= 0.0:
@@ -551,6 +869,21 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             time.sleep(remaining)
 
     def _wait_for_expected_molecule_count(self) -> None:
+        """
+        Block until every expected socket molecule has registered.
+
+        Raises
+        ------
+        TimeoutError
+            If the registered molecule count does not reach
+            ``expected_total_molecules`` within ``self.timeout``.
+
+        Notes
+        -----
+        A no-op when no expected total has been announced. Once the count is
+        reached it also writes the finalized bridge manifest.
+        """
+
         with self._meep_lock:
             expected = self._expected_total_molecules
             if expected is None:
@@ -572,6 +905,12 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
     def _snapshot_rank_init_payloads(self) -> dict[int, dict]:
         """
         Return all Meep-rank INIT payloads collected during the startup burst.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping from molecule ID to its INIT payload, merged across every
+            registered Meep socket client.
         """
 
         payloads: dict[int, dict] = {}
@@ -583,22 +922,61 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
     def _molecule_group(self, molecule_id: int) -> str:
         """
         Assign one socket molecule to the least-loaded aggregate bridge group.
+
+        Parameters
+        ----------
+        molecule_id : int
+            Socket molecule ID to place on a bridge group.
+
+        Returns
+        -------
+        str
+            The aggregate group id the molecule is assigned to.
+
+        Notes
+        -----
+        Assignment is sticky: a molecule keeps its first group. New molecules go
+        to the group with the fewest molecules (ties broken by group id), and the
+        chosen group's load counter is incremented. Holds ``self._meep_lock``.
         """
 
         with self._meep_lock:
-            if molecule_id not in self._mxl_molecule_to_group:
+            group_id = self._mxl_molecule_to_group.get(molecule_id)
+            if group_id is None:
                 group_id = min(
                     self._group_ids,
                     key=lambda gid: (self._group_loads.get(gid, 0), gid),
                 )
                 self._mxl_molecule_to_group[molecule_id] = group_id
                 self._group_loads[group_id] = self._group_loads.get(group_id, 0) + 1
-            group_id = self._mxl_molecule_to_group[molecule_id]
             return group_id
 
     def _register_rank_molecules(
         self, init_payload: dict, molecule_ids: list[int]
     ) -> dict[int, dict]:
+        """
+        Map a rank's molecules onto groups and build their INIT payloads.
+
+        Parameters
+        ----------
+        init_payload : dict
+            The rank's MXLINIT payload, supplying shared fields such as
+            ``dt_au``, ``rank``, ``rescaling_factor``, and ``time_units_fs``.
+        molecule_ids : list[int]
+            Socket molecule IDs owned by this rank.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping from molecule ID to its per-molecule INIT payload, including
+            the assigned ``aggregate_group``.
+
+        Notes
+        -----
+        Side effect: each molecule is registered in ``self.expected`` and seeded
+        in ``self.bound`` (under ``self._lock``) so the bind loop tracks it.
+        """
+
         dt_au = float(init_payload.get("dt_au", 0.0))
         rank = int(init_payload.get("rank", -1))
         payloads: dict[int, dict] = {}
@@ -619,6 +997,26 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         return payloads
 
     def _prepare_groups_locked(self, init_payloads):
+        """
+        Build group metadata, then force re-init of groups whose membership grew.
+
+        Parameters
+        ----------
+        init_payloads : Mapping[int, dict]
+            Mapping from molecule ID to its INIT payload to fold into the group
+            metadata.
+
+        Notes
+        -----
+        Caller must hold ``self._lock``. Extends the base implementation in two
+        ways: every configured group id is materialized (so empty bridges still
+        exist to bind against), and any group whose molecule set changed while a
+        bridge is already attached is marked uninitialized. The latter is needed
+        because Meep ranks publish molecules incrementally, so a bridge can
+        connect before its full membership is known and must replay AGGINIT once
+        the remaining molecules arrive.
+        """
+
         before = {
             group_id: set(group.molecule_ids)
             for group_id, group in self._groups.items()
@@ -633,6 +1031,23 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 group.bridge.initialized = False
 
     def _initialize_groups(self, group_ids: list[str]) -> None:
+        """
+        Run AGGINIT for several groups, in parallel when there is more than one.
+
+        Parameters
+        ----------
+        group_ids : list[str]
+            Aggregate group ids to initialize. An empty or single-element list is
+            handled inline; longer lists are initialized on one daemon thread per
+            group and joined before returning.
+
+        Notes
+        -----
+        Parallelizing matters because each :meth:`_initialize_group` call can
+        block on its bridge's local drivers, so a serial loop would add up the
+        per-bridge startup latencies.
+        """
+
         if len(group_ids) <= 1:
             for group_id in group_ids:
                 self._initialize_group(group_id)
@@ -655,13 +1070,34 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         """
         Wait until requested molecules are backed by initialized aggregate bridges.
 
-        The susceptibility hub accepts bridge sockets in classifier threads. A
+        Parameters
+        ----------
+        init_payloads : dict
+            Mapping from molecule ID to its INIT payload for the molecules that
+            must be bound before returning.
+        require_init : bool, default: True
+            Require each backing bridge to have completed AGGINIT, not merely be
+            connected.
+        timeout : float or None, optional
+            Maximum time (seconds) to wait. ``None`` waits up to ``self.timeout``
+            without ever returning ``False``.
+
+        Returns
+        -------
+        bool
+            ``True`` once all requested molecules are bound (and initialized when
+            ``require_init``); ``False`` if a finite ``timeout`` elapsed first.
+
+        Notes
+        -----
+        The susceptibility hub accepts bridge sockets in classifier threads, so a
         bridge can send HELLO before all Meep ranks have published their full
-        molecule-to-group map. The base aggregate hub initializes any bound
-        group immediately; for this Meep susceptibility layout that can block on
-        one bridge's local drivers before the remaining HELLO sockets are
-        promoted to CONNECTED. Defer AGGINIT until the configured bridge set is
-        live, then initialize only groups that actually own requested molecules.
+        molecule-to-group map. The base aggregate hub initializes any bound group
+        immediately; for this Meep susceptibility layout that can block on one
+        bridge's local drivers before the remaining HELLO sockets are promoted to
+        CONNECTED. This override defers AGGINIT until the configured bridge set is
+        live, then initializes only the groups that actually own requested
+        molecules.
         """
 
         wanted = {int(mid) for mid in init_payloads.keys()}
@@ -717,11 +1153,28 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         """
         Build this client's per-step requests, reusing cached arrays in place.
 
+        Parameters
+        ----------
+        client_id : int
+            Internal id of the Meep socket client this step belongs to.
+        efields : dict[int, numpy.ndarray]
+            Mapping from molecule ID to its ``(3,)`` electric-field vector in
+            atomic units for the current timestep.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping from molecule ID to a request dict with an ``"efield_au"``
+            ``(3,)`` array. The dict is owned by the per-client cache and reused
+            across steps, so callers must not retain it past the step.
+
+        Notes
+        -----
         The molecule set for a client is fixed after INIT, so the request dict
-        and its ``(3,)`` field buffers are allocated once and overwritten on
-        each step. ``"init"`` is intentionally omitted: every molecule is
-        already mapped to a group by the startup bind, so the downstream
-        planner can skip per-step group preparation.
+        and its ``(3,)`` field buffers are allocated once and overwritten on each
+        step. ``"init"`` is intentionally omitted: every molecule is already
+        mapped to a group by the startup bind, so the downstream planner can skip
+        per-step group preparation.
         """
 
         cache = self._request_caches.get(client_id)
@@ -747,6 +1200,30 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
     ) -> Dict[int, dict]:
         """
         Run one merged bridge step for all Meep-rank requests in a timestep.
+
+        Parameters
+        ----------
+        requests : dict[int, dict]
+            Merged molecule requests for every participating rank in this
+            timestep.
+        deadline : float
+            Absolute ``time.time()`` deadline for completing the step.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping from molecule ID to its bridge response.
+
+        Raises
+        ------
+        TimeoutError
+            If no complete set of responses arrives before ``deadline``.
+
+        Notes
+        -----
+        Drives the base hub's :meth:`step_barrier`; if a bridge dropped and the
+        barrier returns empty, it rebinds the affected molecules via
+        :meth:`wait_until_bound` and retries until the deadline.
         """
 
         while not self._stop:
@@ -770,6 +1247,21 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         raise TimeoutError("Timed out waiting for aggregate susceptibility responses.")
 
     def _expected_clients_locked(self) -> set[int]:
+        """
+        Return the set of client ids the global barrier waits for each step.
+
+        Returns
+        -------
+        set[int]
+            A copy of the expected client-id set.
+
+        Notes
+        -----
+        Caller must hold ``self._global_step_cond``. The set is latched lazily
+        from the registered clients on first use (logging a one-time notice), so
+        every rank that has connected by the first barriered step participates.
+        """
+
         if self._global_expected_clients is None:
             self._global_expected_clients = set(self._client_init_payloads.keys())
             if self._global_expected_clients:
@@ -782,6 +1274,26 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         return set(self._global_expected_clients)
 
     def _consume_global_result_locked(self, client_id: int) -> Dict[int, dict]:
+        """
+        Pop one client's slice of the completed global-barrier result.
+
+        Parameters
+        ----------
+        client_id : int
+            Client whose result slice is being collected.
+
+        Returns
+        -------
+        dict[int, dict]
+            This client's molecule responses for the timestep.
+
+        Notes
+        -----
+        Caller must hold ``self._global_step_cond``. When the last pending slice
+        is consumed, the shared error flag is cleared and all waiters are woken
+        so the next timestep can start.
+        """
+
         result = self._global_results.pop(client_id)
         if not self._global_results:
             self._global_error = None
@@ -791,6 +1303,44 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
     def _run_global_susceptibility_step(
         self, client_id: int, requests: dict[int, dict]
     ) -> Dict[int, dict]:
+        """
+        Run one timestep through the global cross-rank barrier.
+
+        Parameters
+        ----------
+        client_id : int
+            Internal id of the calling Meep socket client (one per rank).
+        requests : dict[int, dict]
+            This client's molecule requests for the current timestep.
+
+        Returns
+        -------
+        dict[int, dict]
+            This client's slice of the merged step responses.
+
+        Raises
+        ------
+        RuntimeError
+            If a client joins after the barrier is already active, if a client
+            sends two ``AGGSTEP`` frames in one timestep, or if the runner's
+            merged step failed.
+        TimeoutError
+            If the expected clients do not all arrive before ``self.timeout``.
+
+        Notes
+        -----
+        Every Meep rank drives the same FDTD timestep, so all rank connections
+        must advance in lockstep. This gathers one ``requests`` dict per expected
+        client under ``_global_step_cond``; the call that completes the expected
+        set becomes the "runner", which merges all requests, runs the shared
+        bridge step via :meth:`_run_merged_susceptibility_step`, then publishes
+        each client's slice into ``_global_results`` and wakes the waiters. The
+        non-runner clients block on the condition and return their slice once the
+        runner stores it. A timeout or a runner error is recorded in
+        ``_global_error`` and re-raised on every participant so no rank is left
+        waiting on the barrier.
+        """
+
         deadline = time.time() + self.timeout
         merged_requests = None
         rank_mids = None
@@ -885,7 +1435,6 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             self._global_pending_requests.clear()
             self._global_pending_mids.clear()
             self._global_running = False
-            self._global_step_index += 1
             self._global_step_cond.notify_all()
 
             if error is not None:
@@ -897,10 +1446,37 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         client_id: int,
         efields: Dict[int, np.ndarray],
     ) -> Dict[int, dict]:
+        """
+        Build this client's requests and run them through the global barrier.
+
+        Parameters
+        ----------
+        client_id : int
+            Internal id of the calling Meep socket client.
+        efields : dict[int, numpy.ndarray]
+            Mapping from molecule ID to its ``(3,)`` electric-field vector in
+            atomic units for the current timestep.
+
+        Returns
+        -------
+        dict[int, dict]
+            This client's slice of the merged step responses.
+        """
+
         requests = self._make_rank_requests(client_id, efields)
         return self._run_global_susceptibility_step(client_id, requests)
 
     def stop(self):
+        """
+        Stop the hub, close rank sockets, and join worker threads.
+
+        Notes
+        -----
+        Sets the stop flag, wakes any threads blocked on the global barrier,
+        closes the tracked Meep rank sockets, then defers to the base hub's
+        :meth:`stop` before joining the classifier and rank handler threads.
+        """
+
         self._stop = True
         with self._global_step_cond:
             self._global_step_cond.notify_all()
@@ -909,10 +1485,7 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             rank_threads = list(self._rank_threads)
             classifier_threads = list(self._classifier_threads)
         for sock in rank_sockets:
-            try:
-                sock.close()
-            except OSError:
-                pass
+            _close_socket(sock)
         super().stop()
         for thread in classifier_threads:
             thread.join(timeout=0.2)
@@ -923,6 +1496,47 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
 class AggregatedSusceptibilitySocketHub:
     """
     Process-backed aggregate hub for Meep ``MXLSocketSusceptibility``.
+
+    The hub runs in a dedicated ``spawn`` child process so its background socket
+    threads never contend with Meep's own threads or MPI state. The public
+    object lives in the Meep process and proxies to that child: it exposes the
+    bound ``host``/``port``, the bridge manifest, helpers to build bridge and
+    driver launch commands, and aggregated per-rank statistics. Only the MPI
+    master starts the child; non-master ranks receive the bound endpoint via a
+    broadcast.
+
+    Parameters
+    ----------
+    host : str or None, optional
+        Interface to bind the upstream TCP server to. ``None``, ``""``,
+        ``"0.0.0.0"``, or ``"::"`` bind all interfaces; peers connect back over
+        ``127.0.0.1``.
+    port : int or None, default: 31415
+        TCP port for the upstream server. ``None`` falls back to 31415 and ``0``
+        selects an ephemeral port.
+    timeout : float, default: 60000.0
+        Operation timeout (seconds) for binding and stepping.
+    latency : float, default: 0.05
+        Polling interval (seconds) for the bind/step loops.
+    num_bridges : int, default: 10
+        Initial number of aggregate bridge groups.
+    unix_prefix : str, default: ``"mxl_bridge_"``
+        Prefix used to generate aggregate bridge group ids.
+    bridge_manifest : str, default: ``"mxl_bridge_manifest.json"``
+        Path the bridge manifest is written to after startup.
+    init_grace_seconds : float, default: 0.5
+        Grace period (seconds) for collecting the first burst of rank INITs when
+        the expected molecule total is not announced up front.
+    unixsocket : str or None, optional
+        Reserved for API symmetry; must be falsy because this hub only supports
+        TCP host/port upstream.
+
+    Raises
+    ------
+    ValueError
+        If ``unixsocket`` is provided.
+    RuntimeError
+        If the child hub process fails to start.
     """
 
     def __init__(
@@ -1021,16 +1635,48 @@ class AggregatedSusceptibilitySocketHub:
 
     @property
     def bridge_info(self) -> dict:
+        """
+        Current bridge manifest payload.
+
+        Returns
+        -------
+        dict
+            A copy of the manifest reported by the child hub (empty when the hub
+            has not started).
+        """
+
         return dict(self._bridge_info or {})
 
     @property
     def bridge_specs(self) -> list[dict]:
+        """
+        Per-bridge specification entries from the manifest.
+
+        Returns
+        -------
+        list[dict]
+            A copy of the manifest's ``bridges`` list (empty when unavailable).
+        """
+
         return list((self._bridge_info or {}).get("bridges", []))
 
     def write_bridge_manifest(self, path: str) -> dict:
+        """
+        Write the current bridge manifest to ``path``.
+
+        Parameters
+        ----------
+        path : str or path-like
+            Destination file for the manifest JSON.
+
+        Returns
+        -------
+        dict
+            The manifest payload that was written.
+        """
+
         payload = self.bridge_info
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        _write_manifest(path, payload)
         return payload
 
     def init_remote_bridges(
@@ -1044,11 +1690,36 @@ class AggregatedSusceptibilitySocketHub:
         """
         Configure delayed bridge partitioning for ``MXLSocketSusceptibility``.
 
-        The susceptibility object is accepted for API symmetry with
-        ``AggregatedSocketHub.init_remote_bridges(...)``.  Meep generates the
-        actual socket molecule ids later, during its first polarization update,
-        so this method records the bridge policy and the child hub writes the
-        final manifest once ``MXLINIT`` reports ``expected_total_molecules``.
+        Parameters
+        ----------
+        susceptibility : object, optional
+            Accepted and ignored, for API symmetry with
+            :meth:`AggregatedSocketHub.init_remote_bridges`.
+        molecules_per_bridge : int
+            Target number of socket molecules per aggregate bridge.
+        unix_prefix : str, default: ``"bridge_"``
+            Prefix used to generate downstream UNIX-socket names.
+        save_file : str or path-like, default: ``"aggregation.json"``
+            Path the finalized bridge manifest will be written to.
+
+        Returns
+        -------
+        list[RemoteBridgeSpec]
+            Always empty; the concrete bridge specs are only known later and are
+            written to ``save_file`` by the child hub.
+
+        Raises
+        ------
+        ValueError
+            If ``molecules_per_bridge`` is not a positive integer.
+
+        Notes
+        -----
+        Meep generates the actual socket molecule ids later, during its first
+        polarization update, so this method only records the bridge policy (and
+        forwards it to the child hub). The child writes the final manifest once
+        ``MXLINIT`` reports ``expected_total_molecules``. On the MPI master any
+        stale ``save_file`` is removed up front.
         """
 
         del susceptibility
@@ -1057,16 +1728,15 @@ class AggregatedSusceptibilitySocketHub:
             raise ValueError("molecules_per_bridge must be a positive integer.")
         self.unix_prefix = str(unix_prefix)
         self.bridge_manifest = os.fspath(save_file)
-        self._bridge_info = {
-            "version": AGGREGATION_INFO_VERSION,
-            "hub_host": self.host,
-            "hub_port": self.port,
-            "timeout": float(self.timeout),
-            "latency": float(self.latency),
-            "unix_prefix": self.unix_prefix,
-            "molecules_per_bridge": per_bridge,
-            "bridges": [],
-        }
+        self._bridge_info = _aggregation_manifest(
+            hub_host=self.host,
+            hub_port=self.port,
+            timeout=self.timeout,
+            latency=self.latency,
+            unix_prefix=self.unix_prefix,
+            molecules_per_bridge=per_bridge,
+            bridges=[],
+        )
         if self._is_master:
             try:
                 os.remove(self.bridge_manifest)
@@ -1084,6 +1754,22 @@ class AggregatedSusceptibilitySocketHub:
         return []
 
     def bridge_command(self, idx: int, *, info: Optional[str] = None) -> str:
+        """
+        Build the shell command that launches one aggregate bridge node.
+
+        Parameters
+        ----------
+        idx : int
+            Zero-based bridge index within the manifest.
+        info : str or None, optional
+            Manifest path to reference. Defaults to ``self.bridge_manifest``.
+
+        Returns
+        -------
+        str
+            An ``mxl_bridge --info ... --idx ...`` command line.
+        """
+
         manifest = self.bridge_manifest if info is None else str(info)
         return f"mxl_bridge --info {manifest} --idx {int(idx)}"
 
@@ -1094,6 +1780,27 @@ class AggregatedSusceptibilitySocketHub:
         mu0_au: float,
         orientation: int,
     ) -> str:
+        """
+        Build the shell template that launches one SHO driver against a socket.
+
+        Parameters
+        ----------
+        omega_au : float
+            SHO resonance angular frequency in atomic units.
+        mu0_au : float
+            Transition dipole magnitude in atomic units.
+        orientation : int
+            Cartesian axis (0, 1, or 2) the dipole points along.
+
+        Returns
+        -------
+        str
+            A ``/bin/bash -c ...`` command with a ``{unixsocket}`` placeholder.
+            The wrapper waits for the UNIX socket to appear, jitters its start,
+            and restarts the driver until it exits cleanly or the timeout
+            (clamped to ``[30, 600]`` seconds) elapses.
+        """
+
         driver_param = (
             f"omega={omega_au:.17g},mu0={mu0_au:.17g},orientation={int(orientation)}"
         )
@@ -1130,6 +1837,16 @@ class AggregatedSusceptibilitySocketHub:
         )
 
     def _drain_stats(self) -> None:
+        """
+        Pull the latest per-rank statistics snapshots from the child process.
+
+        Notes
+        -----
+        Non-blocking and master-only. Each queued snapshot replaces the cached
+        statistics, so after draining ``self._stats_cache`` holds the most recent
+        snapshot the child published. A no-op on non-master ranks.
+        """
+
         if not self._is_master or self._stats_queue is None:
             return
         while True:
@@ -1141,6 +1858,17 @@ class AggregatedSusceptibilitySocketHub:
 
     @property
     def rank_stats(self) -> dict[int, dict]:
+        """
+        Latest per-rank statistics gathered from the child hub.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping from Meep rank to its statistics row (molecule count, step
+            and request counters, peer address, and aggregate groups). Empty on
+            non-master ranks.
+        """
+
         self._drain_stats()
         return _copy_rank_stats(self._stats_cache)
 
@@ -1158,6 +1886,45 @@ class AggregatedSusceptibilitySocketHub:
     ) -> dict:
         """
         Convert a Meep Lorentzian susceptibility to aggregate SHO parameters.
+
+        Parameters
+        ----------
+        frequency : float
+            Meep Lorentzian resonance frequency (Meep units); must be positive.
+        sigma : float
+            Meep Lorentzian oscillator strength; must be nonnegative.
+        resolution : float
+            Meep grid resolution (pixels per unit length); must be positive.
+        gamma : float, default: 0.0
+            Meep Lorentzian damping. Must be nonnegative and is ignored (the SHO
+            driver is lossless) apart from a warning when nonzero.
+        dimensions : int, default: 1
+            Spatial dimensionality used to scale the per-cell measure; at least 1.
+        time_units_fs : float, default: 0.1
+            Femtoseconds represented by one Meep time unit; must be positive.
+        mu0_au : float, default: 187.0819866
+            SHO transition dipole magnitude in atomic units; must be nonzero.
+        orientation : int, default: 0
+            Cartesian axis (0, 1, or 2) the dipole points along.
+
+        Returns
+        -------
+        dict
+            Mapping with ``rescaling_factor``, ``driver_command``,
+            ``bridge_manifest``, ``bridge_commands``, and ``bridge_specs`` for
+            wiring up the SHO drivers and bridges.
+
+        Raises
+        ------
+        ValueError
+            If any argument violates the bounds listed above.
+
+        Notes
+        -----
+        The returned ``rescaling_factor`` maps the SHO driver's atomic-unit
+        amplitude back to the Meep polarization current that reproduces the
+        requested Lorentzian response. Diagnostic lines are printed on the MPI
+        master only.
         """
 
         if frequency <= 0.0 or resolution <= 0.0 or time_units_fs <= 0.0:
@@ -1218,6 +1985,16 @@ class AggregatedSusceptibilitySocketHub:
         }
 
     def stop(self) -> None:
+        """
+        Shut down the child hub process and flush final statistics.
+
+        Notes
+        -----
+        Idempotent and master-only past the guard. Signals the child via its stop
+        event, joins it, and falls back to ``terminate()`` if it does not exit in
+        time, then drains any remaining statistics snapshots.
+        """
+
         if self._stopped:
             return
         self._stopped = True
@@ -1236,6 +2013,8 @@ class AggregatedSusceptibilitySocketHub:
         self._drain_stats()
 
     def __del__(self):
+        """Best-effort :meth:`stop` when the handle is garbage-collected."""
+
         try:
             self.stop()
         except Exception:
