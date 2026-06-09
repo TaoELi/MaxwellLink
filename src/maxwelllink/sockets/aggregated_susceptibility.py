@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import multiprocessing as mp
+import os
 import queue
 import shlex
 import socket
@@ -73,6 +74,7 @@ def _run_aggregated_susceptibility_socket_hub_server(
     init_grace_seconds: float,
     ready_queue,
     stats_queue,
+    control_queue,
     stop_event,
 ) -> None:
     """
@@ -91,6 +93,7 @@ def _run_aggregated_susceptibility_socket_hub_server(
             unix_prefix=unix_prefix,
             init_grace_seconds=init_grace_seconds,
         )
+        server._control_queue = control_queue
         ready_queue.put(
             {
                 "host": server.host,
@@ -104,6 +107,7 @@ def _run_aggregated_susceptibility_socket_hub_server(
 
     try:
         while not stop_event.wait(0.25):
+            server.drain_control_queue()
             stats = _copy_rank_stats(server.rank_stats)
             if stats != last_stats:
                 stats_queue.put(stats)
@@ -158,6 +162,11 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         self._request_caches: dict[int, dict[int, dict]] = {}
         self._init_grace_seconds = max(0.0, float(init_grace_seconds))
         self._first_rank_init_time: Optional[float] = None
+        self._expected_total_molecules: Optional[int] = None
+        self._remote_bridge_policy: Optional[dict] = None
+        self._bridge_manifest_info: Optional[dict] = None
+        self._bridge_manifest_written = False
+        self._control_queue = None
 
         super().__init__(host=host, port=port, timeout=timeout, latency=latency)
 
@@ -174,6 +183,8 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         Manifest payload consumed by ``mxl_bridge --info ...``.
         """
 
+        if self._bridge_manifest_info is not None:
+            return dict(self._bridge_manifest_info)
         return {
             "version": AGGREGATION_INFO_VERSION,
             "hub_host": self._bridge_connect_host,
@@ -192,6 +203,119 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 for idx, group_id in enumerate(self._group_ids)
             ],
         }
+
+    def configure_remote_bridges(
+        self,
+        *,
+        molecules_per_bridge: int,
+        unix_prefix: str,
+        save_file: str,
+    ) -> None:
+        """
+        Record the ``init_remote_bridges`` policy sent by the public hub.
+        """
+
+        per_bridge = int(molecules_per_bridge)
+        if per_bridge <= 0:
+            raise ValueError("molecules_per_bridge must be a positive integer.")
+        with self._meep_lock:
+            self._remote_bridge_policy = {
+                "molecules_per_bridge": per_bridge,
+                "unix_prefix": str(unix_prefix),
+                "save_file": os.fspath(save_file),
+            }
+            if self._expected_total_molecules is not None:
+                self._configure_remote_bridge_layout_locked(
+                    self._expected_total_molecules
+                )
+
+    def drain_control_queue(self) -> None:
+        q = self._control_queue
+        if q is None:
+            return
+        while True:
+            try:
+                msg = q.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(msg, dict) and msg.get("cmd") == "init_remote_bridges":
+                self.configure_remote_bridges(
+                    molecules_per_bridge=msg["molecules_per_bridge"],
+                    unix_prefix=msg["unix_prefix"],
+                    save_file=msg["save_file"],
+                )
+
+    def _configure_remote_bridge_layout_locked(self, total_molecules: int) -> None:
+        if self._remote_bridge_policy is None or self._mxl_molecule_to_group:
+            return
+        total = int(total_molecules)
+        if total <= 0:
+            return
+        per_bridge = int(self._remote_bridge_policy["molecules_per_bridge"])
+        nbridge = max(1, int(math.ceil(total / per_bridge)))
+        prefix = str(self._remote_bridge_policy["unix_prefix"])
+        self._group_ids = [f"{prefix}{idx}" for idx in range(nbridge)]
+        self._group_loads = {group_id: 0 for group_id in self._group_ids}
+
+    def _note_expected_total_molecules_locked(self, init_payload: dict) -> None:
+        raw_total = init_payload.get("expected_total_molecules")
+        if raw_total is None:
+            return
+        total = int(raw_total)
+        if total <= 0:
+            return
+        if (
+            self._expected_total_molecules is not None
+            and self._expected_total_molecules != total
+        ):
+            raise RuntimeError(
+                "Inconsistent expected_total_molecules values in MXLINIT "
+                f"payloads: {self._expected_total_molecules} vs {total}."
+            )
+        self._expected_total_molecules = total
+        self._configure_remote_bridge_layout_locked(total)
+
+    def _registered_molecule_count_locked(self) -> int:
+        return sum(len(payloads) for payloads in self._client_init_payloads.values())
+
+    def _write_final_bridge_manifest_locked(self) -> None:
+        if self._remote_bridge_policy is None or self._bridge_manifest_written:
+            return
+        expected = self._expected_total_molecules
+        if expected is not None and self._registered_molecule_count_locked() < expected:
+            return
+        specs = [
+            RemoteBridgeSpec(
+                idx=idx,
+                group_id=group_id,
+                unixsocket=group_id,
+                n_molecules=int(self._group_loads.get(group_id, 0)),
+            )
+            for idx, group_id in enumerate(self._group_ids)
+        ]
+        payload = {
+            "version": AGGREGATION_INFO_VERSION,
+            "hub_host": self._bridge_connect_host,
+            "hub_port": self._bridge_connect_port,
+            "timeout": float(self.timeout),
+            "latency": float(self.latency),
+            "unix_prefix": str(self._remote_bridge_policy["unix_prefix"]),
+            "molecules_per_bridge": int(
+                self._remote_bridge_policy["molecules_per_bridge"]
+            ),
+            "bridges": [spec.to_dict() for spec in specs],
+        }
+        path = os.fspath(self._remote_bridge_policy["save_file"])
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        self._bridge_manifest_info = payload
+        self._bridge_manifest_written = True
+        print(
+            "[AggregatedSusceptibilitySocketHub] finalized aggregate bridge "
+            f"manifest {path!r} with {len(specs)} bridge(s) for "
+            f"{sum(spec.n_molecules for spec in specs)} socket molecule(s).",
+            flush=True,
+        )
 
     def _accept_loop(self) -> None:
         """Accept aggregate bridge clients and Meep susceptibility clients."""
@@ -309,7 +433,12 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             if not molecule_ids:
                 raise RuntimeError("MXLINIT payload did not include molecule_ids.")
 
+            self.drain_control_queue()
+            if self._remote_bridge_policy is None:
+                time.sleep(min(max(self.latency, 0.05), 0.25))
+                self.drain_control_queue()
             with self._meep_lock:
+                self._note_expected_total_molecules_locked(init_payload)
                 if rank >= 0 and rank in self._client_ranks.values():
                     raise RuntimeError(
                         f"Meep rank {rank} opened a second MXLSocket connection. "
@@ -351,6 +480,9 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 )
 
             self._wait_for_initial_rank_burst()
+            self._wait_for_expected_molecule_count()
+            with self._meep_lock:
+                self._write_final_bridge_manifest_locked()
             all_init_payloads = self._snapshot_rank_init_payloads()
             with self._step_lock:
                 ok = self.wait_until_bound(
@@ -406,6 +538,8 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         return payload
 
     def _wait_for_initial_rank_burst(self) -> None:
+        if self._expected_total_molecules is not None:
+            return
         if self._init_grace_seconds <= 0.0:
             return
         with self._meep_lock:
@@ -415,6 +549,25 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         remaining = deadline - time.time()
         if remaining > 0.0:
             time.sleep(remaining)
+
+    def _wait_for_expected_molecule_count(self) -> None:
+        with self._meep_lock:
+            expected = self._expected_total_molecules
+            if expected is None:
+                return
+        deadline = time.time() + self.timeout
+        while not self._stop:
+            with self._meep_lock:
+                if self._registered_molecule_count_locked() >= expected:
+                    self._write_final_bridge_manifest_locked()
+                    return
+            remaining = deadline - time.time()
+            if remaining <= 0.0:
+                raise TimeoutError(
+                    "Timed out waiting for MXLINIT payloads to reach "
+                    f"expected_total_molecules={expected}."
+                )
+            time.sleep(min(self.latency, remaining))
 
     def _snapshot_rank_init_payloads(self) -> dict[int, dict]:
         """
@@ -804,6 +957,7 @@ class AggregatedSusceptibilitySocketHub:
         self._is_master = am_master()
         self._ready_queue = None
         self._stats_queue = None
+        self._control_queue = None
         self._stop_event = None
         self._process = None
 
@@ -812,6 +966,7 @@ class AggregatedSusceptibilitySocketHub:
             ctx = mp.get_context("spawn")
             self._ready_queue = ctx.Queue()
             self._stats_queue = ctx.Queue()
+            self._control_queue = ctx.Queue()
             self._stop_event = ctx.Event()
             self._process = ctx.Process(
                 target=_run_aggregated_susceptibility_socket_hub_server,
@@ -825,6 +980,7 @@ class AggregatedSusceptibilitySocketHub:
                     float(init_grace_seconds),
                     self._ready_queue,
                     self._stats_queue,
+                    self._control_queue,
                     self._stop_event,
                 ),
                 daemon=False,
@@ -876,6 +1032,56 @@ class AggregatedSusceptibilitySocketHub:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
         return payload
+
+    def init_remote_bridges(
+        self,
+        susceptibility=None,
+        *,
+        molecules_per_bridge: int,
+        unix_prefix: str = "bridge_",
+        save_file: str = "aggregation.json",
+    ) -> list[RemoteBridgeSpec]:
+        """
+        Configure delayed bridge partitioning for ``MXLSocketSusceptibility``.
+
+        The susceptibility object is accepted for API symmetry with
+        ``AggregatedSocketHub.init_remote_bridges(...)``.  Meep generates the
+        actual socket molecule ids later, during its first polarization update,
+        so this method records the bridge policy and the child hub writes the
+        final manifest once ``MXLINIT`` reports ``expected_total_molecules``.
+        """
+
+        del susceptibility
+        per_bridge = int(molecules_per_bridge)
+        if per_bridge <= 0:
+            raise ValueError("molecules_per_bridge must be a positive integer.")
+        self.unix_prefix = str(unix_prefix)
+        self.bridge_manifest = os.fspath(save_file)
+        self._bridge_info = {
+            "version": AGGREGATION_INFO_VERSION,
+            "hub_host": self.host,
+            "hub_port": self.port,
+            "timeout": float(self.timeout),
+            "latency": float(self.latency),
+            "unix_prefix": self.unix_prefix,
+            "molecules_per_bridge": per_bridge,
+            "bridges": [],
+        }
+        if self._is_master:
+            try:
+                os.remove(self.bridge_manifest)
+            except FileNotFoundError:
+                pass
+            if self._control_queue is not None:
+                self._control_queue.put(
+                    {
+                        "cmd": "init_remote_bridges",
+                        "molecules_per_bridge": per_bridge,
+                        "unix_prefix": self.unix_prefix,
+                        "save_file": self.bridge_manifest,
+                    }
+                )
+        return []
 
     def bridge_command(self, idx: int, *, info: Optional[str] = None) -> str:
         manifest = self.bridge_manifest if info is None else str(info)
