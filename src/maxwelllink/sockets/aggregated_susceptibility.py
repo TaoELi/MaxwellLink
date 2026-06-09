@@ -155,6 +155,7 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         self._group_ids = [f"{unix_prefix}{idx}" for idx in range(nbridge)]
         self._group_loads = {group_id: 0 for group_id in self._group_ids}
         self._mxl_molecule_to_group: dict[int, str] = {}
+        self._request_caches: dict[int, dict[int, dict]] = {}
         self._init_grace_seconds = max(0.0, float(init_grace_seconds))
         self._first_rank_init_time: Optional[float] = None
 
@@ -308,6 +309,18 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             if not molecule_ids:
                 raise RuntimeError("MXLINIT payload did not include molecule_ids.")
 
+            with self._meep_lock:
+                if rank >= 0 and rank in self._client_ranks.values():
+                    raise RuntimeError(
+                        f"Meep rank {rank} opened a second MXLSocket connection. "
+                        "The aggregate hub's global timestep barrier requires "
+                        "exactly one connection per rank, but this rank owns "
+                        "multiple MXLSocketSusceptibility chunks driven "
+                        "sequentially, which would deadlock the barrier. Run Meep "
+                        "with one chunk per rank (e.g. split_chunks_evenly so the "
+                        "chunk count equals the number of MPI ranks)."
+                    )
+
             init_payloads = self._register_rank_molecules(init_payload, molecule_ids)
             with self._meep_lock:
                 client_id = self._next_client_id
@@ -357,9 +370,7 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 if header != AGGSTEP:
                     raise RuntimeError(f"Unexpected Meep susceptibility header {header!r}.")
                 efields = step_codec.recv(sock, header_already_read=True)
-                responses = self._run_susceptibility_step(
-                    client_id, efields, init_payloads
-                )
+                responses = self._run_susceptibility_step(client_id, efields)
                 result_codec.send(sock, responses)
                 with self._meep_lock:
                     stats = self.rank_stats.get(rank)
@@ -548,15 +559,35 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             time.sleep(self.latency)
 
     def _make_rank_requests(
-        self, efields: Dict[int, np.ndarray], init_payloads: dict[int, dict]
+        self, client_id: int, efields: Dict[int, np.ndarray]
     ) -> dict[int, dict]:
-        return {
-            int(mid): {
-                "efield_au": np.asarray(field, dtype=float).reshape(3),
-                "init": init_payloads[int(mid)],
+        """
+        Build this client's per-step requests, reusing cached arrays in place.
+
+        The molecule set for a client is fixed after INIT, so the request dict
+        and its ``(3,)`` field buffers are allocated once and overwritten on
+        each step. ``"init"`` is intentionally omitted: every molecule is
+        already mapped to a group by the startup bind, so the downstream
+        planner can skip per-step group preparation.
+        """
+
+        cache = self._request_caches.get(client_id)
+        reuse = (
+            cache is not None
+            and len(cache) == len(efields)
+            and all(int(mid) in cache for mid in efields)
+        )
+        if not reuse:
+            cache = {
+                int(mid): {"efield_au": np.zeros(3, dtype=float)} for mid in efields
             }
-            for mid, field in efields.items()
-        }
+            self._request_caches[client_id] = cache
+        for mid, field in efields.items():
+            np.copyto(
+                cache[int(mid)]["efield_au"],
+                np.asarray(field, dtype=float).reshape(3),
+            )
+        return cache
 
     def _run_merged_susceptibility_step(
         self, requests: dict[int, dict], deadline: float
@@ -572,9 +603,14 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             responses = self.step_barrier(requests, timeout=remaining)
             if responses:
                 return responses
+            rebind_payloads = self._snapshot_rank_init_payloads()
             with self._step_lock:
                 self.wait_until_bound(
-                    {mid: requests[mid]["init"] for mid in requests.keys()},
+                    {
+                        mid: rebind_payloads[mid]
+                        for mid in requests
+                        if mid in rebind_payloads
+                    },
                     require_init=True,
                     timeout=min(1.0, remaining),
                 )
@@ -707,9 +743,8 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         self,
         client_id: int,
         efields: Dict[int, np.ndarray],
-        init_payloads: dict[int, dict],
     ) -> Dict[int, dict]:
-        requests = self._make_rank_requests(efields, init_payloads)
+        requests = self._make_rank_requests(client_id, efields)
         return self._run_global_susceptibility_step(client_id, requests)
 
     def stop(self):
