@@ -162,6 +162,7 @@ def _run_susceptibility_socket_hub_server(
     port: int,
     timeout: float,
     latency: float,
+    driver_count_file: Optional[str],
     ready_queue,
     stats_queue,
     stop_event,
@@ -184,6 +185,9 @@ def _run_susceptibility_socket_hub_server(
         Socket timeout in seconds applied to bound clients.
     latency : float
         Polling interval in seconds for the server's accept/bind loops.
+    driver_count_file : str or None
+        File that receives the total number of socket molecules required by
+        Meep, as a single integer.  Disabled when ``None``.
     ready_queue : multiprocessing.Queue
         Queue used once to report ``{"host", "port"}`` on success, or
         ``{"error": repr}`` if construction failed.
@@ -201,6 +205,7 @@ def _run_susceptibility_socket_hub_server(
             port=port,
             timeout=timeout,
             latency=latency,
+            driver_count_file=driver_count_file,
         )
         ready_queue.put({"host": server.host, "port": server.port})
     except Exception as exc:
@@ -243,6 +248,10 @@ class _SusceptibilitySocketHubServer(SocketHub):
         Reserved; must be falsy.  UNIX sockets are intentionally unsupported
         because Meep's ``MXLSocketSusceptibility`` C client connects by
         host/port only.
+    driver_count_file : str or None, default: "num_socket_molecule"
+        File that receives the total socket molecule count advertised by Meep
+        in ``MXLINIT``.  The file contains one integer and is written once the
+        first valid total is seen.  Disabled when ``None``.
 
     Attributes
     ----------
@@ -264,6 +273,7 @@ class _SusceptibilitySocketHubServer(SocketHub):
         timeout: float = 60000.0,
         latency: float = 0.05,
         unixsocket: Optional[str] = None,
+        driver_count_file: Optional[str] = "num_socket_molecule",
     ):
         if unixsocket:
             raise ValueError(
@@ -278,6 +288,8 @@ class _SusceptibilitySocketHubServer(SocketHub):
         self.rank_stats: dict[int, dict] = {}
         self._step_lock = threading.RLock()
         self._meep_lock = threading.RLock()
+        self.driver_count_file = driver_count_file
+        self._driver_count_file_written = False
 
         super().__init__(host=host, port=port, timeout=timeout, latency=latency)
 
@@ -440,6 +452,7 @@ class _SusceptibilitySocketHubServer(SocketHub):
 
             init_payloads = self._register_rank_molecules(init_payload, molecule_ids)
             with self._meep_lock:
+                self._maybe_write_driver_count_file(init_payload)
                 self._rank_payloads[rank] = init_payload
                 self._rank_init_payloads[rank] = init_payloads
                 self.rank_stats[rank] = {
@@ -501,6 +514,24 @@ class _SusceptibilitySocketHubServer(SocketHub):
                     self._rank_sockets.remove(sock)
                 except ValueError:
                     pass
+
+    def _maybe_write_driver_count_file(self, init_payload: dict) -> None:
+        """
+        Write the total socket molecule count from ``MXLINIT`` to disk, once.
+
+        Caller must hold ``self._meep_lock``.  A no-op when the feature is
+        disabled, the file has already been written, or Meep omits / reports a
+        non-positive ``expected_total_molecules``.
+        """
+
+        if self.driver_count_file is None or self._driver_count_file_written:
+            return
+        total = int(init_payload.get("expected_total_molecules", 0) or 0)
+        if total <= 0:
+            return
+        with open(self.driver_count_file, "w", encoding="utf-8") as handle:
+            handle.write(f"{total}\n")
+        self._driver_count_file_written = True
 
     def _recv_mxl_init_payload(self, sock: socket.socket) -> dict:
         """
@@ -672,6 +703,10 @@ class SusceptibilitySocketHub:
         Polling interval in seconds passed to the server.
     unixsocket : str or None, optional
         Reserved; must be falsy (TCP only).
+    driver_count_file : str or None, default: "num_socket_molecule"
+        File that receives the total number of socket molecules required by
+        Meep, written by the child server as a single integer after ``MXLINIT``.
+        Set to ``None`` to disable.
 
     Attributes
     ----------
@@ -699,6 +734,7 @@ class SusceptibilitySocketHub:
         timeout: float = 60000.0,
         latency: float = 0.05,
         unixsocket: Optional[str] = None,
+        driver_count_file: Optional[str] = "num_socket_molecule",
     ):
         if unixsocket:
             raise ValueError(
@@ -719,6 +755,7 @@ class SusceptibilitySocketHub:
         self._stats_queue = None
         self._stop_event = None
         self._process = None
+        self.driver_count_file = driver_count_file
 
         ready = None
         if self._is_master:
@@ -733,6 +770,7 @@ class SusceptibilitySocketHub:
                     int(port),
                     self.timeout,
                     self.latency,
+                    self.driver_count_file,
                     self._ready_queue,
                     self._stats_queue,
                     self._stop_event,
@@ -814,9 +852,10 @@ class SusceptibilitySocketHub:
         Maps the standard Meep Lorentzian dielectric parameters (resonance
         ``frequency``, oscillator strength ``sigma``) onto the simple-harmonic
         oscillator (SHO) molecular driver: a resonance ``omega`` in atomic units,
-        the fixed transition dipole ``mu0_au``, and the ``rescaling_factor`` that
-        the Meep ``MXLSocketSusceptibility`` applies so one socket molecule
-        reproduces the per-cell Lorentzian response.
+        the fixed transition dipole ``mu0_au``, and the symmetric bright-state
+        ``rescaling_factor`` that Meep applies to both the socket drive field and
+        the returned molecular amplitude so one socket molecule reproduces the
+        per-cell Lorentzian response in the linear-response limit.
 
         Parameters
         ----------
@@ -845,7 +884,9 @@ class SusceptibilitySocketHub:
             Dictionary with two keys:
 
             - ``"rescaling_factor"`` : float
-              Value to pass to ``mp.MXLSocketSusceptibility(rescaling_factor=...)``.
+              Symmetric bright-state coupling scale to pass to
+              ``mp.MXLSocketSusceptibility(rescaling_factor=...)``.  This is the
+              square root of the direct density/current scale.
             - ``"driver_command"`` : str
               Ready-to-run shell command that launches one matching
               ``mxl_driver --model sho`` client against this hub.
@@ -870,10 +911,11 @@ class SusceptibilitySocketHub:
         omega_au = 2.0 * math.pi * frequency / (time_units_fs * FS_TO_AU)
         cell_measure = (1.0 / resolution) ** int(dimensions)
         efield_factor = MEEP_EFIELD_TO_AU_PREFAC / (time_units_fs * time_units_fs)
-        rescaling_factor = (
+        density_scale = (
             sigma * cell_measure * omega_au * omega_au * (time_units_fs * FS_TO_AU)
             / (MXL_SOURCE_AMP_AU_TO_MEEP * efield_factor * mu0_au * mu0_au)
         )
+        rescaling_factor = math.sqrt(density_scale)
 
         driver_param = f"omega={omega_au:.17g},mu0={mu0_au:.17g},orientation={int(orientation)}"
         driver_command = (

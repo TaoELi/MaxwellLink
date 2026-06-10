@@ -284,13 +284,15 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         self._classifier_threads: list[threading.Thread] = []
         self._rank_sockets: list[socket.socket] = []
         self._client_init_payloads: dict[int, dict[int, dict]] = {}
-        self._client_ranks: dict[int, int] = {}
+        self._client_ordinals: dict[int, int] = {}
+        self._client_steps: dict[int, int] = {}
+        self._rank_client_counts: dict[int, int] = {}
         self._next_client_id = 0
         self.rank_stats: dict[int, dict] = {}
         self._step_lock = threading.RLock()
         self._meep_lock = threading.RLock()
         self._global_step_cond = threading.Condition(self._meep_lock)
-        self._global_expected_clients: Optional[set[int]] = None
+        self._global_pending_key: Optional[tuple[int, int]] = None
         self._global_pending_requests: dict[int, dict[int, dict]] = {}
         self._global_pending_mids: dict[int, set[int]] = {}
         self._global_results: dict[int, dict[int, dict]] = {}
@@ -299,10 +301,11 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         self._unix_prefix = str(unix_prefix)
         self._group_ids = [f"{self._unix_prefix}{idx}" for idx in range(nbridge)]
         self._group_loads = {group_id: 0 for group_id in self._group_ids}
+        self._group_capacities: Optional[dict[str, int]] = None
         self._mxl_molecule_to_group: dict[int, str] = {}
         self._request_caches: dict[int, dict[int, dict]] = {}
         self._init_grace_seconds = max(0.0, float(init_grace_seconds))
-        self._first_rank_init_time: Optional[float] = None
+        self._ordinal_first_init_time: dict[int, float] = {}
         self._expected_total_molecules: Optional[int] = None
         self._remote_bridge_policy: Optional[dict] = None
         self._bridge_manifest_info: Optional[dict] = None
@@ -438,7 +441,9 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         -----
         Caller must hold ``self._meep_lock``. A no-op when no remote-bridge
         policy is set, when molecules have already been assigned to groups, or
-        when ``total_molecules`` is non-positive.
+        when ``total_molecules`` is non-positive. The resulting per-group
+        capacities are also used by lazy Meep registrations so manifest driver
+        counts and later molecule assignments stay consistent.
         """
 
         if self._remote_bridge_policy is None or self._mxl_molecule_to_group:
@@ -451,6 +456,13 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         self._unix_prefix = str(self._remote_bridge_policy["unix_prefix"])
         self._group_ids = [f"{self._unix_prefix}{idx}" for idx in range(nbridge)]
         self._group_loads = {group_id: 0 for group_id in self._group_ids}
+        remaining = total
+        capacities = {}
+        for group_id in self._group_ids:
+            capacity = min(per_bridge, remaining)
+            capacities[group_id] = max(0, capacity)
+            remaining -= capacity
+        self._group_capacities = capacities
 
     def _note_expected_total_molecules_locked(self, init_payload: dict) -> None:
         """
@@ -509,28 +521,41 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
 
     def _write_final_bridge_manifest_locked(self) -> None:
         """
-        Write the finalized bridge manifest once all molecules are registered.
+        Write the finalized bridge manifest once bridge counts are known.
 
         Notes
         -----
         Caller must hold ``self._meep_lock``. Idempotent and a no-op until a
-        remote-bridge policy is configured and every expected molecule has been
-        registered; on success it records the per-group molecule counts, writes
-        the manifest to disk, caches it on ``self._bridge_manifest_info``, and
-        latches ``self._bridge_manifest_written`` so it runs at most once.
+        remote-bridge policy is configured. If the total molecule count has
+        already produced per-group capacities, those capacities are written
+        immediately so remote bridge jobs can start before later lazy Meep
+        socket clients register. Without capacities, the manifest waits until
+        every expected molecule has registered and uses the observed group
+        loads. On success it writes the manifest to disk, caches it on
+        ``self._bridge_manifest_info``, and latches
+        ``self._bridge_manifest_written`` so it runs at most once.
         """
 
         if self._remote_bridge_policy is None or self._bridge_manifest_written:
             return
         expected = self._expected_total_molecules
-        if expected is not None and self._registered_molecule_count_locked() < expected:
+        capacities = self._group_capacities
+        if (
+            capacities is None
+            and expected is not None
+            and self._registered_molecule_count_locked() < expected
+        ):
             return
         specs = [
             RemoteBridgeSpec(
                 idx=idx,
                 group_id=group_id,
                 unixsocket=group_id,
-                n_molecules=int(self._group_loads.get(group_id, 0)),
+                n_molecules=int(
+                    capacities.get(group_id, 0)
+                    if capacities is not None
+                    else self._group_loads.get(group_id, 0)
+                ),
             )
             for idx, group_id in enumerate(self._group_ids)
         ]
@@ -711,11 +736,12 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         groups, waits for the bridge set to come up, replies ``MXLREADY``, then
         serves ``AGGSTEP`` frames in a loop, decoding e-fields, running the
         global timestep barrier, and returning packed amplitudes until the peer
-        disconnects or the hub stops. Enforces one connection per rank, since the
-        global barrier would otherwise deadlock. The socket is always closed and
-        de-registered on exit.
+        disconnects or the hub stops. Multiple socket clients from the same rank
+        are assigned rank-local ordinals so they can advance in Meep's serial
+        update order. The socket is always closed and de-registered on exit.
         """
 
+        client_id = None
         try:
             step_codec = _StepCodec()
             result_codec = _ResultCodec()
@@ -731,45 +757,50 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 self.drain_control_queue()
             with self._meep_lock:
                 self._note_expected_total_molecules_locked(init_payload)
-                if rank >= 0 and rank in self._client_ranks.values():
-                    raise RuntimeError(
-                        f"Meep rank {rank} opened a second MXLSocket connection. "
-                        "The aggregate hub's global timestep barrier requires "
-                        "exactly one connection per rank, but this rank owns "
-                        "multiple MXLSocketSusceptibility chunks driven "
-                        "sequentially, which would deadlock the barrier. Run Meep "
-                        "with one chunk per rank (e.g. split_chunks_evenly so the "
-                        "chunk count equals the number of MPI ranks)."
-                    )
 
             init_payloads = self._register_rank_molecules(init_payload, molecule_ids)
             with self._meep_lock:
                 client_id = self._next_client_id
                 self._next_client_id += 1
+                ordinal = self._rank_client_counts.get(rank, 0)
+                self._rank_client_counts[rank] = ordinal + 1
                 self._client_init_payloads[client_id] = init_payloads
-                self._client_ranks[client_id] = rank
-                self.rank_stats[rank] = {
-                    "molecule_count": len(molecule_ids),
-                    "steps": 0,
-                    "requests": 0,
-                    "peer": peer,
-                    "aggregate_groups": sorted(
-                        {payload.get("aggregate_group") for payload in init_payloads.values()}
-                    ),
+                self._client_ordinals[client_id] = ordinal
+                self._client_steps[client_id] = 0
+                aggregate_groups = {
+                    payload.get("aggregate_group") for payload in init_payloads.values()
                 }
+                stats = self.rank_stats.setdefault(
+                    rank,
+                    {
+                        "molecule_count": 0,
+                        "steps": 0,
+                        "requests": 0,
+                        "peer": peer,
+                        "peers": [],
+                        "client_count": 0,
+                        "aggregate_groups": [],
+                    },
+                )
+                stats["molecule_count"] += len(molecule_ids)
+                stats["client_count"] += 1
+                stats["peers"].append(peer)
+                stats["aggregate_groups"] = sorted(
+                    set(stats["aggregate_groups"]) | aggregate_groups
+                )
 
             group_counts = Counter(
                 str(payload["aggregate_group"]) for payload in init_payloads.values()
             )
             for group_id, count in sorted(group_counts.items()):
                 print(
-                    f"[AggregatedSusceptibilitySocketHub] Meep rank {rank} requested "
-                    f"{count} drivers from {peer}; group={group_id!r}.",
+                    f"[AggregatedSusceptibilitySocketHub] Meep rank {rank} "
+                    f"socket {ordinal} requested {count} drivers from {peer}; "
+                    f"group={group_id!r}.",
                     flush=True,
                 )
 
-            self._wait_for_initial_rank_burst()
-            self._wait_for_expected_molecule_count()
+            self._wait_for_rank_ordinal_burst(ordinal)
             with self._meep_lock:
                 self._write_final_bridge_manifest_locked()
             all_init_payloads = self._snapshot_rank_init_payloads()
@@ -814,6 +845,8 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                     self._rank_sockets.remove(sock)
                 except ValueError:
                     pass
+            if client_id is not None:
+                self._retire_client(client_id)
 
     def _recv_mxl_init_payload(self, sock: socket.socket) -> dict:
         """
@@ -843,64 +876,25 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             )
         return payload
 
-    def _wait_for_initial_rank_burst(self) -> None:
+    def _wait_for_rank_ordinal_burst(self, ordinal: int) -> None:
         """
-        Sleep through the configured grace window for the first INIT burst.
+        Sleep through the INIT grace window for one rank-local socket ordinal.
 
-        Notes
-        -----
-        Only relevant when the expected molecule total is unknown: ranks then
-        connect in a short burst, so the handler pauses until
-        ``init_grace_seconds`` after the first INIT to let the full molecule set
-        arrive before the bridge layout is frozen. A no-op once an expected total
-        is known or when the grace period is zero.
+        Meep initializes multiple ``MXLSocketSusceptibility`` objects on a rank
+        sequentially.  The first object on every rank has ordinal 0, the second
+        has ordinal 1, and so on.  Pausing briefly when the first client for an
+        ordinal arrives lets peer ranks register the same ordinal before the
+        first timestep barrier is formed.
         """
 
-        if self._expected_total_molecules is not None:
-            return
         if self._init_grace_seconds <= 0.0:
             return
         with self._meep_lock:
-            if self._first_rank_init_time is None:
-                self._first_rank_init_time = time.time()
-            deadline = self._first_rank_init_time + self._init_grace_seconds
+            first = self._ordinal_first_init_time.setdefault(ordinal, time.time())
+            deadline = first + self._init_grace_seconds
         remaining = deadline - time.time()
         if remaining > 0.0:
             time.sleep(remaining)
-
-    def _wait_for_expected_molecule_count(self) -> None:
-        """
-        Block until every expected socket molecule has registered.
-
-        Raises
-        ------
-        TimeoutError
-            If the registered molecule count does not reach
-            ``expected_total_molecules`` within ``self.timeout``.
-
-        Notes
-        -----
-        A no-op when no expected total has been announced. Once the count is
-        reached it also writes the finalized bridge manifest.
-        """
-
-        with self._meep_lock:
-            expected = self._expected_total_molecules
-            if expected is None:
-                return
-        deadline = time.time() + self.timeout
-        while not self._stop:
-            with self._meep_lock:
-                if self._registered_molecule_count_locked() >= expected:
-                    self._write_final_bridge_manifest_locked()
-                    return
-            remaining = deadline - time.time()
-            if remaining <= 0.0:
-                raise TimeoutError(
-                    "Timed out waiting for MXLINIT payloads to reach "
-                    f"expected_total_molecules={expected}."
-                )
-            time.sleep(min(self.latency, remaining))
 
     def _snapshot_rank_init_payloads(self) -> dict[int, dict]:
         """
@@ -943,10 +937,26 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         with self._meep_lock:
             group_id = self._mxl_molecule_to_group.get(molecule_id)
             if group_id is None:
-                group_id = min(
-                    self._group_ids,
-                    key=lambda gid: (self._group_loads.get(gid, 0), gid),
-                )
+                if self._group_capacities is None:
+                    group_id = min(
+                        self._group_ids,
+                        key=lambda gid: (self._group_loads.get(gid, 0), gid),
+                    )
+                else:
+                    group_id = next(
+                        (
+                            gid
+                            for gid in self._group_ids
+                            if self._group_loads.get(gid, 0)
+                            < self._group_capacities.get(gid, 0)
+                        ),
+                        None,
+                    )
+                    if group_id is None:
+                        raise RuntimeError(
+                            "Registered more MXLSocket molecules than the "
+                            "announced expected_total_molecules capacity."
+                        )
                 self._mxl_molecule_to_group[molecule_id] = group_id
                 self._group_loads[group_id] = self._group_loads.get(group_id, 0) + 1
             return group_id
@@ -1246,32 +1256,52 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                 )
         raise TimeoutError("Timed out waiting for aggregate susceptibility responses.")
 
-    def _expected_clients_locked(self) -> set[int]:
+    def _client_barrier_key_locked(self, client_id: int) -> tuple[int, int]:
         """
-        Return the set of client ids the global barrier waits for each step.
+        Return the global-barrier key for one socket client.
+
+        The key is ``(step_index, rank_local_socket_ordinal)``.  This lets Meep
+        ranks with multiple socket-backed susceptibilities advance them in the
+        same serial order Meep calls ``update_P`` without forcing two sockets on
+        the same rank to enter the barrier at the same time.
+
+        Notes
+        -----
+        Caller must hold ``self._global_step_cond``.
+        """
+
+        return (
+            int(self._client_steps.get(client_id, 0)),
+            int(self._client_ordinals.get(client_id, 0)),
+        )
+
+    def _expected_clients_for_key_locked(self, key: tuple[int, int]) -> set[int]:
+        """
+        Return registered clients participating in one barrier phase.
+
+        Parameters
+        ----------
+        key : tuple[int, int]
+            ``(step_index, rank_local_socket_ordinal)`` phase key.
 
         Returns
         -------
         set[int]
-            A copy of the expected client-id set.
+            Client ids whose next request belongs to the same phase.
 
         Notes
         -----
-        Caller must hold ``self._global_step_cond``. The set is latched lazily
-        from the registered clients on first use (logging a one-time notice), so
-        every rank that has connected by the first barriered step participates.
+        Caller must hold ``self._global_step_cond``.
         """
 
-        if self._global_expected_clients is None:
-            self._global_expected_clients = set(self._client_init_payloads.keys())
-            if self._global_expected_clients:
-                print(
-                    "[AggregatedSusceptibilitySocketHub] global timestep barrier "
-                    f"enabled for {len(self._global_expected_clients)} Meep "
-                    "socket clients.",
-                    flush=True,
-                )
-        return set(self._global_expected_clients)
+        step_index, ordinal = key
+        expected = {
+            cid
+            for cid, client_ordinal in self._client_ordinals.items()
+            if client_ordinal == ordinal
+            and int(self._client_steps.get(cid, 0)) == step_index
+        }
+        return expected
 
     def _consume_global_result_locked(self, client_id: int) -> Dict[int, dict]:
         """
@@ -1295,8 +1325,10 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         """
 
         result = self._global_results.pop(client_id)
+        self._client_steps[client_id] = self._client_steps.get(client_id, 0) + 1
         if not self._global_results:
             self._global_error = None
+            self._global_pending_key = None
             self._global_step_cond.notify_all()
         return result
 
@@ -1309,7 +1341,7 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         Parameters
         ----------
         client_id : int
-            Internal id of the calling Meep socket client (one per rank).
+            Internal id of the calling Meep socket client.
         requests : dict[int, dict]
             This client's molecule requests for the current timestep.
 
@@ -1329,16 +1361,18 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
 
         Notes
         -----
-        Every Meep rank drives the same FDTD timestep, so all rank connections
-        must advance in lockstep. This gathers one ``requests`` dict per expected
-        client under ``_global_step_cond``; the call that completes the expected
-        set becomes the "runner", which merges all requests, runs the shared
-        bridge step via :meth:`_run_merged_susceptibility_step`, then publishes
-        each client's slice into ``_global_results`` and wakes the waiters. The
-        non-runner clients block on the condition and return their slice once the
-        runner stores it. A timeout or a runner error is recorded in
-        ``_global_error`` and re-raised on every participant so no rank is left
-        waiting on the barrier.
+        Every Meep rank drives the same FDTD timestep, but multiple socket
+        susceptibilities on one rank are called serially. This gathers one
+        ``requests`` dict per expected client for the same
+        ``(step_index, rank_local_socket_ordinal)`` phase under
+        ``_global_step_cond``; the call that completes the expected set becomes
+        the "runner", which merges all requests, runs the shared bridge step via
+        :meth:`_run_merged_susceptibility_step`, then publishes each client's
+        slice into ``_global_results`` and wakes the waiters. The non-runner
+        clients block on the condition and return their slice once the runner
+        stores it. A timeout or a runner error is recorded in ``_global_error``
+        and re-raised on every participant so no socket client is left waiting
+        on the barrier.
         """
 
         deadline = time.time() + self.timeout
@@ -1346,30 +1380,26 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
         rank_mids = None
 
         with self._global_step_cond:
-            while (
-                self._global_results
-                and client_id not in self._global_results
-                and not self._stop
-            ):
-                self._global_step_cond.wait(timeout=self.latency)
-
-            expected = self._expected_clients_locked()
-            if client_id not in expected:
+            key = self._client_barrier_key_locked(client_id)
+            while not self._stop:
+                if client_id in self._global_results:
+                    return self._consume_global_result_locked(client_id)
                 if (
-                    not self._global_pending_requests
-                    and not self._global_running
-                    and not self._global_results
-                ):
-                    self._global_expected_clients.add(client_id)
-                    expected.add(client_id)
-                else:
-                    raise RuntimeError(
-                        "Meep socket client joined after the global timestep "
-                        "barrier was already active."
-                    )
+                    self._global_pending_key is None
+                    or self._global_pending_key == key
+                ) and not self._global_running:
+                    break
+                self._global_step_cond.wait(timeout=self.latency)
 
             if client_id in self._global_results:
                 return self._consume_global_result_locked(client_id)
+            if self._global_pending_key is None:
+                self._global_pending_key = key
+            elif self._global_pending_key != key:
+                raise RuntimeError(
+                    "Meep socket client entered a different timestep barrier "
+                    "phase while another phase was active."
+                )
             if client_id in self._global_pending_requests:
                 raise RuntimeError(
                     "Received two AGGSTEP frames from one Meep socket client "
@@ -1380,6 +1410,7 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             self._global_pending_mids[client_id] = set(requests.keys())
 
             while not self._stop:
+                expected = self._expected_clients_for_key_locked(key)
                 if (
                     not self._global_running
                     and expected.issubset(self._global_pending_requests.keys())
@@ -1403,6 +1434,7 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
                     self._global_pending_requests.clear()
                     self._global_pending_mids.clear()
                     self._global_running = False
+                    self._global_pending_key = None
                     self._global_step_cond.notify_all()
                     raise exc
 
@@ -1438,6 +1470,7 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
             self._global_step_cond.notify_all()
 
             if error is not None:
+                self._global_pending_key = None
                 raise error
             return self._consume_global_result_locked(client_id)
 
@@ -1465,6 +1498,31 @@ class _AggregatedSusceptibilitySocketHubServer(AggregatedSocketHub):
 
         requests = self._make_rank_requests(client_id, efields)
         return self._run_global_susceptibility_step(client_id, requests)
+
+    def _retire_client(self, client_id: int) -> None:
+        """
+        Remove a closed Meep socket client from hub bookkeeping.
+
+        The method leaves molecule-to-group assignments intact so an already
+        initialized aggregate bridge can continue serving the remaining clients,
+        but it removes the client from future timestep-barrier cohorts.
+        """
+
+        with self._global_step_cond:
+            self._client_init_payloads.pop(client_id, None)
+            self._client_ordinals.pop(client_id, None)
+            self._client_steps.pop(client_id, None)
+            self._request_caches.pop(client_id, None)
+            self._global_pending_requests.pop(client_id, None)
+            self._global_pending_mids.pop(client_id, None)
+            self._global_results.pop(client_id, None)
+            if (
+                not self._global_pending_requests
+                and not self._global_running
+                and not self._global_results
+            ):
+                self._global_pending_key = None
+            self._global_step_cond.notify_all()
 
     def stop(self):
         """
@@ -1910,7 +1968,8 @@ class AggregatedSusceptibilitySocketHub:
         Returns
         -------
         dict
-            Mapping with ``rescaling_factor``, ``driver_command``,
+            Mapping with symmetric bright-state ``rescaling_factor``,
+            ``driver_command``,
             ``bridge_manifest``, ``bridge_commands``, and ``bridge_specs`` for
             wiring up the SHO drivers and bridges.
 
@@ -1921,10 +1980,12 @@ class AggregatedSusceptibilitySocketHub:
 
         Notes
         -----
-        The returned ``rescaling_factor`` maps the SHO driver's atomic-unit
-        amplitude back to the Meep polarization current that reproduces the
-        requested Lorentzian response. Diagnostic lines are printed on the MPI
-        master only.
+        The returned ``rescaling_factor`` is the symmetric bright-state coupling
+        scale applied by Meep to both the socket drive field and returned
+        molecular amplitude. It is the square root of the direct density/current
+        scale needed to reproduce the requested Lorentzian response in the
+        linear-response limit. Diagnostic lines are printed on the MPI master
+        only.
         """
 
         if frequency <= 0.0 or resolution <= 0.0 or time_units_fs <= 0.0:
@@ -1941,10 +2002,11 @@ class AggregatedSusceptibilitySocketHub:
         omega_au = 2.0 * math.pi * frequency / (time_units_fs * FS_TO_AU)
         cell_measure = (1.0 / resolution) ** int(dimensions)
         efield_factor = MEEP_EFIELD_TO_AU_PREFAC / (time_units_fs * time_units_fs)
-        rescaling_factor = (
+        density_scale = (
             sigma * cell_measure * omega_au * omega_au * (time_units_fs * FS_TO_AU)
             / (MXL_SOURCE_AMP_AU_TO_MEEP * efield_factor * mu0_au * mu0_au)
         )
+        rescaling_factor = math.sqrt(density_scale)
         driver_command = self.driver_command_template(
             omega_au=omega_au,
             mu0_au=mu0_au,
