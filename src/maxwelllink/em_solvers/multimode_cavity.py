@@ -1099,7 +1099,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
         record_idx = step_idx // self.record_every_steps
 
-        if savedata and (record_idx <= self.record_max_steps):
+        if savedata and (record_idx < self.record_max_steps):
 
             if self.record_to_disk:
 
@@ -1279,7 +1279,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 self.record_list = record_list
 
         if record_max_steps is None:
-            self.record_max_steps = steps // self.record_every_steps
+            self.record_max_steps = (steps - 1) // self.record_every_steps + 1
         else:
             self.record_max_steps = int(record_max_steps)
             if self.record_max_steps < 0:
