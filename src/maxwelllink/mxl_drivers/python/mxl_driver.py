@@ -16,7 +16,6 @@ import shutil
 import os
 import socket, json
 import numpy as np
-import struct
 
 try:
     from .models import __drivers__
@@ -31,53 +30,44 @@ the source amplitude vector for a quantum dynamics model.
 """
 
 
-def _connect_tcp_with_retry(address: str, port: int, timeout: float) -> socket.socket:
-    """
-    Open a TCP socket connection, retrying transient connection failures.
-
-    Large driver arrays can briefly overrun the EM solver's TCP listen queue.
-    In that case a single blocking connect can fail before the solver has a
-    chance to accept later clients. Treat the driver timeout as the full retry
-    budget for establishing the connection.
-    """
-
-    deadline = time.monotonic() + float(timeout)
-    delay = 0.25
-    last_error = None
-
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-
-        sock = socket.socket(socket.AF_INET)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except (OSError, AttributeError):
-            pass
-        sock.settimeout(min(30.0, max(1.0, remaining)))
-        try:
-            sock.connect((address, port))
-            sock.settimeout(timeout)
-            return sock
-        except (ConnectionRefusedError, TimeoutError, socket.timeout, OSError) as exc:
-            last_error = exc
-            try:
-                sock.close()
-            except OSError:
-                pass
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(delay, remaining))
-            delay = min(delay * 1.5, 5.0)
-
-    raise TimeoutError(
-        f"Timed out connecting to MaxwellLink server at {(address, port)!r} "
-        f"after {timeout} seconds"
-    ) from last_error
+# The wire protocol (headers, framed ints/arrays/bytes, POSDATA/FORCEREADY
+# packing, and the TCP connect-with-retry helper) lives in
+# maxwelllink.sockets.protocol, which imports nothing from the rest of the
+# package, so the driver shares one definition with the hubs without import
+# cycles. Names are bound here so existing code that uses the module-level
+# helpers keeps working unchanged.
+from maxwelllink.sockets.protocol import (  # noqa: F401
+    BYE,
+    DT_FLOAT,
+    DT_INT,
+    FIELDDATA,
+    FORCEREADY,
+    GETFORCE,
+    GETSOURCE,
+    HAVEDATA,
+    HEADER_LEN,
+    INIT,
+    NEEDINIT,
+    POSDATA,
+    READY,
+    SOURCEREADY,
+    STATUS,
+    STOP,
+    _SocketClosed,
+    _connect_tcp_with_retry,
+    _pad12,
+    _recv_array,
+    _recv_bytes,
+    _recv_int,
+    _recv_msg,
+    _recv_posdata,
+    _recvall,
+    _send_array,
+    _send_bytes,
+    _send_force_ready,
+    _send_int,
+    _send_msg,
+)
 
 
 # helper function to determine whether this processor is the MPI master using mpi4py
@@ -102,319 +92,6 @@ def _am_master():
     return _RANK == 0
 
 
-_INT32 = struct.Struct("<i")
-_FLOAT64 = struct.Struct("<d")
-# numpy dtypes on the wire
-DT_FLOAT = np.float64
-DT_INT = np.int32
-
-# header width (ASCII, space-padded)
-HEADER_LEN = 12
-
-# Message codes similar to i-PI's socket interface
-STATUS = b"STATUS"
-READY = b"READY"
-HAVEDATA = b"HAVEDATA"
-NEEDINIT = b"NEEDINIT"
-INIT = b"INIT"
-POSDATA = b"POSDATA"
-GETFORCE = b"GETFORCE"
-FORCEREADY = b"FORCEREADY"
-STOP = b"STOP"
-BYE = b"BYE"
-
-# EM aliases for readability (same wire format)
-FIELDDATA = POSDATA
-GETSOURCE = GETFORCE
-SOURCEREADY = FORCEREADY
-
-
-class _SocketClosed(OSError):
-    pass
-
-
-def _pad12(msg: bytes) -> bytes:
-    """
-    Left-pad or right-pad a message to a fixed 12-byte ASCII header.
-
-    Parameters
-    ----------
-    msg : bytes
-        Message bytes to send in the fixed-width header.
-
-    Returns
-    -------
-    bytes
-        The message padded with spaces to 12 bytes.
-
-    Raises
-    ------
-    ValueError
-        If the message is longer than the 12-byte header.
-    """
-
-    if len(msg) > HEADER_LEN:
-        raise ValueError("Header too long")
-    return msg.ljust(HEADER_LEN, b" ")
-
-
-def _send_msg(sock: socket.socket, msg: bytes) -> None:
-    """
-    Send a 12-byte ASCII header (space-padded).
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    msg : bytes
-        Message tag to send (e.g., ``b"STATUS"``).
-    """
-
-    sock.sendall(_pad12(msg))
-
-
-def _recvall(sock: socket.socket, n: int) -> bytes:
-    """
-    Read exactly ``n`` bytes from a socket.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    n : int
-        Number of bytes to read.
-
-    Returns
-    -------
-    bytes
-        The data read.
-
-    Raises
-    ------
-    _SocketClosed
-        If the peer closes the connection before all bytes are received.
-    """
-
-    buf = bytearray()
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise _SocketClosed("Peer closed")
-        buf.extend(chunk)
-    return bytes(buf)
-
-
-def _recv_msg(sock: socket.socket) -> bytes:
-    """
-    Receive a 12-byte ASCII header and strip trailing spaces.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-
-    Returns
-    -------
-    bytes
-        The received header (without trailing spaces).
-    """
-
-    hdr = _recvall(sock, HEADER_LEN)
-    return hdr.rstrip()
-
-
-def _send_array(sock: socket.socket, arr, dtype) -> None:
-    """
-    Send a NumPy array over a socket using a contiguous C-order memory view.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    arr : array-like
-        Array data to send.
-    dtype : numpy.dtype
-        Data type to cast and send as (e.g., ``np.float64``).
-    """
-
-    a = np.asarray(arr, dtype=dtype, order="C")
-    sock.sendall(memoryview(a).cast("B"))
-
-
-def _recv_array(sock: socket.socket, shape, dtype):
-    """
-    Receive a NumPy array of a given shape and dtype from a socket.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    shape : tuple of int
-        Expected array shape.
-    dtype : numpy.dtype
-        Expected dtype (e.g., ``np.float64``).
-
-    Returns
-    -------
-    numpy.ndarray
-        The received array with the given shape and dtype.
-
-    Raises
-    ------
-    _SocketClosed
-        If the peer closes the connection during the transfer.
-    """
-
-    out = np.empty(shape, dtype=dtype, order="C")
-    mv = memoryview(out).cast("B")
-    need = mv.nbytes
-    got = 0
-    while got < need:
-        r = sock.recv_into(mv[got:], need - got)
-        if r == 0:
-            raise _SocketClosed("Peer closed")
-        got += r
-    return out
-
-
-def _send_int(sock: socket.socket, x: int) -> None:
-    """
-    Send a 32-bit little-endian integer.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    x : int
-        Integer value to send.
-    """
-
-    sock.sendall(_INT32.pack(int(x)))
-
-
-def _recv_int(sock: socket.socket) -> int:
-    """
-    Receive a 32-bit little-endian integer.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-
-    Returns
-    -------
-    int
-        The received integer.
-
-    Raises
-    ------
-    _SocketClosed
-        If the peer closes the connection during the transfer.
-    """
-
-    buf = bytearray(_INT32.size)
-    mv = memoryview(buf)
-    got = 0
-    while got < _INT32.size:
-        r = sock.recv_into(mv[got:], _INT32.size - got)
-        if r == 0:
-            raise _SocketClosed("Peer closed")
-        got += r
-    return _INT32.unpack(buf)[0]
-
-
-def _send_bytes(sock: socket.socket, b: bytes) -> None:
-    """
-    Send a length-prefixed byte string.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    b : bytes
-        Byte string to send. The length is sent first as a 32-bit integer.
-    """
-
-    _send_int(sock, len(b))
-    if len(b):
-        sock.sendall(b)
-
-
-def _recv_bytes(sock: socket.socket) -> bytes:
-    """
-    Receive a length-prefixed byte string.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-
-    Returns
-    -------
-    bytes
-        The received byte string (may be empty).
-    """
-
-    n = _recv_int(sock)
-    return _recvall(sock, n) if n else b""
-
-
-def _recv_posdata(sock: socket.socket):
-    """
-    Read a POSDATA / FIELDDATA block from the socket.
-
-    Returns
-    -------
-    tuple
-        ``(cell, icell, xyz)`` where:
-        - ``cell`` : ``(3, 3)`` ndarray (row-major), simulation cell.
-        - ``icell`` : ``(3, 3)`` ndarray (row-major), inverse cell.
-        - ``xyz`` : ``(nat, 3)`` ndarray of positions (or effective field payload).
-    """
-
-    cell = _recv_array(sock, (3, 3), DT_FLOAT).T.copy()
-    icell = _recv_array(sock, (3, 3), DT_FLOAT).T.copy()
-    nat = _recv_int(sock)
-    xyz = _recv_array(sock, (nat, 3), DT_FLOAT)
-    return cell, icell, xyz
-
-
-def _send_force_ready(
-    sock: socket.socket,
-    energy_ha: float,
-    forces_Nx3_ha_per_bohr,
-    virial_3x3_ha,
-    more: bytes = b"",
-):
-    """
-    Send a FORCEREADY/SOURCEREADY message with energy, forces, virial, and extras.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    energy_ha : float
-        Total energy (Hartree).
-    forces_Nx3_ha_per_bohr : array-like
-        Forces as an ``(N, 3)`` array (Hartree/Bohr).
-    virial_3x3_ha : array-like
-        Virial tensor as a ``(3, 3)`` array (Hartree).
-    more : bytes, optional
-        Extra payload as bytes (length-prefixed), e.g., JSON metadata.
-    """
-
-    _send_msg(sock, FORCEREADY)
-    _send_array(sock, np.array([energy_ha], dtype=DT_FLOAT), DT_FLOAT)
-    forces = np.asarray(forces_Nx3_ha_per_bohr, dtype=DT_FLOAT)
-    assert forces.ndim == 2 and forces.shape[1] == 3
-    _send_int(sock, forces.shape[0])
-    _send_array(sock, forces, DT_FLOAT)
-    _send_array(sock, np.asarray(virial_3x3_ha, dtype=DT_FLOAT).T, DT_FLOAT)
-    _send_bytes(sock, more)
-
-
-# the above functions can be also obtained from maxwelllink.sockets,
-# but we copy them here to avoid circular imports.
 
 
 def _read_value(s):
