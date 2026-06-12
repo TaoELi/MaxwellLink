@@ -647,7 +647,13 @@ def _expect_header(buf, expected: bytes) -> None:
         raise RuntimeError(f"Expected {expected!r}, got {got!r}")
 
 
-def _connect_tcp_with_retry(address: str, port: int, timeout: float) -> socket.socket:
+def _connect_tcp_with_retry(
+    address: str,
+    port: int,
+    timeout: float,
+    *,
+    label: str = "MaxwellLink server",
+) -> socket.socket:
     """
     Connect to a TCP server with bounded retries.
 
@@ -661,6 +667,8 @@ def _connect_tcp_with_retry(address: str, port: int, timeout: float) -> socket.s
         Total budget (seconds) for establishing the connection. The call
         retries with exponential backoff until this deadline; the returned
         socket is left configured with this value as its operation timeout.
+    label : str, default: "MaxwellLink server"
+        Human-readable endpoint label used only in timeout diagnostics.
 
     Returns
     -------
@@ -706,7 +714,8 @@ def _connect_tcp_with_retry(address: str, port: int, timeout: float) -> socket.s
             delay = min(delay * 1.5, 1.0)
 
     raise TimeoutError(
-        f"Timed out connecting to aggregated hub at {(address, port)!r}"
+        f"Timed out connecting to {label} at {(address, port)!r} "
+        f"after {timeout} seconds"
     ) from last_error
 
 
@@ -1071,5 +1080,4 @@ class _ResultCodec(_FrameCodec):
             responses[mid] = {"amp": np.array(amp, dtype=float), "extra": extra}
             extra_offset += extra_len
         return responses
-
 

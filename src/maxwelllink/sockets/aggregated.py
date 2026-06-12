@@ -1936,6 +1936,7 @@ class LocalSocketHubBridge:
             address=self.upstream_host,
             port=self.upstream_port,
             timeout=self.timeout,
+            label="aggregated hub",
         )
         self._upstream_sock = sock
         _send_aggregate_hello(sock, group_id=self.group_id)
