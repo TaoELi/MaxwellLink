@@ -36,6 +36,8 @@ def test_aggregated_susceptibility_barrier_allows_multiple_clients_per_rank():
     server._global_results = {}
     server._global_error = None
     server._global_running = False
+    server._client_block_info = {}
+    server._block_merged_cache = {}
     server._stop = False
     server.timeout = 5.0
     server.latency = 1e-4

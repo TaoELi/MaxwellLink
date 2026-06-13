@@ -303,7 +303,7 @@ class _MeepRankServerMixin:
     may override
         ``_classify_silent``, ``_classify_other``,
         ``_before_rank_registration``, ``_molecule_init_payload_extras``,
-        ``_on_rank_closed``, ``_wake_step_waiters``
+        ``_serve_step_frame``, ``_on_rank_closed``, ``_wake_step_waiters``
     do not override
         ``_accept_loop``, ``_classify_socket``, ``_serve_meep_rank``,
         ``_register_rank_molecules``, ``stop``
@@ -482,10 +482,10 @@ class _MeepRankServerMixin:
                     raise RuntimeError(
                         f"Unexpected Meep susceptibility header {header!r}."
                     )
-                efields = step_codec.recv(sock, header_already_read=True)
-                responses = self._handle_step(ctx, efields)
-                result_codec.send(sock, responses)
-                self._note_step_served(ctx, len(efields))
+                n_requests = self._serve_step_frame(
+                    ctx, sock, step_codec, result_codec
+                )
+                self._note_step_served(ctx, n_requests)
 
         except (_SocketClosed, OSError):
             pass
@@ -502,6 +502,23 @@ class _MeepRankServerMixin:
                 except ValueError:
                     pass
             self._on_rank_closed(ctx)
+
+    def _serve_step_frame(self, ctx, sock, step_codec, result_codec) -> int:
+        """
+        Serve one AGGSTEP frame whose banner has already been consumed.
+
+        Default implementation: decode the per-molecule field mapping, run the
+        subclass timestep through :meth:`_handle_step`, and reply with the
+        per-molecule responses. Subclasses may override this to decode and
+        reply with contiguous arrays instead (see the aggregated hub's block
+        path). Returns the number of molecule requests served, used for the
+        rank statistics.
+        """
+
+        efields = step_codec.recv(sock, header_already_read=True)
+        responses = self._handle_step(ctx, efields)
+        result_codec.send(sock, responses)
+        return len(efields)
 
     def _note_step_served(self, ctx, n_requests: int) -> None:
         """Update the rank's step/request counters after one served step."""

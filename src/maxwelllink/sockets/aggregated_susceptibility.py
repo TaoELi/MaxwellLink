@@ -31,6 +31,7 @@ import math
 import os
 import queue
 import shlex
+import socket
 import threading
 import time
 from collections import Counter
@@ -60,9 +61,20 @@ from .aggregated import (
     RemoteBridgeSpec,
     _AggregateGroupState,
 )
-from .protocol import _close_socket, _json_loads_bytes, _recv_bytes
+from .protocol import (
+    _SocketClosed,
+    _close_socket,
+    _json_loads_bytes,
+    _recv_bytes,
+    _resolve_step_records,
+)
 from .sockets import _ClientState, am_master
 from .susceptibility import SusceptibilitySocketHub
+
+# Sentinel published in ``_global_results`` for clients served through the
+# block fast path: their amplitudes are already deposited in the client's
+# ``amps_out`` buffer, so no per-molecule result mapping is built for them.
+_BLOCK_RESULT = object()
 
 
 # ----------------------------------------------------------------------
@@ -229,6 +241,16 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
         self._rank_client_counts: dict[int, int] = {}
         self._next_client_id = 0
         self._request_caches: dict[int, dict[int, dict]] = {}
+
+        # Block fast path: per-client canonical record tables and staging
+        # buffers (see _serve_step_frame), plus per-cohort cached merged
+        # request mappings. Setting MXL_DISABLE_BLOCK_PATH=1 forces the
+        # legacy per-molecule dict path (useful for A/B benchmarking).
+        self._client_block_info: dict[int, dict] = {}
+        self._block_merged_cache: dict[tuple, tuple] = {}
+        self._block_path_enabled = os.environ.get(
+            "MXL_DISABLE_BLOCK_PATH", ""
+        ).strip().lower() not in ("1", "true", "yes")
 
         # Global timestep barrier state (guarded by _global_step_cond, which
         # shares _meep_lock so stats and barrier updates cannot interleave).
@@ -541,6 +563,9 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
             self._client_init_payloads[ctx.client_id] = ctx.init_payloads
             self._client_ordinals[ctx.client_id] = ctx.ordinal
             self._client_steps[ctx.client_id] = 0
+            self._client_block_info[ctx.client_id] = self._build_client_block_info(
+                ctx.molecule_ids
+            )
             aggregate_groups = {
                 payload.get("aggregate_group")
                 for payload in ctx.init_payloads.values()
@@ -812,6 +837,97 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
 
     # -------------- per-timestep barrier --------------
 
+    def _build_client_block_info(self, molecule_ids) -> dict:
+        """
+        Build the per-client state used by the block fast path.
+
+        Meep's C client sends every AGGSTEP with the same record table: the
+        MXLINIT molecule ids in order, each referencing its own field slot
+        (``field_idx == slot``, no deduplication). Caching that canonical
+        table lets :meth:`_serve_step_frame` validate a frame with one byte
+        comparison and treat the decoded field block as a ready-made
+        ``(n, 3)`` array in slot order.
+        """
+
+        mids = np.asarray(list(molecule_ids), dtype="<i4")
+        n = int(mids.shape[0])
+        records = np.empty((n, 2), dtype="<i4")
+        records[:, 0] = mids
+        records[:, 1] = np.arange(n, dtype="<i4")
+        stage = np.zeros((n, 3), dtype=np.float64)
+        # Built once: the per-molecule arrays are row views into the staging
+        # buffer, so refreshing the buffer refreshes the mapping handed to
+        # step_barrier with no per-step dict work.
+        request_dict = {int(mids[i]): {"efield_au": stage[i]} for i in range(n)}
+        return {
+            "mids": mids,
+            "mids_list": [int(mid) for mid in mids],
+            "mid_set": frozenset(int(mid) for mid in mids),
+            "record_bytes": records.tobytes(),
+            "fields_stage": stage,
+            "amps_out": np.zeros((n, 3), dtype=np.float64),
+            "request_dict": request_dict,
+        }
+
+    def _serve_step_frame(self, ctx, sock, step_codec, result_codec) -> int:
+        """
+        Serve one AGGSTEP frame, preferring the array (block) fast path.
+
+        When the frame's record table matches this client's cached canonical
+        table, the field block is carried as one ``(n, 3)`` array end to end
+        and the reply is encoded from the contiguous amplitude block (with
+        empty ``extra`` payloads, which Meep receives and discards anyway).
+        Any other frame — deduplicated fields, reordered records, an unknown
+        client, or the path disabled via ``MXL_DISABLE_BLOCK_PATH`` — is
+        decoded per molecule and served through the legacy path.
+        """
+
+        info = (
+            self._client_block_info.get(getattr(ctx, "client_id", None))
+            if self._block_path_enabled
+            else None
+        )
+        if info is None:
+            return super()._serve_step_frame(ctx, sock, step_codec, result_codec)
+
+        nreq, records, fields = step_codec.recv_block(
+            sock, header_already_read=True
+        )
+        if fields.shape[0] != nreq or records != info["record_bytes"]:
+            efields = _resolve_step_records(records, fields)
+            responses = self._handle_step(ctx, efields)
+            result_codec.send(sock, responses)
+            return len(efields)
+
+        amps = self._run_block_step(ctx.client_id, fields)
+        result_codec.send_block(sock, info["mids"], amps)
+        return nreq
+
+    def _run_block_step(self, client_id: int, fields: np.ndarray) -> np.ndarray:
+        """
+        Run one block-path timestep through the global barrier.
+
+        Copies the decoded field block into this client's staging buffer
+        (whose rows back the cached request dict) and joins the usual global
+        barrier. The runner deposits this client's amplitudes into
+        ``amps_out`` and publishes the ``_BLOCK_RESULT`` sentinel instead of
+        a per-molecule result mapping.
+        """
+
+        info = self._client_block_info[client_id]
+        np.copyto(info["fields_stage"], fields)
+        result = self._run_global_susceptibility_step(client_id, info["request_dict"])
+        if result is _BLOCK_RESULT:
+            return info["amps_out"]
+        # Defensive: the runner served this client through the legacy path
+        # (should not happen while the cached request dict is registered).
+        out = info["amps_out"]
+        np.concatenate(
+            [result[mid]["amp"] for mid in info["mids_list"]],
+            out=out.reshape(-1),
+        )
+        return out
+
     def _handle_step(self, ctx, efields: Dict[int, np.ndarray]) -> Dict[int, dict]:
         """Run one timestep for this socket client through the global barrier."""
 
@@ -885,6 +1001,254 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
                 )
         raise TimeoutError("Timed out waiting for aggregate susceptibility responses.")
 
+    # -------------- vectorized group fan-out (block plan) --------------
+
+    def _block_plan_for_cohort(self, cohort: tuple) -> Optional[dict]:
+        """
+        Build (or fetch) the vectorized group fan-out plan for one cohort.
+
+        The plan holds, per cohort, contiguous merged field/amplitude buffers
+        with one row slice per client, and per aggregate group the row index
+        array, the canonical AGGSTEP record table for ``send_block``, and the
+        sorted-mid tables used to map bridge replies (which may arrive in any
+        per-molecule order) back onto merged rows with two vectorized ops.
+
+        Returns ``None`` when the plan cannot be built (membership not fully
+        grouped yet, duplicate molecule ids across clients, or a bare server
+        without group bookkeeping); callers then fall back to the dict path.
+        """
+
+        entry = self._block_merged_cache.get(cohort)
+        if entry is None:
+            return None
+        plan = entry.get("plan")
+        if plan is not None:
+            return plan if plan is not False else None
+
+        molecule_to_group = getattr(self, "_molecule_to_group", None)
+        hub_lock = getattr(self, "_lock", None)
+        if molecule_to_group is None or hub_lock is None:
+            entry["plan"] = False
+            return None
+
+        clients: list[tuple[int, slice]] = []
+        mids_parts = []
+        offset = 0
+        for cid in cohort:
+            info = self._client_block_info.get(cid)
+            if info is None:
+                return None  # transient (client retiring); retry next step
+            n = int(info["mids"].shape[0])
+            clients.append((cid, slice(offset, offset + n)))
+            mids_parts.append(info["mids"])
+            offset += n
+        merged_mids = np.concatenate(mids_parts)
+        if np.unique(merged_mids).size != merged_mids.size:
+            # Duplicate molecule ids across clients: only the dict path's
+            # dedup semantics are well defined for this cohort.
+            entry["plan"] = False
+            return None
+
+        with hub_lock:
+            try:
+                group_of = [molecule_to_group[int(mid)] for mid in merged_mids]
+            except KeyError:
+                return None  # not every molecule is grouped yet; retry later
+
+        group_rows: dict[str, list[int]] = {}
+        for row, gid in enumerate(group_of):
+            group_rows.setdefault(gid, []).append(row)
+
+        plan_groups: dict[str, dict] = {}
+        for gid, rows in group_rows.items():
+            sel = np.asarray(rows, dtype=np.intp)
+            mids_g = merged_mids[sel]
+            order = np.argsort(mids_g, kind="stable")
+            records = np.empty((sel.size, 2), dtype="<i4")
+            records[:, 0] = mids_g
+            records[:, 1] = np.arange(sel.size, dtype="<i4")
+            plan_groups[gid] = {
+                "sel": sel,
+                "mids": mids_g,
+                "mids_sorted": mids_g[order],
+                "rows_sorted": sel[order],
+                "record_bytes": records.tobytes(),
+                "last_reply_mids": None,
+                "last_rows": None,
+            }
+
+        plan = {
+            "clients": clients,
+            "mid_list": [int(mid) for mid in merged_mids],
+            "merged_fields": np.zeros((offset, 3), dtype=np.float64),
+            "merged_amps": np.zeros((offset, 3), dtype=np.float64),
+            "groups": plan_groups,
+        }
+        entry["plan"] = plan
+        return plan
+
+    def _run_merged_block_step(self, plan: dict, deadline: float) -> None:
+        """
+        Run one merged bridge step through the vectorized plan.
+
+        Same retry/rebind contract as :meth:`_run_merged_susceptibility_step`,
+        but the fan-out is array-based: client staging buffers are copied into
+        the merged field buffer, each group's slice is gathered and sent as a
+        ``send_block`` frame, and replies are scattered into the merged
+        amplitude buffer.
+
+        Raises
+        ------
+        TimeoutError
+            If no complete set of responses arrives before ``deadline``.
+        """
+
+        merged_fields = plan["merged_fields"]
+        for cid, rows in plan["clients"]:
+            info = self._client_block_info.get(cid)
+            if info is None:
+                raise RuntimeError("Block cohort client retired mid-step.")
+            merged_fields[rows] = info["fields_stage"]
+
+        while not self._stop:
+            remaining = deadline - time.time()
+            if remaining <= 0.0:
+                break
+            if self._block_step_round(plan, deadline):
+                return
+            rebind_payloads = self._snapshot_rank_init_payloads()
+            with self._step_lock:
+                self.wait_until_bound(
+                    {
+                        mid: rebind_payloads[mid]
+                        for mid in plan["mid_list"]
+                        if mid in rebind_payloads
+                    },
+                    require_init=True,
+                    timeout=min(1.0, max(0.0, deadline - time.time())),
+                )
+        raise TimeoutError("Timed out waiting for aggregate susceptibility responses.")
+
+    def _block_step_round(self, plan: dict, deadline: float) -> bool:
+        """
+        One send/collect round of the vectorized plan over all groups.
+
+        Mirrors ``step_barrier``'s dispatch/collect phases: returns ``True``
+        when every group's reply has been scattered into the merged amplitude
+        buffer, ``False`` on a pause/disconnect/timeout (after the usual
+        ``_mark_group_dead`` / ``_pause`` side effects) so the caller can
+        rebind and retry.
+        """
+
+        if self.paused:
+            return False
+
+        merged_fields = plan["merged_fields"]
+        for gid, g in plan["groups"].items():
+            group, st = self._group_and_bridge(gid)
+            if group is None or st is None or not st.alive or not st.initialized:
+                self._pause()
+                return False
+            try:
+                group.step_codec.send_block(
+                    st.sock, g["record_bytes"], merged_fields[g["sel"]]
+                )
+            except (socket.timeout, _SocketClosed, OSError):
+                self._mark_group_dead(gid, reason="send")
+                return False
+
+        pending = set(plan["groups"].keys())
+        if len(pending) == 1:
+            return self._collect_block_group(plan, next(iter(pending)), deadline)
+
+        while pending:
+            remaining = deadline - time.time()
+            if remaining <= 0.0:
+                return False
+            try:
+                events = self._bridge_selector.select(timeout=min(remaining, 1.0))
+            except OSError:
+                return False
+            if not events:
+                continue
+            for key, _mask in events:
+                gid = key.data
+                if gid not in pending:
+                    continue
+                if not self._collect_block_group(plan, gid, deadline):
+                    return False
+                pending.discard(gid)
+        return True
+
+    def _collect_block_group(self, plan: dict, gid: str, deadline: float) -> bool:
+        """
+        Receive one group's block reply and scatter it into the merged buffer.
+
+        Bridges may return molecules in any order (their reply dicts follow
+        downstream completion order), so the reply mid column is aligned to
+        the plan's sorted tables with one argsort; the resulting row mapping
+        is cached and revalidated with a single vectorized comparison on
+        subsequent steps. Driver ``extra`` payloads are drained and discarded
+        (Meep discards them anyway).
+
+        Raises
+        ------
+        RuntimeError
+            If the group returns a molecule-id set other than the one
+            requested (the group is also marked dead).
+        """
+
+        group, st = self._group_and_bridge(gid)
+        if group is None or st is None or not st.alive:
+            self._pause()
+            return False
+        remaining = deadline - time.time()
+        if remaining <= 0.0:
+            return False
+
+        old_timeout = st.sock.gettimeout()
+        try:
+            st.sock.settimeout(max(0.0, remaining))
+            mids_r, amps_r, _extra_lens, _extras = group.result_codec.recv_block(
+                st.sock
+            )
+        except (socket.timeout, RuntimeError, _SocketClosed, OSError):
+            self._mark_group_dead(gid, reason="recv")
+            return False
+        finally:
+            try:
+                st.sock.settimeout(old_timeout)
+            except OSError:
+                pass
+
+        g = plan["groups"][gid]
+        last = g["last_reply_mids"]
+        if last is not None and mids_r.shape == last.shape and np.array_equal(
+            mids_r, last
+        ):
+            rows = g["last_rows"]
+        else:
+            if mids_r.shape[0] != g["mids"].shape[0]:
+                self._mark_group_dead(gid, reason="protocol")
+                raise RuntimeError(
+                    f"Aggregate group {gid!r} returned {mids_r.shape[0]} molecule "
+                    f"ids, expected {g['mids'].shape[0]}."
+                )
+            order = np.argsort(mids_r, kind="stable")
+            if not np.array_equal(mids_r[order], g["mids_sorted"]):
+                self._mark_group_dead(gid, reason="protocol")
+                raise RuntimeError(
+                    f"Aggregate group {gid!r} returned an unexpected molecule-id "
+                    "set."
+                )
+            rows = np.empty_like(g["rows_sorted"])
+            rows[order] = g["rows_sorted"]
+            g["last_reply_mids"] = mids_r
+            g["last_rows"] = rows
+
+        plan["merged_amps"][rows] = amps_r
+        return True
+
     def _client_barrier_key_locked(self, client_id: int) -> tuple[int, int]:
         """
         Return the global-barrier key ``(step_index, rank_local_ordinal)``.
@@ -915,6 +1279,56 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
             and int(self._client_steps.get(cid, 0)) == step_index
         }
         return expected
+
+    def _merge_pending_requests_locked(
+        self, expected: set[int]
+    ) -> tuple[dict[int, dict], dict, set[int]]:
+        """
+        Merge the pending per-client requests of one barrier cohort.
+
+        For a cohort whose clients all entered through the block fast path
+        the merged mapping is cached per cohort: every cached request dict
+        holds per-molecule views into its client's staging buffer, so the
+        cached merge stays current when the buffers are overwritten each
+        step and the merge itself costs one dict lookup. Mixed or legacy
+        cohorts get a fresh merge with the original copy semantics.
+
+        Caller must hold ``self._global_step_cond``. Returns
+        ``(merged_requests, rank_mids, block_client_ids)``.
+        """
+
+        ordered = sorted(expected)
+        block_cids: set[int] = set()
+        for cid in ordered:
+            info = self._client_block_info.get(cid)
+            if (
+                info is not None
+                and self._global_pending_requests.get(cid) is info["request_dict"]
+            ):
+                block_cids.add(cid)
+
+        if len(block_cids) == len(ordered):
+            cohort = tuple(ordered)
+            cached = self._block_merged_cache.get(cohort)
+            if cached is None:
+                merged: dict[int, dict] = {}
+                cohort_mids: dict[int, frozenset] = {}
+                for cid in ordered:
+                    info = self._client_block_info[cid]
+                    merged.update(info["request_dict"])
+                    cohort_mids[cid] = info["mid_set"]
+                # "plan" holds the lazily built vectorized group fan-out plan
+                # (None = not built yet, False = permanently unavailable).
+                cached = {"merged": merged, "rank_mids": cohort_mids, "plan": None}
+                self._block_merged_cache[cohort] = cached
+            return cached["merged"], cached["rank_mids"], block_cids
+
+        merged_requests: dict[int, dict] = {}
+        rank_mids: dict[int, set] = {}
+        for cid in ordered:
+            merged_requests.update(self._global_pending_requests[cid])
+            rank_mids[cid] = set(self._global_pending_mids[cid])
+        return merged_requests, rank_mids, block_cids
 
     def _consume_global_result_locked(self, client_id: int) -> Dict[int, dict]:
         """
@@ -965,6 +1379,7 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
         deadline = time.time() + self.timeout
         merged_requests = None
         rank_mids = None
+        block_cids: set[int] = set()
 
         with self._global_step_cond:
             key = self._client_barrier_key_locked(client_id)
@@ -994,7 +1409,11 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
                 )
 
             self._global_pending_requests[client_id] = requests
-            self._global_pending_mids[client_id] = set(requests.keys())
+            block_info = self._client_block_info.get(client_id)
+            if block_info is not None and requests is block_info["request_dict"]:
+                self._global_pending_mids[client_id] = block_info["mid_set"]
+            else:
+                self._global_pending_mids[client_id] = set(requests.keys())
 
             while not self._stop:
                 expected = self._expected_clients_for_key_locked(key)
@@ -1002,12 +1421,9 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
                     not self._global_running
                     and expected.issubset(self._global_pending_requests.keys())
                 ):
-                    merged_requests = {}
-                    rank_mids = {}
-                    for cid in sorted(expected):
-                        cid_requests = self._global_pending_requests[cid]
-                        merged_requests.update(cid_requests)
-                        rank_mids[cid] = set(self._global_pending_mids[cid])
+                    merged_requests, rank_mids, block_cids = (
+                        self._merge_pending_requests_locked(expected)
+                    )
                     self._global_running = True
                     break
 
@@ -1035,15 +1451,53 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
 
         error = None
         responses = None
+        block_done: set[int] = set()
         try:
-            responses = self._run_merged_susceptibility_step(merged_requests, deadline)
+            plan = None
+            if block_cids and len(block_cids) == len(rank_mids):
+                plan = self._block_plan_for_cohort(tuple(sorted(rank_mids)))
+            if plan is not None:
+                # Fully vectorized path: gather/scatter through the cohort
+                # plan, then hand each client its contiguous slice.
+                self._run_merged_block_step(plan, deadline)
+                merged_amps = plan["merged_amps"]
+                for cid, rows in plan["clients"]:
+                    info = self._client_block_info.get(cid)
+                    if info is None:
+                        continue
+                    np.copyto(info["amps_out"], merged_amps[rows])
+                    block_done.add(cid)
+            else:
+                responses = self._run_merged_susceptibility_step(
+                    merged_requests, deadline
+                )
+                # Deposit block-path clients' amplitudes into their contiguous
+                # output buffers before publishing; their waiters then receive
+                # the _BLOCK_RESULT sentinel instead of a per-molecule mapping.
+                for cid in block_cids:
+                    info = self._client_block_info.get(cid)
+                    if info is None:
+                        continue
+                    np.concatenate(
+                        [responses[mid]["amp"] for mid in info["mids_list"]],
+                        out=info["amps_out"].reshape(-1),
+                    )
+                    block_done.add(cid)
         except BaseException as exc:
             error = exc
 
         with self._global_step_cond:
             if error is None:
                 self._global_results = {
-                    cid: {mid: responses[mid] for mid in mids}
+                    cid: (
+                        _BLOCK_RESULT
+                        if cid in block_done
+                        else (
+                            {mid: responses[mid] for mid in mids}
+                            if responses is not None
+                            else {}
+                        )
+                    )
                     for cid, mids in rank_mids.items()
                 }
                 self._global_error = None
@@ -1085,6 +1539,13 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
             self._client_ordinals.pop(client_id, None)
             self._client_steps.pop(client_id, None)
             self._request_caches.pop(client_id, None)
+            self._client_block_info.pop(client_id, None)
+            if self._block_merged_cache:
+                self._block_merged_cache = {
+                    cohort: cached
+                    for cohort, cached in self._block_merged_cache.items()
+                    if client_id not in cohort
+                }
             self._global_pending_requests.pop(client_id, None)
             self._global_pending_mids.pop(client_id, None)
             self._global_results.pop(client_id, None)

@@ -250,6 +250,7 @@ projects/experiments.schema.json
 
 tests/test_agents/*/
 tests/test_agents/prompts_local_extended.txt
+bench_block_susceptibility.py
 *.DS_Store
 tutorials/dftbplus_runs
 tutorials/dftbplus_bomd_dipder_runs/

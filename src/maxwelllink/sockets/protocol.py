@@ -482,6 +482,20 @@ _AGGRESULT_RECORD_LEN = _INT32_LEN + _FIELD_LEN + _INT32_LEN
 _RESULT_AMP_OFF = _INT32_LEN  # amp follows molecule_id
 _RESULT_EXTRALEN_OFF = _INT32_LEN + _FIELD_LEN  # extra_len follows amp
 
+# Vectorized (block) views of the same frozen record layouts.  These let the
+# block codec methods encode/decode a whole record table with a handful of
+# numpy column operations instead of one struct call per molecule; the bytes
+# they produce are identical to the per-record struct path.
+_STEP_RECORD_DTYPE = np.dtype([("mid", "<i4"), ("field_idx", "<i4")])
+_RESULT_RECORD_DTYPE = np.dtype(
+    {
+        "names": ["mid", "amp", "extra_len"],
+        "formats": ["<i4", ("<f8", (3,)), "<i4"],
+        "offsets": [0, _RESULT_AMP_OFF, _RESULT_EXTRALEN_OFF],
+        "itemsize": _AGGRESULT_RECORD_LEN,
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Low-level helpers
@@ -953,6 +967,140 @@ class _StepCodec(_FrameCodec):
             requests[mid] = fields[field_idx]
         return requests
 
+    def recv_block(
+        self, sock: socket.socket, *, header_already_read: bool = False
+    ) -> tuple[int, memoryview, np.ndarray]:
+        """
+        Receive one AGGSTEP frame without per-molecule decoding.
+
+        Same wire format as :meth:`recv`, but the body is exposed as raw
+        views so a caller with a frozen molecule set can skip the per-record
+        Python loop entirely (Meep's C client sends a constant record table
+        with ``field_idx == slot`` every step).
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Connection to read the frame from.
+        header_already_read : bool, default: False
+            Set when the caller already consumed the 12-byte banner.
+
+        Returns
+        -------
+        tuple[int, memoryview, numpy.ndarray]
+            ``(nreq, records, fields)`` where ``records`` is the raw
+            ``(molecule_id, field_idx)`` int32 record table and ``fields`` is
+            the ``(nuniq, 3)`` float64 field block. Both are views into the
+            codec scratch buffer and are valid only until the next ``recv`` /
+            ``recv_block`` call on this codec; callers must compare or copy
+            before reading the next frame.
+
+        Raises
+        ------
+        RuntimeError
+            If the decoded banner is not ``AGGSTEP``.
+        _SocketClosed
+            If the peer closes the connection mid-frame.
+        """
+
+        head = self._scratch("head", _AGGSTEP_HEAD_LEN)
+        if header_already_read:
+            head[:_AGG_HEADER_LEN] = _AGGSTEP_HDR
+            _recv_exact_into(
+                sock,
+                memoryview(head)[_AGG_HEADER_LEN:],
+                _AGGSTEP_HEAD_LEN - _AGG_HEADER_LEN,
+            )
+        else:
+            _recv_exact_into(sock, head, _AGGSTEP_HEAD_LEN)
+        _expect_header(head, AGGSTEP)
+
+        nreq = _INT32.unpack_from(head, _AGG_HEADER_LEN)[0]
+        nuniq = _INT32.unpack_from(head, _AGG_HEADER_LEN + _INT32_LEN)[0]
+        if nreq < 0 or nuniq < 0:
+            raise RuntimeError("AGGSTEP frame reported a negative count.")
+        fields_len = _FIELD_LEN * nuniq
+        body_len = fields_len + _AGGSTEP_RECORD_LEN * nreq
+        body = self._scratch("body", body_len)
+        if body_len:
+            _recv_exact_into(sock, body, body_len)
+
+        fields = np.frombuffer(body, dtype="<f8", count=3 * nuniq).reshape(nuniq, 3)
+        records = memoryview(body)[fields_len:body_len]
+        return nreq, records, fields
+
+    def send_block(
+        self, sock: socket.socket, record_bytes: bytes, fields: np.ndarray
+    ) -> None:
+        """
+        Pack and send one fan-out step from a precomputed record table.
+
+        Byte-compatible with :meth:`send` for the same logical content, except
+        that field deduplication is the caller's responsibility: ``fields``
+        row ``k`` is referenced by every record whose ``field_idx`` is ``k``.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Connection to write the frame to.
+        record_bytes : bytes
+            Packed ``(molecule_id, field_idx)`` int32 record table, typically
+            built once at bind time for a frozen molecule set.
+        fields : numpy.ndarray
+            ``(nuniq, 3)`` float64 field block in record-table order.
+        """
+
+        fields = np.ascontiguousarray(fields, dtype="<f8")
+        if fields.ndim != 2 or fields.shape[1] != 3:
+            raise ValueError("fields must have shape (nuniq, 3).")
+        nuniq = int(fields.shape[0])
+        nreq = len(record_bytes) // _AGGSTEP_RECORD_LEN
+        if nreq * _AGGSTEP_RECORD_LEN != len(record_bytes):
+            raise ValueError("record_bytes length is not a whole record count.")
+
+        fields_end = _AGGSTEP_HEAD_LEN + _FIELD_LEN * nuniq
+        frame_len = fields_end + len(record_bytes)
+        buf = self._scratch("send", frame_len)
+        buf[:_AGG_HEADER_LEN] = _AGGSTEP_HDR
+        _INT32.pack_into(buf, _AGG_HEADER_LEN, nreq)
+        _INT32.pack_into(buf, _AGG_HEADER_LEN + _INT32_LEN, nuniq)
+        buf[_AGGSTEP_HEAD_LEN:fields_end] = memoryview(fields).cast("B")
+        buf[fields_end:frame_len] = record_bytes
+        sock.sendall(memoryview(buf)[:frame_len])
+
+
+def _resolve_step_records(records, fields: np.ndarray) -> Dict[int, np.ndarray]:
+    """
+    Expand a raw AGGSTEP record table into the per-molecule field mapping.
+
+    Fallback used when a block-path receiver gets a frame whose record table
+    does not match its cached canonical table (e.g. a deduplicating client).
+
+    Parameters
+    ----------
+    records : bytes-like
+        Raw ``(molecule_id, field_idx)`` int32 record table.
+    fields : numpy.ndarray
+        ``(nuniq, 3)`` float64 field block the records index into.
+
+    Returns
+    -------
+    dict[int, numpy.ndarray]
+        Mapping from molecule ID to its ``(3,)`` field vector. Like
+        :meth:`_StepCodec.recv`, molecules that share a field alias the same
+        array; unlike it, the arrays here are fresh copies so they survive the
+        next frame on the codec's scratch buffer.
+    """
+
+    recs = np.frombuffer(records, dtype=_STEP_RECORD_DTYPE)
+    unique = [fields[k].copy() for k in range(fields.shape[0])]
+    out: Dict[int, np.ndarray] = {}
+    mids = recs["mid"]
+    idxs = recs["field_idx"]
+    for k in range(recs.shape[0]):
+        out[int(mids[k])] = unique[int(idxs[k])]
+    return out
+
 
 class _ResultCodec(_FrameCodec):
     """
@@ -1080,4 +1228,92 @@ class _ResultCodec(_FrameCodec):
             responses[mid] = {"amp": np.array(amp, dtype=float), "extra": extra}
             extra_offset += extra_len
         return responses
+
+    def send_block(
+        self, sock: socket.socket, mids: np.ndarray, amps: np.ndarray
+    ) -> None:
+        """
+        Pack and send grouped responses from contiguous arrays.
+
+        Byte-compatible with :meth:`send` for responses whose ``extra``
+        payloads are all empty: every record's ``extra_len`` is written as 0.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Connection to write the frame to.
+        mids : numpy.ndarray
+            ``(n,)`` int32 molecule-id column, typically cached at bind time.
+        amps : numpy.ndarray
+            ``(n, 3)`` float64 amplitude block in the same order as ``mids``.
+        """
+
+        mids = np.ascontiguousarray(mids, dtype="<i4")
+        n = int(mids.shape[0])
+        frame_len = _AGGRESULT_HEAD_LEN + _AGGRESULT_RECORD_LEN * n
+        buf = self._scratch("send", frame_len)
+        buf[:_AGG_HEADER_LEN] = _AGGRESULT_HDR
+        _INT32.pack_into(buf, _AGG_HEADER_LEN, n)
+        records = np.frombuffer(
+            buf, dtype=_RESULT_RECORD_DTYPE, count=n, offset=_AGGRESULT_HEAD_LEN
+        )
+        records["mid"] = mids
+        records["amp"] = amps
+        records["extra_len"] = 0
+        sock.sendall(memoryview(buf)[:frame_len])
+
+    def recv_block(
+        self, sock: socket.socket
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, bytes]:
+        """
+        Receive grouped responses as contiguous arrays.
+
+        Same wire format as :meth:`recv`, decoded with vectorized column reads
+        instead of one struct call per molecule.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Connection to read the frame from.
+
+        Returns
+        -------
+        tuple
+            ``(mids, amps, extra_lens, extras)`` where ``mids`` is ``(n,)``
+            int32, ``amps`` is ``(n, 3)`` float64, ``extra_lens`` is ``(n,)``
+            int32, and ``extras`` is the concatenated variable payload bytes
+            (empty when every ``extra_len`` is 0). All arrays are copies and
+            remain valid after the next frame.
+
+        Raises
+        ------
+        RuntimeError
+            If the decoded banner is not ``AGGRESULT``.
+        _SocketClosed
+            If the peer closes the connection mid-frame.
+        """
+
+        head = self._scratch("head", _AGGRESULT_HEAD_LEN)
+        _recv_exact_into(sock, head, _AGGRESULT_HEAD_LEN)
+        _expect_header(head, AGGRESULT)
+
+        nresp = _INT32.unpack_from(head, _AGG_HEADER_LEN)[0]
+        if nresp < 0:
+            raise RuntimeError("AGGRESULT frame reported a negative count.")
+        fixed_len = _AGGRESULT_RECORD_LEN * nresp
+        fixed = self._scratch("fixed", fixed_len)
+        if fixed_len:
+            _recv_exact_into(sock, fixed, fixed_len)
+
+        records = np.frombuffer(fixed, dtype=_RESULT_RECORD_DTYPE, count=nresp)
+        mids = records["mid"].copy()
+        amps = np.array(records["amp"], dtype=np.float64)
+        extra_lens = records["extra_len"].copy()
+        total_extra = int(extra_lens.sum())
+        extras = b""
+        if total_extra:
+            ebuf = self._scratch("extras", total_extra)
+            _recv_exact_into(sock, ebuf, total_extra)
+            extras = bytes(memoryview(ebuf)[:total_extra])
+        return mids, amps, extra_lens, extras
 
