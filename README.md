@@ -98,3 +98,8 @@ mxl hpc
 If you find **MaxwellLink** helpful for your research, please cite the following reference:
 
 - X Ji †, AF Bocanegra Vargas †, G Meng, and TE Li. *MaxwellLink: A Unified Framework for Self-Consistent Light-Matter Simulations*. [J. Chem. Theory Comput. ASAP](https://doi.org/10.1021/acs.jctc.5c02028) (2026). [[data](https://github.com/TaoELi/maxwelllink_examples)] [[arXiv:2512.06173](https://arxiv.org/abs/2512.06173)] 
+
+
+## Publications using MaxwellLink
+
+- X Ji, and TE Li. *Nonlinear Freezing of Vibrational Polariton Transport via Mesoscale Simulations*. submitted (2026). [[data](https://github.com/TaoELi/maxwelllink_examples)]
