@@ -419,9 +419,7 @@ def test_bridge_and_driver_command_strings():
     hub.bridge_manifest = "mxl_bridge_manifest.json"
     hub._bridge_info = {}
 
-    assert (
-        hub.bridge_command(3) == "mxl_bridge --info mxl_bridge_manifest.json --idx 3"
-    )
+    assert hub.bridge_command(3) == "mxl_bridge --info mxl_bridge_manifest.json --idx 3"
     assert (
         hub.bridge_command(0, info="custom.json")
         == "mxl_bridge --info custom.json --idx 0"

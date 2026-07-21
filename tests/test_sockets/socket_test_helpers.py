@@ -32,7 +32,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from maxwelllink.mxl_drivers.python.models.dummy_model import DummyModel
 from maxwelllink.mxl_drivers.python.mxl_driver import run_driver
-from maxwelllink.sockets.aggregated import AGGSTEP, _ResultCodec, _StepCodec
+from maxwelllink.sockets.aggregated import _ResultCodec, _StepCodec
 from maxwelllink.sockets.sockets import _recv_msg, _send_bytes, _send_msg
 from maxwelllink.sockets.susceptibility import MXLINIT, MXLREADY
 

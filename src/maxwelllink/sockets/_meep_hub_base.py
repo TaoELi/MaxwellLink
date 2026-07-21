@@ -482,9 +482,7 @@ class _MeepRankServerMixin:
                     raise RuntimeError(
                         f"Unexpected Meep susceptibility header {header!r}."
                     )
-                n_requests = self._serve_step_frame(
-                    ctx, sock, step_codec, result_codec
-                )
+                n_requests = self._serve_step_frame(ctx, sock, step_codec, result_codec)
                 self._note_step_served(ctx, n_requests)
 
         except (_SocketClosed, OSError):
@@ -708,9 +706,7 @@ class _HubProcessProxy:
                     self._process.start()
                 finally:
                     _restore_env(saved_env)
-                ready = self._ready_queue.get(
-                    timeout=min(max(self.timeout, 1.0), 30.0)
-                )
+                ready = self._ready_queue.get(timeout=min(max(self.timeout, 1.0), 30.0))
             except queue.Empty:
                 ready = {"error": f"{self._log_prefix} server did not start."}
             except Exception as exc:

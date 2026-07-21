@@ -249,6 +249,6 @@ def test_disconnect_pauses_and_frozen_barrier_recovers():
                 atol=1e-12,
             )
         finally:
-            pass
+            thread.join(timeout=5.0)
     finally:
         hub.stop()

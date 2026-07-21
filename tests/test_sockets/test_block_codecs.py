@@ -36,7 +36,6 @@ from maxwelllink.sockets.protocol import (
     _resolve_step_records,
 )
 from maxwelllink.sockets.aggregated_susceptibility import (
-    _BLOCK_RESULT,
     _AggregatedSusceptibilitySocketHubServer,
 )
 
@@ -140,8 +139,7 @@ def test_result_send_block_matches_legacy_bytes_and_round_trips():
         decoded = _ResultCodec().recv(b)
         # legacy (with extras) -> block decoder
         extras = {
-            int(mid): {"amp": amps[i], "extra": b"x" * i}
-            for i, mid in enumerate(mids)
+            int(mid): {"amp": amps[i], "extra": b"x" * i} for i, mid in enumerate(mids)
         }
         _ResultCodec().send(a, extras)
         rmids, ramps, extra_lens, extra_blob = _ResultCodec().recv_block(b)

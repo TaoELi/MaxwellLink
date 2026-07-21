@@ -178,7 +178,9 @@ def _run_aggregated_susceptibility_socket_hub_server(
 # ----------------------------------------------------------------------
 
 
-class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedSocketHub):
+class _AggregatedSusceptibilitySocketHubServer(
+    _MeepRankServerMixin, AggregatedSocketHub
+):
     """
     Meep-facing hub server that fans timesteps out through aggregate bridges.
 
@@ -567,8 +569,7 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
                 ctx.molecule_ids
             )
             aggregate_groups = {
-                payload.get("aggregate_group")
-                for payload in ctx.init_payloads.values()
+                payload.get("aggregate_group") for payload in ctx.init_payloads.values()
             }
             stats = self.rank_stats.setdefault(
                 ctx.rank,
@@ -890,9 +891,7 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
         if info is None:
             return super()._serve_step_frame(ctx, sock, step_codec, result_codec)
 
-        nreq, records, fields = step_codec.recv_block(
-            sock, header_already_read=True
-        )
+        nreq, records, fields = step_codec.recv_block(sock, header_already_read=True)
         if fields.shape[0] != nreq or records != info["record_bytes"]:
             efields = _resolve_step_records(records, fields)
             responses = self._handle_step(ctx, efields)
@@ -1223,8 +1222,10 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
 
         g = plan["groups"][gid]
         last = g["last_reply_mids"]
-        if last is not None and mids_r.shape == last.shape and np.array_equal(
-            mids_r, last
+        if (
+            last is not None
+            and mids_r.shape == last.shape
+            and np.array_equal(mids_r, last)
         ):
             rows = g["last_rows"]
         else:
@@ -1387,8 +1388,7 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
                 if client_id in self._global_results:
                     return self._consume_global_result_locked(client_id)
                 if (
-                    self._global_pending_key is None
-                    or self._global_pending_key == key
+                    self._global_pending_key is None or self._global_pending_key == key
                 ) and not self._global_running:
                     break
                 self._global_step_cond.wait(timeout=self.latency)
@@ -1417,9 +1417,8 @@ class _AggregatedSusceptibilitySocketHubServer(_MeepRankServerMixin, AggregatedS
 
             while not self._stop:
                 expected = self._expected_clients_for_key_locked(key)
-                if (
-                    not self._global_running
-                    and expected.issubset(self._global_pending_requests.keys())
+                if not self._global_running and expected.issubset(
+                    self._global_pending_requests.keys()
                 ):
                     merged_requests, rank_mids, block_cids = (
                         self._merge_pending_requests_locked(expected)
@@ -1814,7 +1813,7 @@ class AggregatedSusceptibilitySocketHub(SusceptibilitySocketHub):
             "while true; do "
             '"$@"; status=$?; '
             "if (( status == 0 )); then exit 0; fi; "
-            "if (( SECONDS >= deadline )); then exit \"$status\"; fi; "
+            'if (( SECONDS >= deadline )); then exit "$status"; fi; '
             "sleep 0.1; "
             "done"
         )
@@ -1879,18 +1878,15 @@ class AggregatedSusceptibilitySocketHub(SusceptibilitySocketHub):
                     flush=True,
                 )
             print(
-                f"[{self._log_prefix}] rescaling_factor="
-                f"{rescaling_factor:.12g}",
+                f"[{self._log_prefix}] rescaling_factor=" f"{rescaling_factor:.12g}",
                 flush=True,
             )
             print(
-                f"[{self._log_prefix}] bridge_manifest="
-                f"{self.bridge_manifest}",
+                f"[{self._log_prefix}] bridge_manifest=" f"{self.bridge_manifest}",
                 flush=True,
             )
             print(
-                f"[{self._log_prefix}] driver_template="
-                f"{driver_command}",
+                f"[{self._log_prefix}] driver_template=" f"{driver_command}",
                 flush=True,
             )
 

@@ -182,7 +182,9 @@ def cosine_drive(
 def _parse_k_parallel_direction(direction: str) -> tuple[str, float]:
     direction = str(direction).strip().lower()
     if not direction:
-        raise ValueError("direction must be 'x', 'y', 'xy', '+x', '-x', '+y', '-y', '+xy', or '-xy'.")
+        raise ValueError(
+            "direction must be 'x', 'y', 'xy', '+x', '-x', '+y', '-y', '+xy', or '-xy'."
+        )
 
     sign = 1.0
     if direction[0] == "+":
@@ -192,8 +194,11 @@ def _parse_k_parallel_direction(direction: str) -> tuple[str, float]:
         direction = direction[1:]
 
     if direction not in {"x", "y", "xy"}:
-        raise ValueError("direction must be 'x', 'y', 'xy', '+x', '-x', '+y', '-y', '+xy', or '-xy'.")
+        raise ValueError(
+            "direction must be 'x', 'y', 'xy', '+x', '-x', '+y', '-y', '+xy', or '-xy'."
+        )
     return direction, sign
+
 
 def _get_k_vector(cavity, k_parallel_au: Union[float, Sequence[float]], direction: str):
 
@@ -204,7 +209,7 @@ def _get_k_vector(cavity, k_parallel_au: Union[float, Sequence[float]], directio
         delta_omega_axis = float(getattr(cavity, delta_name))
         if isinstance(k_parallel_au, (int, float)):
             k_parallel = direction_sign * float(k_parallel_au)
-        else :
+        else:
             raise ValueError("k_parallel_au must be a scalar when axis is 'x' or 'y'.")
         if not math.isfinite(k_parallel):
             raise ValueError("k_parallel_au must be finite.")
@@ -219,13 +224,13 @@ def _get_k_vector(cavity, k_parallel_au: Union[float, Sequence[float]], directio
                 f"Absolute k_parallel_au is too large for the cavity mode spacing along {axis}. "
                 f"Maximum allowed is {delta_omega_axis * (cavity.n_mode_x if axis == 'x' else cavity.n_mode_y):.3e}."
             )
-        
+
     elif axis == "xy":
         delta_omega_x_au = float(getattr(cavity, "delta_omega_x_au"))
         delta_omega_y_au = float(getattr(cavity, "delta_omega_y_au"))
         if isinstance(k_parallel_au, list) and len(k_parallel_au) == 2:
             k_parallel = direction_sign * np.array(k_parallel_au, dtype=float)
-        else :
+        else:
             raise ValueError("k_parallel_au must be a length-2 list when axis is 'xy'.")
         if not np.all(np.isfinite(k_parallel)):
             raise ValueError("k_parallel_au must be finite.")
@@ -234,15 +239,19 @@ def _get_k_vector(cavity, k_parallel_au: Union[float, Sequence[float]], directio
         if delta_omega_y_au == 0.0 and k_parallel[1] != 0.0:
             raise ValueError("delta_omega_y_au is zero, so nonzero ky is undefined.")
         k_order = np.zeros(2, dtype=float)
-        if delta_omega_x_au != 0.0 : k_order[0] = k_parallel[0] / delta_omega_x_au
-        if delta_omega_y_au != 0.0 : k_order[1] = k_parallel[1] / delta_omega_y_au
+        if delta_omega_x_au != 0.0:
+            k_order[0] = k_parallel[0] / delta_omega_x_au
+        if delta_omega_y_au != 0.0:
+            k_order[1] = k_parallel[1] / delta_omega_y_au
         if abs(k_order[0]) > cavity.n_mode_x or abs(k_order[1]) > cavity.n_mode_y:
             raise ValueError(
                 f"Absolute k_parallel_au is too large for the cavity mode spacing along {axis}. "
                 f"Maximum allowed is ({delta_omega_x_au * cavity.n_mode_x:.3e}, {delta_omega_y_au * cavity.n_mode_y:.3e})."
             )
     else:
-        raise ValueError("direction must be 'x', 'y', 'xy', '+x', '-x', '+y', '-y', '+xy', or '-xy'.")
+        raise ValueError(
+            "direction must be 'x', 'y', 'xy', '+x', '-x', '+y', '-y', '+xy', or '-xy'."
+        )
 
     k_norm = math.pi * k_order
     return axis, direction_sign, k_parallel, k_order, k_norm
@@ -382,7 +391,9 @@ def k_parallel_pulse(
     if grid_xy.ndim != 2 or grid_xy.shape[1] != 2:
         raise ValueError("cavity must expose grid_xy with shape (n_grid, 2).")
 
-    axis, direction_sign, k_parallel, k_order, k_norm = _get_k_vector(cavity, k_parallel_au, direction)
+    axis, direction_sign, k_parallel, k_order, k_norm = _get_k_vector(
+        cavity, k_parallel_au, direction
+    )
 
     center_pair = _as_pair("center", center)
     size_pair = _as_pair("size", size)
@@ -416,12 +427,12 @@ def k_parallel_pulse(
             "The selected source grid points all lie on the smooth-window "
             "boundary. Increase size or move center."
         )
-    
+
     if axis == "x" or axis == "y":
         axis_index = 0 if axis == "x" else 1
         spatial_phase = k_norm * selected_rel[:, axis_index]
     else:  # axis == "xy"
-        spatial_phase = selected_rel[:,0] * k_norm[0] + selected_rel[:,1] * k_norm[1]
+        spatial_phase = selected_rel[:, 0] * k_norm[0] + selected_rel[:, 1] * k_norm[1]
 
     excited_grid_list = selected.astype(int).tolist()
     excited_mode_list: list[int] = []

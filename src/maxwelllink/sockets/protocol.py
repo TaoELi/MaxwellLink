@@ -1316,4 +1316,3 @@ class _ResultCodec(_FrameCodec):
             _recv_exact_into(sock, ebuf, total_extra)
             extras = bytes(memoryview(ebuf)[:total_extra])
         return mids, amps, extra_lens, extras
-
