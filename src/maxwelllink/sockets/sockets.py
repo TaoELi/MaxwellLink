@@ -6,29 +6,29 @@
 # --------------------------------------------------------------------------------------#
 
 """
-Socket layer for MaxwellLink drivers and servers.
+Base socket hub for MaxwellLink drivers and servers.
 
-This module implements a lightweight socket protocol inspired by i-PI
-(https://ipi-code.org/) and provides:
+:class:`SocketHub` is the root of the hub hierarchy: a multi-client server
+coordinating many driver connections with an FDTD engine over the i-PI-style
+protocol (https://ipi-code.org/)::
 
-- **SocketHub**: a multi-client server/poller for coordinating many driver
-  connections with an FDTD engine.
-- **Protocol constants**: ``STATUS``, ``READY``, ``HAVEDATA``, ``NEEDINIT``,
-  ``INIT``, ...
-- **EM aliases**: ``FIELDDATA``, ``GETSOURCE``, ``SOURCEREADY`` (1:1 mapping to
-  ``POSDATA``/``GETFORCE``/``FORCEREADY``).
-- **Low-level helpers**: ``_send_msg``, ``_recv_msg``, ``_send_array``/``_recv_array``,
-  etc.
-- **Exceptions**: ``_SocketClosed``.
+    SocketHub                                  this module
+    ├── AggregatedSocketHub                    aggregated.py (bridge transport)
+    │   └── _AggregatedSusceptibilitySocketHubServer
+    └── _SusceptibilitySocketHubServer         susceptibility hubs for Meep
+                                               (see _meep_hub_base.py)
+
+The wire formats (headers, framed arrays, the step_barrier fast path) live in
+``protocol.py`` and are re-exported here for backward compatibility. The MPI
+helpers (``am_master``, ``mpi_bcast_from_master``) and the host/port discovery
+used by Slurm workflows (``get_available_host_port``) also live here.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import selectors
 import socket
-import struct
 import threading
 import time
 from dataclasses import dataclass, field
@@ -36,416 +36,59 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-# ======================================================================
-# Protocol constants and wire dtypes
-# ======================================================================
 
-_INT32 = struct.Struct("<i")
-_FLOAT64 = struct.Struct("<d")
-
-# Fixed header width (ASCII, space-padded)
-HEADER_LEN = 12
-# Canonical i-PI message codes
-STATUS = b"STATUS"
-READY = b"READY"
-HAVEDATA = b"HAVEDATA"
-NEEDINIT = b"NEEDINIT"
-INIT = b"INIT"
-POSDATA = b"POSDATA"
-GETFORCE = b"GETFORCE"
-FORCEREADY = b"FORCEREADY"
-STOP = b"STOP"
-BYE = b"BYE"
-
-# EM aliases for readability (same wire format)
-FIELDDATA = POSDATA
-GETSOURCE = GETFORCE
-SOURCEREADY = FORCEREADY
-
-# numpy dtypes on the wire (i-PI/ASE use float64 for reals, int32 for counts)
-DT_FLOAT = np.float64
-DT_INT = np.int32
-
-
-class _SocketClosed(OSError):
-    """
-    Exception raised when the peer closes the socket unexpectedly.
-    """
-
-    pass
-
-
-# ======================================================================
-# Low-level wire helpers (headers, ints, arrays, byte strings)
-# ======================================================================
-
-
-def _pad12(msg: bytes) -> bytes:
-    """
-    Pad a message to the fixed 12-byte ASCII header width.
-
-    Parameters
-    ----------
-    msg : bytes
-        Message tag to send.
-
-    Returns
-    -------
-    bytes
-        Space-padded header of exactly 12 bytes.
-
-    Raises
-    ------
-    ValueError
-        If ``msg`` exceeds the 12-byte header length.
-    """
-
-    if len(msg) > HEADER_LEN:
-        raise ValueError("Header too long")
-    return msg.ljust(HEADER_LEN, b" ")
-
-
-def _send_msg(sock: socket.socket, msg: bytes) -> None:
-    """
-    Send a 12-byte ASCII header (space-padded).
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    msg : bytes
-        Message tag to send (e.g., ``b"STATUS"``).
-    """
-
-    sock.sendall(_pad12(msg))
-
-
-def _recvall(sock: socket.socket, n: int) -> bytes:
-    """
-    Read exactly ``n`` bytes from a socket.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    n : int
-        Number of bytes to read.
-
-    Returns
-    -------
-    bytes
-        The data read.
-
-    Raises
-    ------
-    _SocketClosed
-        If the peer closes the connection before all bytes are received.
-    """
-
-    buf = bytearray()
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise _SocketClosed("Peer closed")
-        buf.extend(chunk)
-    return bytes(buf)
-
-
-def _recv_msg(sock: socket.socket) -> bytes:
-    """
-    Receive a 12-byte ASCII header.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-
-    Returns
-    -------
-    bytes
-        The received header without trailing spaces.
-    """
-
-    hdr = _recvall(sock, HEADER_LEN)
-    return hdr.rstrip()
-
-
-def _send_array(sock: socket.socket, arr, dtype) -> None:
-    """
-    Send a NumPy array over a socket using a contiguous C-order memory view.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    arr : array-like
-        Array data to send.
-    dtype : numpy.dtype
-        Data type to cast and send as (e.g., ``np.float64``).
-    """
-
-    a = np.asarray(arr, dtype=dtype, order="C")
-    sock.sendall(memoryview(a).cast("B"))
-
-
-def _recv_array(sock: socket.socket, shape, dtype):
-    """
-    Receive a NumPy array of a given shape and dtype from a socket.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    shape : tuple of int
-        Expected array shape.
-    dtype : numpy.dtype
-        Expected dtype (e.g., ``np.float64``).
-
-    Returns
-    -------
-    numpy.ndarray
-        The received array with the specified shape and dtype.
-
-    Raises
-    ------
-    _SocketClosed
-        If the peer closes the connection during the transfer.
-    """
-
-    out = np.empty(shape, dtype=dtype, order="C")
-    mv = memoryview(out).cast("B")
-    need = mv.nbytes
-    got = 0
-    while got < need:
-        r = sock.recv_into(mv[got:], need - got)
-        if r == 0:
-            raise _SocketClosed("Peer closed")
-        got += r
-    return out
-
-
-def _send_int(sock: socket.socket, x: int) -> None:
-    """
-    Send a 32-bit little-endian integer.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    x : int
-        Integer value to send.
-    """
-
-    sock.sendall(_INT32.pack(int(x)))
-
-
-def _recv_int(sock: socket.socket) -> int:
-    """
-    Receive a 32-bit little-endian integer.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-
-    Returns
-    -------
-    int
-        The received integer.
-
-    Raises
-    ------
-    _SocketClosed
-        If the peer closes the connection during the transfer.
-    """
-
-    buf = bytearray(_INT32.size)
-    mv = memoryview(buf)
-    got = 0
-    while got < _INT32.size:
-        r = sock.recv_into(mv[got:], _INT32.size - got)
-        if r == 0:
-            raise _SocketClosed("Peer closed")
-        got += r
-    return _INT32.unpack(buf)[0]
-
-
-def _send_bytes(sock: socket.socket, b: bytes) -> None:
-    """
-    Send a length-prefixed byte string.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    b : bytes
-        Byte string to send. The length is sent first as a 32-bit integer.
-    """
-
-    _send_int(sock, len(b))
-    if len(b):
-        sock.sendall(b)
-
-
-def _recv_bytes(sock: socket.socket) -> bytes:
-    """
-    Receive a length-prefixed byte string.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-
-    Returns
-    -------
-    bytes
-        The received byte string (may be empty).
-    """
-
-    n = _recv_int(sock)
-    return _recvall(sock, n) if n else b""
-
-
-# ======================================================================
-# Compound payload codecs (i-PI compatible)
-# ======================================================================
-
-
-def _recv_posdata(sock: socket.socket):
-    """
-    Read a POSDATA/FIELDDATA block.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-
-    Returns
-    -------
-    tuple
-        ``(cell, icell, xyz)`` where:
-
-        - ``cell`` : ``(3, 3)`` ndarray (row-major), simulation cell.
-        - ``icell`` : ``(3, 3)`` ndarray (row-major), inverse cell.
-        - ``xyz`` : ``(nat, 3)`` ndarray of positions (or effective field payload).
-    """
-
-    cell = _recv_array(sock, (3, 3), DT_FLOAT).T.copy()
-    icell = _recv_array(sock, (3, 3), DT_FLOAT).T.copy()
-    nat = _recv_int(sock)
-    xyz = _recv_array(sock, (nat, 3), DT_FLOAT)
-    return cell, icell, xyz
-
-
-def _send_force_ready(
-    sock: socket.socket,
-    energy_ha: float,
-    forces_Nx3_ha_per_bohr,
-    virial_3x3_ha,
-    more: bytes = b"",
-):
-    """
-    Send a FORCEREADY/SOURCEREADY message with energy, forces, virial, and extras.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    energy_ha : float
-        Total energy (Hartree).
-    forces_Nx3_ha_per_bohr : array-like, shape (N, 3)
-        Forces (Hartree/Bohr).
-    virial_3x3_ha : array-like, shape (3, 3)
-        Virial tensor (Hartree).
-    more : bytes, optional
-        Extra payload (length-prefixed), e.g., JSON metadata.
-    """
-
-    _send_msg(sock, FORCEREADY)
-    _send_array(sock, np.array([energy_ha], dtype=DT_FLOAT), DT_FLOAT)
-    forces = np.asarray(forces_Nx3_ha_per_bohr, dtype=DT_FLOAT)
-    assert forces.ndim == 2 and forces.shape[1] == 3
-    _send_int(sock, forces.shape[0])
-    _send_array(sock, forces, DT_FLOAT)
-    _send_array(sock, np.asarray(virial_3x3_ha, dtype=DT_FLOAT).T, DT_FLOAT)
-    _send_bytes(sock, more)
-
-
-# ======================================================================
-# EM convenience wrappers (i-PI compatible)
-# ======================================================================
-
-
-def _pack_init(sock: socket.socket, init_dict: dict):
-    """
-    Send an INIT handshake containing a JSON payload.
-
-    Parameters
-    ----------
-    sock : socket.socket
-        Connected socket.
-    init_dict : dict
-        Initialization dictionary (e.g., includes ``"molecule_id"``).
-    """
-
-    _send_msg(sock, INIT)
-    molid = int(init_dict.get("molecule_id", 0))
-    _send_int(sock, molid)
-    init_bytes = json.dumps(init_dict).encode("utf-8")
-    _send_bytes(sock, init_bytes)
-
-
-# ======================================================================
-# Fast-path constants and send/recv layout
-# ======================================================================
-
-_FIELDDATA_HDR = _pad12(FIELDDATA)
-_GETSOURCE_HDR = _pad12(GETSOURCE)
-_EYE3_BYTES = bytes(
-    memoryview(np.ascontiguousarray(np.eye(3, dtype=DT_FLOAT))).cast("B")
+# ----------------------------------------------------------------------
+# Wire protocol (moved to protocol.py)
+# ----------------------------------------------------------------------
+# The byte formats live in protocol.py; every name is re-exported here so
+# existing imports (drivers, tests, user scripts) keep working unchanged.
+from .protocol import (  # noqa: F401  re-exported for backward compatibility
+    BYE,
+    DT_FLOAT,
+    DT_INT,
+    FIELDDATA,
+    FORCEREADY,
+    GETFORCE,
+    GETSOURCE,
+    HAVEDATA,
+    HEADER_LEN,
+    INIT,
+    NEEDINIT,
+    POSDATA,
+    READY,
+    SOURCEREADY,
+    STATUS,
+    STOP,
+    _EYE3_BYTES,
+    _FIELDDATA_HDR,
+    _FLOAT64,
+    _GETSOURCE_HDR,
+    _INT32,
+    _NAT1_BYTES,
+    _REPLY_EXTRA_LEN_OFFSET,
+    _REPLY_FIXED_LEN,
+    _REPLY_FORCES_OFFSET,
+    _REPLY_NAT_OFFSET,
+    _SEND_FIELD_OFFSET,
+    _SEND_TEMPLATE,
+    _SEND_TOTAL_LEN,
+    _STRUCT_3D,
+    _STRUCT_I,
+    _SocketClosed,
+    _pack_init,
+    _pad12,
+    _recv_array,
+    _recv_bytes,
+    _recv_int,
+    _recv_msg,
+    _recv_posdata,
+    _recvall,
+    _send_array,
+    _send_bytes,
+    _send_force_ready,
+    _send_int,
+    _send_msg,
 )
-_NAT1_BYTES = _INT32.pack(1)
-
-
-# --------- fast-path send/recv layout ---------
-#
-# Send blob (196 bytes; written in place into a reusable bytearray):
-#   [0  :12 ] FIELDDATA header
-#   [12 :84 ] cell (3x3 float64, identity)
-#   [84 :156] invcell (3x3 float64, identity)
-#   [156:160] nat (int32 = 1)
-#   [160:184] field vector (3 x float64)     <-- only this window changes
-#   [184:196] GETSOURCE header
-#
-# Fixed reply (124 bytes; read into a reusable bytearray via recv_into):
-#   [0  :12 ] SOURCEREADY header
-#   [12 :20 ] energy (float64)
-#   [20 :24 ] nat (int32, expected = 1)
-#   [24 :48 ] forces (1 x 3 float64)
-#   [48 :120] virial (3x3 float64)
-#   [120:124] extra_len (int32)
-#   (followed by `extra_len` trailing bytes of JSON/etc., read separately)
-
-_SEND_FIELD_OFFSET = 12 + 72 + 72 + 4  # = 160
-_SEND_TOTAL_LEN = _SEND_FIELD_OFFSET + 24 + 12  # = 196
-_SEND_TEMPLATE = (
-    _FIELDDATA_HDR
-    + _EYE3_BYTES
-    + _EYE3_BYTES
-    + _NAT1_BYTES
-    + b"\x00" * 24
-    + _GETSOURCE_HDR
-)
-assert len(_SEND_TEMPLATE) == _SEND_TOTAL_LEN
-
-_REPLY_FIXED_LEN = 12 + 8 + 4 + 24 + 72 + 4  # = 124
-_REPLY_NAT_OFFSET = 12 + 8  # = 20
-_REPLY_FORCES_OFFSET = 12 + 8 + 4  # = 24
-_REPLY_EXTRA_LEN_OFFSET = 12 + 8 + 4 + 24 + 72  # = 120
-
-_STRUCT_3D = struct.Struct("<3d")
-_STRUCT_I = struct.Struct("<i")
-
 
 # ======================================================================
 # Module-level utilities (host/port discovery and MPI helpers)
@@ -594,6 +237,21 @@ class SocketHub:
     - Handles initialization handshakes, field dispatch, and result collection.
     - Provides a barrier-style step to send fields and receive source amplitudes
       from all registered molecules.
+
+    The accept thread starts during ``__init__``; no separate ``start()`` call
+    is needed.
+
+    Subclassing contract (followed by every hub in this package):
+
+    may be overridden
+        ``_accept_loop`` (custom client classification),
+        ``wait_until_bound`` / ``step_barrier`` (custom transport),
+        ``stop`` (extra teardown; call ``super().stop()``)
+    do not override
+        the binding internals (``_progress_binds_locked``,
+        ``_bind_client_locked``) and the ``step_barrier`` fast path
+        (``_dispatch_field``, ``_read_source_ready``), which share scratch
+        buffers and locking assumptions with ``step_barrier`` itself
     """
 
     def __init__(
