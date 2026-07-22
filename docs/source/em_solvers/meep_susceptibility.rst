@@ -23,8 +23,7 @@ This constitutes the second of the two Meep couplings shipped with
 
 - The :doc:`meep` route (``mxl.Molecule`` + ``mxl.MeepSimulation``) provides
   **molecule-level** coupling: each molecule acts as a point-dipole emitter whose
-   polarization density spans multiple FDTD grid points. This
-  approach is best suited to scenarios involving a limited number of emitters,
+  polarization density spans multiple FDTD grid points. Best suited to scenarios involving a limited number of emitters,
   such as spontaneous emission and resonance energy transfer.
 
 - The **socket-susceptibility** route (described on this page) provides
@@ -56,7 +55,9 @@ This constitutes the second of the two Meep couplings shipped with
   All Meep :math:`\leftrightarrow` atomic-unit conversions are handled
   internally through ``time_units_fs``. The rescaling factor :math:`\gamma`
   (``rescaling_factor``) is applied *symmetrically* to the outgoing field and
-  the returned response. Thus, a driver simulating :math:`n_{\mathrm{sim}}`
+  the returned response. 
+  
+  Thus, a driver simulating :math:`n_{\mathrm{sim}}`
   molecules faithfully represents the :math:`N_{\mathrm{phys}}` physical
   molecules residing in its grid cell when
 
