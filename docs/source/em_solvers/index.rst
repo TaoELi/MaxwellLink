@@ -1,7 +1,7 @@
 EM Solvers
 ==========
 
-**MaxwellLink** ships with four electromagnetic backends. 
+**MaxwellLink** ships with five electromagnetic backends. 
 
 - The `Meep <https://meep.readthedocs.io/en/latest/>`_ interface runs a full finite-difference time-domain (FDTD) grid and streams polarization sources
   from molecules.
@@ -12,6 +12,8 @@ EM Solvers
 
 - The laser-driven solver applies a user-defined time-dependent electric field directly to the molecular dipoles with no molecular response back to the field.
 
+- An *experimental* Meep susceptibility solver is also available. Do not use it as this feature is under development and may be updated in future releases.
+
 Use the pages below for each EM solver.
 
 .. toctree::
@@ -21,3 +23,4 @@ Use the pages below for each EM solver.
    single_mode_cavity
    multimode_cavity
    laser_driven
+   meep_susceptibility
