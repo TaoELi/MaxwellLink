@@ -587,8 +587,9 @@ class ASEModel(DummyModel):
 
         After ASE's VelocityVerlet step, the atoms sit at the force-evaluation
         geometry and their momenta have received the second half kick. The
-        MaxwellLink single-mode DSE lookahead expects ``mux_m_au`` at this
-        force time and ``mux_au`` half a molecular step later.
+        MaxwellLink DSE next-step dipole reconstruction
+        (``_calc_dipole_vec_next``) expects ``mux_m_au`` at this force time
+        and ``mux_au`` half a molecular step later.
         """
 
         if self._charges is None:

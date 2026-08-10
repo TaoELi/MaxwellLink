@@ -39,6 +39,7 @@ import os
 import queue
 import socket
 import threading
+import time
 from types import SimpleNamespace
 from typing import Dict, Optional
 
@@ -55,7 +56,7 @@ from .protocol import (
     _recv_msg,
     _send_msg,
 )
-from .sockets import am_master, mpi_bcast_from_master
+from .sockets import _DEFAULT_PORT, am_master, mpi_bcast_from_master
 
 # ----------------------------------------------------------------------
 # Protocol constants shared with meep/src/susceptibility.cpp (frozen)
@@ -75,6 +76,10 @@ MXL_SOURCE_AMP_AU_TO_MEEP = 0.002209799779149953
 # silent client. The same window doubles as the grace period that lets every
 # already-accepted driver finish classification before a rank starts binding.
 _CLASSIFY_WINDOW_FLOOR_S = 0.25
+
+# cap (seconds) on one wait_until_bound rebind attempt inside the
+# step-retry loop, so the loop keeps re-checking its deadline
+_REBIND_WINDOW_S = 1.0
 
 
 # ----------------------------------------------------------------------
@@ -305,7 +310,7 @@ class _MeepRankServerMixin:
         ``_before_rank_registration``, ``_molecule_init_payload_extras``,
         ``_serve_step_frame``, ``_on_rank_closed``, ``_wake_step_waiters``
     do not override
-        ``_accept_loop``, ``_classify_socket``, ``_serve_meep_rank``,
+        ``_handle_accepted``, ``_classify_socket``, ``_serve_meep_rank``,
         ``_register_rank_molecules``, ``stop``
 
     The hooks receive a per-connection ``ctx`` namespace carrying ``sock``,
@@ -334,35 +339,27 @@ class _MeepRankServerMixin:
 
     # -------------- accept / classify --------------
 
-    def _accept_loop(self) -> None:
-        """Accept sockets and classify each one on its own daemon thread."""
+    def _handle_accepted(self, csock: socket.socket, peer: str) -> None:
+        """
+        Classify each accepted socket on its own daemon thread.
 
-        while not self._stop:
-            try:
-                csock, addr = self.serversock.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                break
+        Overrides the ``DummySocketHub`` accept hook: instead of parking the
+        connection immediately, a classifier thread waits for an ``MXLINIT``
+        (or other) banner and routes the socket accordingly. The accept loop
+        itself is inherited unchanged.
+        """
 
-            try:
-                csock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                csock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            except (OSError, AttributeError):
-                pass
-
-            peer = addr if isinstance(addr, str) else f"{addr[0]}:{addr[1]}"
-            thread = threading.Thread(
-                target=self._classify_socket,
-                args=(csock, peer),
-                daemon=True,
-            )
-            thread.start()
-            with self._meep_lock:
-                self._classifier_threads = [
-                    t for t in self._classifier_threads if t.is_alive()
-                ]
-                self._classifier_threads.append(thread)
+        thread = threading.Thread(
+            target=self._classify_socket,
+            args=(csock, peer),
+            daemon=True,
+        )
+        thread.start()
+        with self._meep_lock:
+            self._classifier_threads = [
+                t for t in self._classifier_threads if t.is_alive()
+            ]
+            self._classifier_threads.append(thread)
 
     def _classify_socket(self, csock: socket.socket, peer: str) -> None:
         """
@@ -527,6 +524,49 @@ class _MeepRankServerMixin:
                 stats["steps"] += 1
                 stats["requests"] += n_requests
 
+    # -------------- shared step-retry skeleton --------------
+
+    def _step_with_rebind(self, *, deadline, step_fn, rebind_fn, timeout_msg):
+        """
+        Retry one timestep until it yields results or ``deadline`` passes.
+
+        This is the single retry/rebind policy shared by every Meep-facing
+        step path: run ``step_fn``; when it returns empty (a driver or bridge
+        dropped mid-step), call ``rebind_fn`` to re-bind the transport with a
+        bounded window, then retry. Lock discipline is the caller's business:
+        the direct-driver hub holds ``_step_lock`` around the whole loop,
+        while the aggregated hub's runners take it only inside ``rebind_fn``.
+
+        Parameters
+        ----------
+        deadline : float
+            Absolute ``time.time()`` deadline for the whole retry loop.
+        step_fn : callable
+            ``step_fn(remaining) -> result``; a truthy result ends the loop
+            and is returned.
+        rebind_fn : callable
+            ``rebind_fn(window)``; re-binds the transport, waiting at most
+            ``window`` seconds.
+        timeout_msg : str
+            Message for the ``TimeoutError`` raised when the deadline passes.
+
+        Raises
+        ------
+        TimeoutError
+            If no truthy result arrives before ``deadline`` (or the server is
+            stopping).
+        """
+
+        while not self._stop:
+            remaining = max(0.0, deadline - time.time())
+            if remaining <= 0.0:
+                break
+            result = step_fn(remaining)
+            if result:
+                return result
+            rebind_fn(min(_REBIND_WINDOW_S, remaining))
+        raise TimeoutError(timeout_msg)
+
     # -------------- driver INIT payloads --------------
 
     def _register_rank_molecules(
@@ -621,15 +661,46 @@ class _HubProcessProxy:
     """
     Base for the user-facing hubs that proxy a child-process server.
 
-    Subclasses set ``_log_prefix`` and implement :meth:`_server_runner` and
+    Subclasses set ``_log_prefix``, implement :meth:`_server_runner` and
     :meth:`_server_config` (plus :meth:`_create_extra_queues` when the child
-    needs more channels), then call :meth:`_start_server_process` from their
-    ``__init__``. Under MPI only the master rank launches the child; every
-    rank then learns the resolved endpoint through a broadcast, so all ranks
-    agree on the ``host``/``port`` to connect to.
+    needs more channels, and the ``lorentzian_conversion`` hooks
+    :meth:`_driver_command_for` / :meth:`_conversion_report_lines` /
+    :meth:`_conversion_extras`), run this ``__init__`` (directly, so an
+    intermediate hub's ``__init__`` can be bypassed), and then call
+    :meth:`_start_server_process` from their own ``__init__``. Under MPI only
+    the master rank launches the child; every rank then learns the resolved
+    endpoint through a broadcast, so all ranks agree on the ``host``/``port``
+    to connect to.
     """
 
     _log_prefix = "SusceptibilitySocketHub"
+
+    def __init__(self, *, timeout: float, latency: float):
+        """
+        Initialize the proxy-side state shared by every process-backed hub.
+
+        Concrete hubs validate their own arguments, call this, set any extra
+        attributes, and then call :meth:`_start_server_process`. Pre-setting
+        the lifecycle attributes here keeps :meth:`stop` and ``__del__`` safe
+        even when a subclass ``__init__`` fails before the child is launched.
+
+        Parameters
+        ----------
+        timeout : float
+            Socket timeout (seconds) passed to the child server.
+        latency : float
+            Polling interval (seconds) passed to the child server.
+        """
+
+        self.timeout = float(timeout)
+        self.latency = float(latency)
+        self._stats_cache: dict[int, dict] = {}
+        self._stopped = False
+        self._is_master = am_master()
+        self._ready_queue = None
+        self._stats_queue = None
+        self._stop_event = None
+        self._process = None
 
     # -------------- hooks implemented by the concrete hubs --------------
 
@@ -648,6 +719,23 @@ class _HubProcessProxy:
 
         return ()
 
+    def _driver_command_for(
+        self, converted: dict, *, mu0_au: float, orientation: int
+    ) -> str:
+        """Build the driver launch command for :meth:`lorentzian_conversion`."""
+
+        raise NotImplementedError
+
+    def _conversion_report_lines(self, driver_command: str) -> list[str]:
+        """Log lines printed after the rescaling factor. Default: the command."""
+
+        return [driver_command]
+
+    def _conversion_extras(self) -> dict:
+        """Extra keys merged into the conversion result. Default: none."""
+
+        return {}
+
     # -------------- child-process lifecycle --------------
 
     def _start_server_process(self, host, port) -> dict:
@@ -665,17 +753,9 @@ class _HubProcessProxy:
         """
 
         if port is None:
-            port = 31415
+            port = _DEFAULT_PORT
         if int(port) == 0:
             port = _choose_ephemeral_port(host)
-
-        self._stats_cache: dict[int, dict] = {}
-        self._stopped = False
-        self._is_master = am_master()
-        self._ready_queue = None
-        self._stats_queue = None
-        self._stop_event = None
-        self._process = None
 
         ready = None
         if self._is_master:
@@ -726,6 +806,76 @@ class _HubProcessProxy:
         self.address = self.host
         self.port = int(ready["port"])
         return ready
+
+    # -------------- Lorentzian -> SHO conversion --------------
+
+    def lorentzian_conversion(
+        self,
+        frequency: float,
+        sigma: float,
+        resolution: float,
+        *,
+        gamma: float = 0.0,
+        dimensions: int = 1,
+        time_units_fs: float = 0.1,
+        mu0_au: float = 187.0819866,
+        orientation: int = 0,
+    ) -> dict:
+        """
+        Convert a Meep Lorentzian susceptibility to SHO driver parameters.
+
+        The numerical mapping is :func:`lorentzian_to_sho_parameters`; this
+        template adds the launch command from :meth:`_driver_command_for`
+        (targeting this hub's transport), prints a short report on the MPI
+        master, and merges any :meth:`_conversion_extras` into the result.
+
+        Returns
+        -------
+        dict
+            ``{"rescaling_factor", "driver_command", ...extras}`` where
+            ``rescaling_factor`` is the symmetric bright-state coupling scale
+            to pass to ``mp.MXLSocketSusceptibility(rescaling_factor=...)``.
+
+        Raises
+        ------
+        ValueError
+            If any argument is outside its documented valid range.
+        """
+
+        converted = lorentzian_to_sho_parameters(
+            frequency,
+            sigma,
+            resolution,
+            gamma=gamma,
+            dimensions=dimensions,
+            time_units_fs=time_units_fs,
+            mu0_au=mu0_au,
+            orientation=orientation,
+        )
+        rescaling_factor = converted["rescaling_factor"]
+        driver_command = self._driver_command_for(
+            converted, mu0_au=mu0_au, orientation=orientation
+        )
+
+        if am_master():
+            if gamma != 0.0:
+                print(
+                    f"[{self._log_prefix}] gamma={gamma} ignored "
+                    "(SHO driver is lossless).",
+                    flush=True,
+                )
+            print(
+                f"[{self._log_prefix}] rescaling_factor={rescaling_factor:.12g}",
+                flush=True,
+            )
+            for line in self._conversion_report_lines(driver_command):
+                print(f"[{self._log_prefix}] {line}", flush=True)
+
+        return {
+            "rescaling_factor": rescaling_factor,
+            "driver_command": driver_command,
+            **self._conversion_extras(),
+        }
 
     # -------------- statistics --------------
 

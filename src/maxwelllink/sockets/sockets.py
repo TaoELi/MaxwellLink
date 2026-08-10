@@ -8,14 +8,17 @@
 """
 Base socket hub for MaxwellLink drivers and servers.
 
-:class:`SocketHub` is the root of the hub hierarchy: a multi-client server
-coordinating many driver connections with an FDTD engine over the i-PI-style
-protocol (https://ipi-code.org/)::
+:class:`DummySocketHub` implements the full multi-client server machinery
+(accept loop, INIT binding, the ``step_barrier`` engine) and, following the
+package-wide ``Dummy*`` base-class pattern (``DummyEMSimulation`` in
+``em_solvers/``, ``DummyModel`` in ``mxl_drivers/``), every concrete hub
+inherits from it::
 
-    SocketHub                                  this module
-    ├── AggregatedSocketHub                    aggregated.py (bridge transport)
-    │   └── _AggregatedSusceptibilitySocketHubServer
-    └── _SusceptibilitySocketHubServer         susceptibility hubs for Meep
+    DummySocketHub                             this module (all machinery)
+    └── SocketHub                              this module (concrete default hub)
+        ├── AggregatedSocketHub                aggregated.py (bridge transport)
+        │   └── _AggregatedSusceptibilitySocketHubServer
+        └── _SusceptibilitySocketHubServer     susceptibility hubs for Meep
                                                (see _meep_hub_base.py)
 
 The wire formats (headers, framed arrays, the step_barrier fast path) live in
@@ -35,7 +38,6 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-
 
 # ----------------------------------------------------------------------
 # Wire protocol (moved to protocol.py)
@@ -91,6 +93,47 @@ from .protocol import (  # noqa: F401  re-exported for backward compatibility
 )
 
 # ======================================================================
+# Module-level constants
+# ======================================================================
+
+# default TCP port for AF_INET hubs (also the fallback in AggregatedSocketHub)
+_DEFAULT_PORT = 31415
+
+# listen(2) backlog for the server socket
+_LISTEN_BACKLOG = 16384
+
+# accept()/stale-UNIX-socket-probe timeout: how often the accept thread
+# re-checks the stop flag
+_ACCEPT_POLL_S = 0.25
+
+# cap on a single selector wait so step_barrier periodically re-checks its
+# deadline
+_SELECT_CAP_S = 1.0
+
+# molecule_id sentinel for a connected-but-unbound client
+_UNBOUND_MOLECULE_ID = -1
+
+# filesystem prefix for named UNIX sockets (mirrors i-PI's /tmp/ipi_*
+# convention); also baked into the driver launch templates
+_UNIX_SOCKET_PREFIX = "/tmp/socketmxl_"
+
+# public endpoint used to discover the outward-facing IP (no data is sent;
+# a UDP "connect" only selects the local interface)
+_PUBLIC_DNS_PROBE = ("8.8.8.8", 80)
+
+
+def _stop_grace(latency: float) -> float:
+    """
+    Grace period (seconds) granted to clients for STOP/BYE during shutdown.
+
+    Shared by every hub/bridge stop path so the ``max(2.0, 10 * latency)``
+    policy is defined exactly once.
+    """
+
+    return max(2.0, 10.0 * float(latency))
+
+
+# ======================================================================
 # Module-level utilities (host/port discovery and MPI helpers)
 # ======================================================================
 
@@ -121,7 +164,7 @@ def get_available_host_port(localhost=True, save_to_file=None) -> Tuple[str, int
     ip = "127.0.0.1"
     if not localhost:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as tmp:
-            tmp.connect(("8.8.8.8", 80))
+            tmp.connect(_PUBLIC_DNS_PROBE)
             ip = tmp.getsockname()[0]
 
     if am_master():
@@ -227,11 +270,15 @@ class _ClientState:
     extras: dict = field(default_factory=dict)
 
 
-class SocketHub:
+class DummySocketHub:
     """
-    Socket server coordinating multiple driver connections with an FDTD engine.
+    Base socket server coordinating driver connections with an FDTD engine.
 
-    This server:
+    Following the package-wide ``Dummy*`` pattern (``DummyEMSimulation`` in
+    ``em_solvers/``, ``DummyModel`` in ``mxl_drivers/``), this base class
+    implements the complete hub
+    machinery; concrete hubs (:class:`SocketHub` and its subclasses) inherit
+    it and override only the hooks below. This server:
 
     - Accepts and tracks many driver connections.
     - Handles initialization handshakes, field dispatch, and result collection.
@@ -244,7 +291,8 @@ class SocketHub:
     Subclassing contract (followed by every hub in this package):
 
     may be overridden
-        ``_accept_loop`` (custom client classification),
+        ``_handle_accepted`` (custom client classification; the accept loop
+        itself should normally stay untouched),
         ``wait_until_bound`` / ``step_barrier`` (custom transport),
         ``stop`` (extra teardown; call ``super().stop()``)
     do not override
@@ -252,6 +300,20 @@ class SocketHub:
         ``_bind_client_locked``) and the ``step_barrier`` fast path
         (``_dispatch_field``, ``_read_source_ready``), which share scratch
         buffers and locking assumptions with ``step_barrier`` itself
+
+    Pinned invariants (relied upon by subclasses and tests — do not "clean up"):
+
+    - ``_scratch_send``/``_scratch_recv``/``_scratch_recv_mv`` are plain
+      instance attributes and ``_read_source_ready`` is a self-contained
+      method (tests construct a bare hub and call it directly);
+    - ``_lock`` is a *reentrant* lock: helper methods that acquire it are
+      called from sections that already hold it;
+    - on non-master MPI ranks ``__init__`` deliberately skips the socket,
+      selector, and lock attributes — only the master rank may call methods
+      that touch them;
+    - ``step_barrier`` returns ``{}`` (never raises) on pause, disconnect, or
+      timeout, and keeps the frozen barrier for retry — callers' retry loops
+      depend on this.
     """
 
     def __init__(
@@ -286,12 +348,12 @@ class SocketHub:
                 self.serversock = socket.socket(socket.AF_UNIX)
                 # mirror i-PI's /tmp/ipi_* default when given a name
                 if not unixsocket.startswith("/"):
-                    unixsocket = f"/tmp/socketmxl_{unixsocket}"
+                    unixsocket = f"{_UNIX_SOCKET_PREFIX}{unixsocket}"
                 self.unixsocket_path = unixsocket
                 if os.path.exists(self.unixsocket_path):
                     probe = socket.socket(socket.AF_UNIX)
                     try:
-                        probe.settimeout(0.25)
+                        probe.settimeout(_ACCEPT_POLL_S)
                         probe.connect(self.unixsocket_path)
                     except FileNotFoundError:
                         pass
@@ -316,12 +378,12 @@ class SocketHub:
                 self.serversock = socket.socket(socket.AF_INET)
                 self.serversock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 host = host or ""
-                port = port or 31415
+                port = port or _DEFAULT_PORT
                 self.serversock.bind((host, port))
                 self._where = f"{host}:{port}"
 
-            self.serversock.listen(16384)
-            self.serversock.settimeout(0.25)
+            self.serversock.listen(_LISTEN_BACKLOG)
+            self.serversock.settimeout(_ACCEPT_POLL_S)
 
             self.timeout = float(timeout)
             self.latency = float(latency)
@@ -366,7 +428,8 @@ class SocketHub:
 
     def _accept_loop(self):
         """
-        Accept-loop thread: accept new connections and register temporary clients.
+        Accept-loop thread: accept new connections and hand them to
+        :meth:`_handle_accepted`.
         """
 
         while not self._stop:
@@ -377,7 +440,7 @@ class SocketHub:
             except OSError:
                 break
 
-            # NEW: trim latency and keep long-lived connections healthy
+            # trim latency and keep long-lived connections healthy
             try:
                 csock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                 # Only for AF_INET; will raise on AF_UNIX
@@ -386,11 +449,58 @@ class SocketHub:
                 pass  # AF_UNIX or platform without TCP_NODELAY
 
             peer = addr if isinstance(addr, str) else f"{addr[0]}:{addr[1]}"
-            csock.settimeout(self.timeout)
-            st = _ClientState(sock=csock, address=peer, molecule_id=-1)
-            with self._lock:
-                # temp key: use id(csock) until INIT binds molecule_id
-                self.clients[id(csock)] = st
+            self._handle_accepted(csock, peer)
+
+    def _handle_accepted(self, csock: socket.socket, peer: str) -> None:
+        """
+        Hook: register a newly accepted connection.
+
+        The default parks the connection as an unbound driver client awaiting
+        INIT. The Meep-facing hubs override this to first classify the peer
+        (driver vs. Meep rank) before parking or serving it.
+
+        Parameters
+        ----------
+        csock : socket.socket
+            The freshly accepted client socket.
+        peer : str
+            Formatted peer address (``"host:port"`` or UNIX path).
+        """
+
+        self._park_client(csock, peer)
+
+    def _park_client(
+        self, csock: socket.socket, peer: str, extras: Optional[dict] = None
+    ) -> _ClientState:
+        """
+        Park a connection as an unbound driver client awaiting INIT.
+
+        Parameters
+        ----------
+        csock : socket.socket
+            The client socket.
+        peer : str
+            Formatted peer address.
+        extras : dict or None, optional
+            Metadata stored on the client *before* it becomes visible to the
+            binding loops (e.g. the aggregate hub tags bridge sockets with
+            their ``aggregate_group`` here).
+
+        Returns
+        -------
+        _ClientState
+            The temporary client state (keyed by ``id(csock)`` until INIT
+            binds a molecule id).
+        """
+
+        csock.settimeout(self.timeout)
+        st = _ClientState(sock=csock, address=peer, molecule_id=_UNBOUND_MOLECULE_ID)
+        if extras:
+            st.extras.update(extras)
+        with self._lock:
+            # temp key: use id(csock) until INIT binds molecule_id
+            self.clients[id(csock)] = st
+        return st
 
     def _maybe_init_client(self, st: _ClientState, init_payload: dict):
         """
@@ -676,7 +786,7 @@ class SocketHub:
             self._register_sock(st.sock, molid)
             address = st.address
             self._log(f"CONNECTED: mol {molid} <- {address}")
-            # NEW: this molid is part of a frozen barrier -> force re-dispatch
+            # this molid may be part of a frozen barrier -> force re-dispatch
             self._reset_inflight_for(molid)
             st.pending_send = False  # defensive: this is a fresh socket
             return True
@@ -715,6 +825,42 @@ class SocketHub:
 
         if self._inflight and (molid in self._inflight["wants"]):
             self._inflight["sent"][molid] = False
+
+    def _abort_step(
+        self,
+        molid: int,
+        st: Optional[_ClientState] = None,
+        reason: Optional[str] = None,
+    ) -> Dict[int, dict]:
+        """
+        Abort the current barrier step after a client failure.
+
+        Centralizes the recovery sequence used by every failure path in
+        :meth:`step_barrier`: mark the client dead (when one is given), pause
+        the hub, and force re-dispatch for ``molid`` once it reconnects. The
+        frozen barrier itself is kept so the next :meth:`step_barrier` call
+        retries the same step.
+
+        Parameters
+        ----------
+        molid : int
+            Molecule ID whose client failed.
+        st : _ClientState or None, optional
+            The failed client, if a socket error identified one.
+        reason : str or None, optional
+            Short tag for the disconnect log line (e.g. ``"send"``, ``"recv"``).
+
+        Returns
+        -------
+        dict
+            Always ``{}`` — the value :meth:`step_barrier` must return.
+        """
+
+        if st is not None:
+            self._mark_dead(st, molid, reason=reason)
+        self._pause()
+        self._reset_inflight_for(molid)
+        return {}
 
     def _find_free_molecule_id(self) -> int:
         """
@@ -775,7 +921,7 @@ class SocketHub:
 
     def step_barrier(
         self, requests: Dict[int, dict], timeout: Optional[float] = None
-    ) -> Dict[int, np.ndarray]:
+    ) -> Dict[int, dict]:
         """
         Barrier step: dispatch fields and collect source amplitudes from all clients.
 
@@ -845,9 +991,7 @@ class SocketHub:
                     continue
                 st = self.bound.get(mid)
                 if st is None or not st.alive:
-                    self._pause()
-                    self._reset_inflight_for(mid)
-                    return {}
+                    return self._abort_step(mid)
                 snapshot.append(
                     (
                         int(mid),
@@ -878,10 +1022,7 @@ class SocketHub:
                     self._dispatch_field(st, scratch, meta)
                     self._inflight["sent"][mid] = True
                 except (socket.timeout, _SocketClosed, OSError):
-                    self._mark_dead(st, mid, reason="send")
-                    self._pause()
-                    self._reset_inflight_for(mid)
-                    return {}
+                    return self._abort_step(mid, st, reason="send")
 
         # --- Phase B: collect SOURCEREADY replies via the persistent selector ---
         #
@@ -896,7 +1037,7 @@ class SocketHub:
             if remaining <= 0:
                 break
             # Cap the wait so we periodically re-check the deadline.
-            events = sel.select(timeout=min(remaining, 1.0))
+            events = sel.select(timeout=min(remaining, _SELECT_CAP_S))
             if not events:
                 continue
             for key, _mask in events:
@@ -908,20 +1049,13 @@ class SocketHub:
                 with self._lock:
                     st = self.bound.get(mid)
                 if st is None or not st.alive:
-                    pending_mids.discard(mid)
-                    self._pause()
-                    self._reset_inflight_for(mid)
-                    return {}
+                    return self._abort_step(mid)
                 try:
                     amp, extra = self._read_source_ready(st)
                     results[mid] = {"amp": amp, "extra": extra}
                     pending_mids.discard(mid)
                 except (socket.timeout, _SocketClosed, OSError):
-                    self._mark_dead(st, mid, reason="recv")
-                    pending_mids.discard(mid)
-                    self._pause()
-                    self._reset_inflight_for(mid)
-                    return {}
+                    return self._abort_step(mid, st, reason="recv")
 
         if pending_mids:
             # Timed out waiting for replies; keep the frozen barrier for retry.
@@ -968,7 +1102,9 @@ class SocketHub:
         require_init : bool, default: True
             Also require that clients completed INIT.
         timeout : float or None, optional
-            Maximum time to wait (seconds). Uses hub default if ``None``.
+            Maximum time to wait (seconds). When ``None`` (the default) this
+            method waits indefinitely — the hub-wide ``self.timeout`` is *not*
+            applied here.
 
         Returns
         -------
@@ -1064,7 +1200,7 @@ class SocketHub:
 
         # Then, gracefully end existing sessions
         try:
-            self.graceful_shutdown(wait=max(2.0, 10 * self.latency))
+            self.graceful_shutdown(wait=_stop_grace(self.latency))
         finally:
             with self._lock:
                 for st in list(self.clients.values()):
@@ -1082,3 +1218,24 @@ class SocketHub:
         if self.unixsocket_path and os.path.exists(self.unixsocket_path):
             os.unlink(self.unixsocket_path)
             print(f"[SocketHub] Unlinked unix socket path {self.unixsocket_path}")
+
+
+class SocketHub(DummySocketHub):
+    """
+    The concrete default socket hub used by MaxwellLink simulations.
+
+    All machinery is inherited unchanged from :class:`DummySocketHub`; this
+    subclass exists for naming symmetry with the rest of the package (every
+    ``Dummy*`` base has a concrete counterpart) and is the class users
+    instantiate::
+
+        from maxwelllink import SocketHub
+
+        hub = SocketHub(host="127.0.0.1", port=31415)
+        hub.wait_until_bound({0: {"molecule_id": 0}})
+        results = hub.step_barrier({0: {"efield_au": [0.0, 0.0, 1e-6]}})
+        hub.stop()
+
+    See :class:`DummySocketHub` for the full method documentation and the
+    subclassing contract.
+    """

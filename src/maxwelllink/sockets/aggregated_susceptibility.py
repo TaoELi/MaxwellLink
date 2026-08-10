@@ -22,11 +22,24 @@ hub-specific hard parts live here and only here: the *global timestep
 barrier*, which lets several socket susceptibilities per Meep rank advance in
 Meep's serial ``update_P`` order, and the *deferred bridge manifest*, which is
 finalized only once Meep announces how many socket molecules exist.
+
+Server-side step-method call hierarchy (one Meep ``AGGSTEP`` frame in)::
+
+    _serve_step_frame                      block-path eligible?
+    ├── no:  _handle_step -> _run_susceptibility_step
+    │            └── _run_global_susceptibility_step   (cross-rank barrier)
+    │                    ├── runner, plan built: _run_merged_block_step
+    │                    │        └── _block_step_round / _collect_block_group
+    │                    └── runner, dict path:  _run_merged_susceptibility_step
+    │                             └── AggregatedSocketHub.step_barrier
+    └── yes: _run_block_step -> _run_global_susceptibility_step  (same barrier)
+
+Both ``_run_merged_*`` runners retry through the shared
+``_MeepRankServerMixin._step_with_rebind`` skeleton.
 """
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import queue
@@ -40,15 +53,16 @@ from typing import Dict, Optional
 import numpy as np
 
 from ._meep_hub_base import (
+    _HubProcessProxy,
     _MeepRankServerMixin,
     _pump_rank_stats,
     _resolve_bound_endpoint,
-    lorentzian_to_sho_parameters,
 )
 
 # Names that historically lived in this module; re-exported so existing
 # imports keep working.
 from ._meep_hub_base import (  # noqa: F401  re-exported for backward compatibility
+    lorentzian_to_sho_parameters,
     FS_TO_AU,
     MEEP_EFIELD_TO_AU_PREFAC,
     MXL_SOURCE_AMP_AU_TO_MEEP,
@@ -56,68 +70,33 @@ from ._meep_hub_base import (  # noqa: F401  re-exported for backward compatibil
     MXLREADY,
 )
 from .aggregated import (
-    AGGREGATION_INFO_VERSION,
     AggregatedSocketHub,
     RemoteBridgeSpec,
     _AggregateGroupState,
+    _aggregation_manifest,
+    _write_manifest,
 )
+
+# also re-exported for backward compatibility
+from .aggregated import AGGREGATION_INFO_VERSION  # noqa: F401
 from .protocol import (
+    AGGHELLO,
     _SocketClosed,
     _close_socket,
     _json_loads_bytes,
     _recv_bytes,
     _resolve_step_records,
 )
-from .sockets import _ClientState, am_master
+from .sockets import _SELECT_CAP_S, _UNIX_SOCKET_PREFIX
+
+# also re-exported for backward compatibility
+from .sockets import _ClientState, am_master  # noqa: F401
 from .susceptibility import SusceptibilitySocketHub
 
 # Sentinel published in ``_global_results`` for clients served through the
 # block fast path: their amplitudes are already deposited in the client's
 # ``amps_out`` buffer, so no per-molecule result mapping is built for them.
 _BLOCK_RESULT = object()
-
-
-# ----------------------------------------------------------------------
-# Bridge manifest helpers
-# ----------------------------------------------------------------------
-
-
-def _aggregation_manifest(
-    *,
-    hub_host,
-    hub_port,
-    timeout: float,
-    latency: float,
-    unix_prefix: str,
-    molecules_per_bridge: Optional[int],
-    bridges: list,
-) -> dict:
-    """
-    Build one aggregation manifest payload.
-
-    This is the single place that defines the manifest schema shared by the
-    child hub's ``bridge_info``, the finalized on-disk manifest, and the public
-    hub's ``init_remote_bridges`` placeholder. On disk the keys are written
-    alphabetically (:func:`_write_manifest` uses ``sort_keys=True``).
-    """
-
-    return {
-        "version": AGGREGATION_INFO_VERSION,
-        "hub_host": hub_host,
-        "hub_port": hub_port,
-        "timeout": float(timeout),
-        "latency": float(latency),
-        "unix_prefix": unix_prefix,
-        "molecules_per_bridge": molecules_per_bridge,
-        "bridges": bridges,
-    }
-
-
-def _write_manifest(path: str, payload: dict) -> None:
-    """Write one aggregation manifest to ``path`` as pretty, sorted JSON."""
-
-    with open(os.fspath(path), "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 # ----------------------------------------------------------------------
@@ -502,8 +481,6 @@ class _AggregatedSusceptibilitySocketHubServer(
     def _classify_other(self, header: bytes, csock, peer: str) -> None:
         """Route ``AGGHELLO`` banners to bridge registration; close the rest."""
 
-        from .protocol import AGGHELLO
-
         if header == AGGHELLO:
             self._register_bridge_socket_after_hello(csock, peer)
         else:
@@ -530,11 +507,7 @@ class _AggregatedSusceptibilitySocketHubServer(
             _close_socket(csock)
             return
 
-        csock.settimeout(self.timeout)
-        st = _ClientState(sock=csock, address=peer, molecule_id=-1)
-        st.extras["aggregate_group"] = group_id
-        with self._lock:
-            self.clients[id(csock)] = st
+        self._park_client(csock, peer, extras={"aggregate_group": group_id})
         self._log(f"HELLO: aggregate group {group_id!r} <- {peer}")
 
     # -------------- MXLINIT handshake hooks --------------
@@ -779,8 +752,9 @@ class _AggregatedSusceptibilitySocketHubServer(
             Require each backing bridge to have completed AGGINIT, not merely
             be connected.
         timeout : float or None, optional
-            Maximum time (seconds) to wait. ``None`` waits up to
-            ``self.timeout`` without ever returning ``False``.
+            Maximum time (seconds) to wait. When ``None`` (the default) this
+            method waits indefinitely — the hub-wide ``self.timeout`` is *not*
+            applied here (matching the base-class behavior).
 
         Returns
         -------
@@ -980,25 +954,33 @@ class _AggregatedSusceptibilitySocketHubServer(
             If no complete set of responses arrives before ``deadline``.
         """
 
-        while not self._stop:
-            remaining = max(0.0, deadline - time.time())
-            if remaining <= 0.0:
-                break
-            responses = self.step_barrier(requests, timeout=remaining)
-            if responses:
-                return responses
-            rebind_payloads = self._snapshot_rank_init_payloads()
-            with self._step_lock:
-                self.wait_until_bound(
-                    {
-                        mid: rebind_payloads[mid]
-                        for mid in requests
-                        if mid in rebind_payloads
-                    },
-                    require_init=True,
-                    timeout=min(1.0, remaining),
-                )
-        raise TimeoutError("Timed out waiting for aggregate susceptibility responses.")
+        return self._step_with_rebind(
+            deadline=deadline,
+            step_fn=lambda remaining: self.step_barrier(requests, timeout=remaining),
+            rebind_fn=lambda window: self._rebind_molecules(requests, window),
+            timeout_msg=("Timed out waiting for aggregate susceptibility responses."),
+        )
+
+    def _rebind_molecules(self, molecule_ids, window: float) -> None:
+        """
+        Re-bind the bridges backing the given molecules after a failed step.
+
+        Snapshots the current union of registered INIT payloads (membership
+        may have grown since the step started) and waits at most ``window``
+        seconds under ``_step_lock``.
+        """
+
+        rebind_payloads = self._snapshot_rank_init_payloads()
+        with self._step_lock:
+            self.wait_until_bound(
+                {
+                    mid: rebind_payloads[mid]
+                    for mid in molecule_ids
+                    if mid in rebind_payloads
+                },
+                require_init=True,
+                timeout=window,
+            )
 
     # -------------- vectorized group fan-out (block plan) --------------
 
@@ -1109,24 +1091,12 @@ class _AggregatedSusceptibilitySocketHubServer(
                 raise RuntimeError("Block cohort client retired mid-step.")
             merged_fields[rows] = info["fields_stage"]
 
-        while not self._stop:
-            remaining = deadline - time.time()
-            if remaining <= 0.0:
-                break
-            if self._block_step_round(plan, deadline):
-                return
-            rebind_payloads = self._snapshot_rank_init_payloads()
-            with self._step_lock:
-                self.wait_until_bound(
-                    {
-                        mid: rebind_payloads[mid]
-                        for mid in plan["mid_list"]
-                        if mid in rebind_payloads
-                    },
-                    require_init=True,
-                    timeout=min(1.0, max(0.0, deadline - time.time())),
-                )
-        raise TimeoutError("Timed out waiting for aggregate susceptibility responses.")
+        self._step_with_rebind(
+            deadline=deadline,
+            step_fn=lambda remaining: self._block_step_round(plan, deadline),
+            rebind_fn=lambda window: self._rebind_molecules(plan["mid_list"], window),
+            timeout_msg=("Timed out waiting for aggregate susceptibility responses."),
+        )
 
     def _block_step_round(self, plan: dict, deadline: float) -> bool:
         """
@@ -1165,7 +1135,9 @@ class _AggregatedSusceptibilitySocketHubServer(
             if remaining <= 0.0:
                 return False
             try:
-                events = self._bridge_selector.select(timeout=min(remaining, 1.0))
+                events = self._bridge_selector.select(
+                    timeout=min(remaining, _SELECT_CAP_S)
+                )
             except OSError:
                 return False
             if not events:
@@ -1205,20 +1177,11 @@ class _AggregatedSusceptibilitySocketHubServer(
         if remaining <= 0.0:
             return False
 
-        old_timeout = st.sock.gettimeout()
         try:
-            st.sock.settimeout(max(0.0, remaining))
-            mids_r, amps_r, _extra_lens, _extras = group.result_codec.recv_block(
-                st.sock
-            )
+            mids_r, amps_r, _extra_lens, _extras = group.recv_result_block(deadline)
         except (socket.timeout, RuntimeError, _SocketClosed, OSError):
             self._mark_group_dead(gid, reason="recv")
             return False
-        finally:
-            try:
-                st.sock.settimeout(old_timeout)
-            except OSError:
-                pass
 
         g = plan["groups"][gid]
         last = g["last_reply_mids"]
@@ -1632,8 +1595,7 @@ class AggregatedSusceptibilitySocketHub(SusceptibilitySocketHub):
                 "AggregatedSusceptibilitySocketHub supports TCP host/port upstream only."
             )
 
-        self.timeout = float(timeout)
-        self.latency = float(latency)
+        _HubProcessProxy.__init__(self, timeout=timeout, latency=latency)
         self.num_bridges = int(num_bridges)
         self.unix_prefix = str(unix_prefix)
         self.bridge_manifest = str(bridge_manifest)
@@ -1799,7 +1761,7 @@ class AggregatedSusceptibilitySocketHub(SusceptibilitySocketHub):
             max(30, int(math.ceil(float(self.timeout)))),
         )
         wait_script = (
-            'socket="/tmp/socketmxl_$1"; '
+            f'socket="{_UNIX_SOCKET_PREFIX}$1"; '
             "shift; "
             f"deadline=$((SECONDS + {wait_seconds})); "
             'while [[ ! -S "$socket" ]]; do '
@@ -1822,77 +1784,29 @@ class AggregatedSusceptibilitySocketHub(SusceptibilitySocketHub):
             f"{{unixsocket}} {driver_command}"
         )
 
-    def lorentzian_conversion(
-        self,
-        frequency: float,
-        sigma: float,
-        resolution: float,
-        *,
-        gamma: float = 0.0,
-        dimensions: int = 1,
-        time_units_fs: float = 0.1,
-        mu0_au: float = 187.0819866,
-        orientation: int = 0,
-    ) -> dict:
-        """
-        Convert a Meep Lorentzian susceptibility to aggregate SHO parameters.
+    def _driver_command_for(
+        self, converted: dict, *, mu0_au: float, orientation: int
+    ) -> str:
+        """UNIX-socket driver command template for the aggregate transport."""
 
-        The numerical mapping is :func:`lorentzian_to_sho_parameters`; this
-        method adds the bridge manifest, per-bridge launch commands, and the
-        UNIX-socket driver command template.
-
-        Returns
-        -------
-        dict
-            Mapping with ``rescaling_factor``, ``driver_command``,
-            ``bridge_manifest``, ``bridge_commands``, and ``bridge_specs``.
-
-        Raises
-        ------
-        ValueError
-            If any argument is outside its documented valid range.
-        """
-
-        converted = lorentzian_to_sho_parameters(
-            frequency,
-            sigma,
-            resolution,
-            gamma=gamma,
-            dimensions=dimensions,
-            time_units_fs=time_units_fs,
-            mu0_au=mu0_au,
-            orientation=orientation,
-        )
-        rescaling_factor = converted["rescaling_factor"]
-        driver_command = self.driver_command_template(
+        return self.driver_command_template(
             omega_au=converted["omega_au"],
             mu0_au=mu0_au,
             orientation=orientation,
         )
 
-        if am_master():
-            if gamma != 0.0:
-                print(
-                    f"[{self._log_prefix}] gamma={gamma} ignored "
-                    "(SHO driver is lossless).",
-                    flush=True,
-                )
-            print(
-                f"[{self._log_prefix}] rescaling_factor=" f"{rescaling_factor:.12g}",
-                flush=True,
-            )
-            print(
-                f"[{self._log_prefix}] bridge_manifest=" f"{self.bridge_manifest}",
-                flush=True,
-            )
-            print(
-                f"[{self._log_prefix}] driver_template=" f"{driver_command}",
-                flush=True,
-            )
+    def _conversion_report_lines(self, driver_command: str) -> list[str]:
+        """Report the manifest path and the driver template."""
+
+        return [
+            f"bridge_manifest={self.bridge_manifest}",
+            f"driver_template={driver_command}",
+        ]
+
+    def _conversion_extras(self) -> dict:
+        """Add the bridge manifest, launch commands, and specs to the result."""
 
         return {
-            "rescaling_factor": rescaling_factor,
-            "driver_command": driver_command,
             "bridge_manifest": self.bridge_manifest,
             "bridge_commands": [
                 self.bridge_command(spec["idx"]) for spec in self.bridge_specs

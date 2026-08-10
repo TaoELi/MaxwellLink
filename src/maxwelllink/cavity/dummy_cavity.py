@@ -443,14 +443,19 @@ class DummyCavity:
 
         Keys of the setup dict:
 
-        - ``"probe"`` : ``"transmission"`` (mirror cavities) or
-          ``"scattering"`` (plasmonic nanocavities);
+        - ``"probe"`` : ``"transmission"`` (partly transmitting cavities),
+          ``"reflection"`` (opaque mirror-backed cavities), or
+          ``"scattering"`` (localized plasmonic nanocavities);
         - ``"excitation"`` : ``{"center", "size"}`` of the source region;
         - ``"detectors"`` : dict of named detectors -- ``"transmission"`` and
           ``"reflection"`` planes (dicts with ``"center"`` and ``"size"``),
           or the ``"scattered"`` surface and closed ``"absorption_box"`` of a
           scattering probe (lists of ``mp.FluxRegion``);
         - ``"component"`` : the field component injected and detected;
+        - ``"source_amplitude"`` : optional overall probe amplitude;
+        - ``"source_components"`` : optional phased source components, each
+          a dict with ``"component"`` and optional relative ``"amplitude"``;
+        - ``"source_is_integrated"`` : optional Meep integrated-source flag;
         - ``"reference_geometry"`` : the structure of the normalization run;
         - ``"reference_boundary_layers"`` : optional boundary layers of the
           normalization run (transmission probe only);
@@ -655,7 +660,8 @@ class DummyCavity:
         **kwargs
             Forwarded to ``MeepCavityMeasurement``: ``molecules``, ``hub``,
             ``extra_geometry``, ``nfreq``, ``decay_by``, ``steps``,
-            ``max_time``, ``min_time``, and extra Meep keyword arguments.
+            ``max_time``, ``min_time``, ``source_amplitude``, and extra Meep
+            keyword arguments.
 
         Returns
         -------
@@ -665,6 +671,7 @@ class DummyCavity:
         """
 
         from ..measurements import (
+            MeepReflectionSpectroscopy,
             MeepScatteringSpectroscopy,
             MeepTransmissionSpectroscopy,
         )
@@ -672,12 +679,14 @@ class DummyCavity:
         probe = self.optical_setup().get("probe")
         measurements = {
             "transmission": MeepTransmissionSpectroscopy,
+            "reflection": MeepReflectionSpectroscopy,
             "scattering": MeepScatteringSpectroscopy,
         }
         if probe not in measurements:
             raise ValueError(
                 f"optical_setup() declares the unknown probe {probe!r}; "
-                "linear_spectrum supports 'transmission' and 'scattering'. "
+                "linear_spectrum supports 'transmission', 'reflection', and "
+                "'scattering'. "
                 "For the local-dipole (Purcell) measurement, call "
                 "cavity.purcell() instead."
             )
@@ -905,8 +914,13 @@ class DummyCavity:
             f"size = {10.0 * sigma_nm:.2f} nm (10 sigma)"
         )
 
-        setup = self.optical_setup()
-        if setup["probe"] == "scattering":
+        try:
+            setup = self.optical_setup()
+        except NotImplementedError:
+            setup = None
+        if setup is None:
+            lines.append("  optical setup     : not available (see optical_setup())")
+        elif setup["probe"] == "scattering":
             # a grazing source sheet at fixed x (= r in cylindrical cells)
             source = self.meep_to_nm(setup["excitation"]["center"].x)
             detectors = ", ".join(
@@ -943,7 +957,7 @@ class DummyCavity:
         )
 
         if self.k_point is not None:
-            lines.append("  transverse boundary : periodic (k_point = (0, 0, 0))")
+            lines.append("  lateral boundary  : periodic (k_point = (0, 0, 0))")
         if self.predicted:
             lines.append("  predicted (estimates):")
             for key, value in self.predicted.items():

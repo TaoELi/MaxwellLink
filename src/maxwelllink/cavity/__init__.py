@@ -23,5 +23,13 @@ from .dummy_cavity import DummyCavity, CYLINDRICAL
 from .vacuum import Vacuum
 from .bragg import BraggResonator
 from .npom import NPoM
+from .rod import PlasmonicRod
 
-__all__ = ["DummyCavity", "Vacuum", "BraggResonator", "NPoM", "CYLINDRICAL"]
+__all__ = [
+    "DummyCavity",
+    "Vacuum",
+    "BraggResonator",
+    "NPoM",
+    "PlasmonicRod",
+    "CYLINDRICAL",
+]

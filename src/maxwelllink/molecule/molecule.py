@@ -53,7 +53,7 @@ class Molecule:
     Notes
     -----
     ``center`` and ``size`` are in Cartesian coordinates, even for cylindrical
-    simulations. For cylindrical ``m = 0`` coupling, the molecule must be on the axis (``x = y = 0``) and its dipole should be along z (``orientation=2``).
+    simulations. A cylindrical molecule must be on the axis (``x = y = 0``).
     """
 
     def __init__(
@@ -80,13 +80,13 @@ class Molecule:
             Driver name for non-socket mode. If provided, ``hub`` must be ``None``.
         center : Vector3 or None, optional
             Molecule center position in Cartesian coordinates ``(x, y, z)``.
-            Cylindrical ``m = 0`` coupling requires ``x = y = 0``.
+            Cylindrical coupling requires ``x = y = 0``.
         size : Vector3 or None, optional
             Full Cartesian molecule extents ``(Lx, Ly, Lz)``. Cylindrical
-            ``m = 0`` coupling requires ``Lx = Ly``.
+            coupling requires ``Lx = Ly``.
         dimensions : int or None, optional
             Simulation dimensionality; one of ``1``, ``2``, ``3``, or ``-2``
-            (``meep.CYLINDRICAL``, an m = 0 cylindrical cell with the molecule on the axis and its dipole along z).
+            (``meep.CYLINDRICAL``, with the molecule on the z axis).
         sigma : float or list or None, optional
             Spatial polarization kernel width.
         resolution : int or None, optional

@@ -5,7 +5,8 @@
 # See AGENTS.md and README.md for details.                                             #
 # --------------------------------------------------------------------------------------#
 
-"""Manage persistent MaxwellLink HPC profile settings.
+"""
+Manage persistent MaxwellLink HPC profile settings.
 
 This module provides the implementation behind ``mxl hpc`` and
 ``mxl hpc set``.
@@ -28,17 +29,13 @@ _REQUIRED_HPC_KEYS = (
 
 
 def _load_hpc_profile(path: Path) -> dict:
-    """Load an HPC profile JSON file.
+    """
+    Load and return an HPC profile JSON object.
 
-    Parameters
-    ----------
-    path : pathlib.Path
-        Path to JSON file.
-
-    Returns
-    -------
-    dict
-        Parsed JSON object.
+    Raises
+    ------
+    ValueError
+        If the file does not contain a JSON object.
     """
     with path.open("r", encoding="utf-8") as fh:
         data = json.load(fh)
@@ -48,7 +45,8 @@ def _load_hpc_profile(path: Path) -> dict:
 
 
 def _validate_hpc_profile(data: dict) -> None:
-    """Validate required keys and value types of an HPC profile.
+    """
+    Validate required keys and value types of an HPC profile.
 
     Parameters
     ----------
@@ -70,7 +68,8 @@ def _validate_hpc_profile(data: dict) -> None:
 
 
 def set_hpc_profile(source_file: Path, destination_file: Path | None = None) -> Path:
-    """Install a persistent global HPC profile.
+    """
+    Install a persistent global HPC profile.
 
     Parameters
     ----------
@@ -98,7 +97,8 @@ def set_hpc_profile(source_file: Path, destination_file: Path | None = None) -> 
 
 
 def ensure_default_hpc_profile() -> tuple[Path, bool]:
-    """Ensure the default global HPC profile exists.
+    """
+    Ensure the default global HPC profile exists.
 
     Returns
     -------
@@ -114,7 +114,8 @@ def ensure_default_hpc_profile() -> tuple[Path, bool]:
 
 
 def mxl_hpc_main(argv: list[str] | None = None) -> int:
-    """Run the ``mxl hpc`` CLI command family.
+    """
+    Run the ``mxl hpc`` CLI command family.
 
     Parameters
     ----------
@@ -131,7 +132,6 @@ def mxl_hpc_main(argv: list[str] | None = None) -> int:
         description="Manage persistent HPC profile settings for MaxwellLink.",
     )
     subparsers = parser.add_subparsers(dest="hpc_command", required=False)
-
     set_parser = subparsers.add_parser(
         "set",
         help="Install a user HPC profile to ~/.maxwelllink/HPC_PROFILE.json",
@@ -144,42 +144,31 @@ def mxl_hpc_main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    if args.hpc_command is None:
-        try:
-            _, created = ensure_default_hpc_profile()
-        except Exception as exc:
-            print(f"[mxl-hpc] ERROR: {exc}", file=sys.stderr)
-            return 2
-
-        if created:
-            print(
-                "[mxl-hpc] Created default HPC profile at "
-                "~/.maxwelllink/HPC_PROFILE.json"
-            )
+    try:
+        if args.hpc_command == "set":
+            dest = set_hpc_profile(Path(args.file).expanduser().resolve())
+            print("[mxl-hpc] Installed profile at", dest)
         else:
+            _, created = ensure_default_hpc_profile()
+            if created:
+                print(
+                    "[mxl-hpc] Created default HPC profile at "
+                    "~/.maxwelllink/HPC_PROFILE.json"
+                )
+            else:
+                print(
+                    "[mxl-hpc] ~/.maxwelllink/HPC_PROFILE.json already exists. "
+                    "No copy was made."
+                )
             print(
-                "[mxl-hpc] ~/.maxwelllink/HPC_PROFILE.json already exists. "
-                "No copy was made."
+                "[mxl-hpc] You can adjust ~/.maxwelllink/HPC_PROFILE.json as needed "
+                "for your HPC environment."
             )
-        print(
-            "[mxl-hpc] You can adjust ~/.maxwelllink/HPC_PROFILE.json as needed "
-            "for your HPC environment."
-        )
-        return 0
+    except Exception as exc:
+        print(f"[mxl-hpc] ERROR: {exc}", file=sys.stderr)
+        return 2
 
-    if args.hpc_command == "set":
-        try:
-            src = Path(args.file).expanduser().resolve()
-            dest = set_hpc_profile(src)
-        except Exception as exc:
-            print(f"[mxl-hpc] ERROR: {exc}", file=sys.stderr)
-            return 2
-
-        print("[mxl-hpc] Installed profile at", dest)
-        return 0
-
-    parser.error(f"Unknown hpc command: {args.hpc_command}")
-    return 2
+    return 0
 
 
 if __name__ == "__main__":

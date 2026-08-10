@@ -11,7 +11,7 @@ Socket hubs connecting MaxwellLink EM solvers to molecular drivers.
 The package is organized as follows::
 
     protocol.py                     frozen byte formats (i-PI + AGG frames)
-    sockets.py                      SocketHub - the base in-process server
+    sockets.py                      DummySocketHub base + concrete SocketHub
     aggregated.py                   AggregatedSocketHub + bridge transport
     _meep_hub_base.py               shared Meep MXLINIT layer (mixin + proxy)
     susceptibility.py               SusceptibilitySocketHub (Meep, direct drivers)

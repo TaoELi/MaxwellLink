@@ -58,6 +58,7 @@ class MeepCavityMeasurement(DummyMeasurement):
         steps=None,
         max_time=1.0e4,
         min_time=0.0,
+        source_amplitude=None,
         **meep_kwargs,
     ):
         """
@@ -98,6 +99,11 @@ class MeepCavityMeasurement(DummyMeasurement):
             length T resolves quality factors only up to about
             ``frequency * T``, so raise this when a resonance comes out
             suspiciously broad.
+        source_amplitude : float or None, optional
+            Overall Gaussian-source amplitude. ``None`` uses the cavity
+            setup's ``source_amplitude`` or 1.0 when the setup omits it.
+            Per-component amplitudes in ``source_components`` are relative
+            phase/polarization factors multiplied by this value.
         **meep_kwargs
             Extra keyword arguments forwarded to both simulations (e.g.
             ``m=``).
@@ -114,6 +120,11 @@ class MeepCavityMeasurement(DummyMeasurement):
         self.steps = steps
         self.max_time = float(max_time)
         self.min_time = float(min_time)
+        if source_amplitude is None:
+            source_amplitude = self.setup.get("source_amplitude", 1.0)
+        self.source_amplitude = float(source_amplitude)
+        if not np.isfinite(self.source_amplitude) or self.source_amplitude == 0.0:
+            raise ValueError("source_amplitude must be finite and nonzero.")
         self.meep_kwargs = dict(meep_kwargs)
 
         # incident fields at a detector, recorded by the reference run of the
@@ -142,18 +153,38 @@ class MeepCavityMeasurement(DummyMeasurement):
 
     def _sources(self):
         """
-        One broadband Gaussian pulse through the excitation region of the
-        setup (a zero-size region makes it a point source).
+        Broadband Gaussian pulse(s) through the setup's excitation region.
+
+        Most cavities declare one ``component``. A cavity can instead declare
+        ``source_components`` as dictionaries containing ``component`` and an
+        optional complex relative ``amplitude``; this represents one physical
+        source that requires several phased field components (for example an
+        m=+/-1 cylindrical transverse plane wave). Every component is scaled
+        by the measurement's overall ``source_amplitude``.
         """
-        return [
-            mp.Source(
-                # slightly wider than the window so the band edges keep power
-                mp.GaussianSource(frequency=self.fcen, fwidth=2.7 * self.df),
-                component=self.setup["component"],
-                center=self.setup["excitation"]["center"],
-                size=self.setup["excitation"]["size"],
+        component_specs = self.setup.get(
+            "source_components", ({"component": self.setup["component"]},)
+        )
+        pulse_kwargs = {"frequency": self.fcen, "fwidth": 2.7 * self.df}
+        if self.setup.get("source_is_integrated", False):
+            pulse_kwargs["is_integrated"] = True
+
+        sources = []
+        for spec in component_specs:
+            source_kwargs = {
+                "component": spec["component"],
+                "center": self.setup["excitation"]["center"],
+                "size": self.setup["excitation"]["size"],
+                "amplitude": self.source_amplitude * spec.get("amplitude", 1.0),
+            }
+            sources.append(
+                mp.Source(
+                    # slightly wider than the window so the band edges keep power
+                    mp.GaussianSource(**pulse_kwargs),
+                    **source_kwargs,
+                )
             )
-        ]
+        return sources
 
     def _reference_simulation(self):
         """
@@ -345,6 +376,72 @@ class MeepTransmissionSpectroscopy(MeepCavityMeasurement):
         )
 
 
+class MeepReflectionSpectroscopy(MeepCavityMeasurement):
+    """
+    Reflection spectroscopy of an opaque FDTD cavity (two Meep runs).
+
+    The reference run records the incident spectrum. The signal run subtracts
+    those incident fields at the same monitor and records the reflected power.
+    For an opaque, mirror-backed structure, the unreflected fraction is the
+    absorbed power, so this measurement returns ``absorption = 1 - reflection``.
+    """
+
+    def _cavity_setup(self, cavity):
+        """The reflection probe declared by ``cavity.optical_setup()``."""
+
+        setup = cavity.optical_setup()
+        if setup.get("probe") != "reflection":
+            raise ValueError(
+                "MeepReflectionSpectroscopy needs an optical_setup() with "
+                f"probe='reflection', but this cavity declares "
+                f"{setup.get('probe')!r}."
+            )
+        setup.setdefault("decay_monitor", setup["detectors"]["reflection"]["center"])
+        return setup
+
+    def _add_monitor(self, sim):
+        """Attach the reflection flux monitor."""
+
+        detector = self.setup["detectors"]["reflection"]
+        return sim.add_flux(
+            self.freqs,
+            mp.FluxRegion(center=detector["center"], size=detector["size"]),
+        )
+
+    def reference(self):
+        """Record the incident flux and fields in the reference structure."""
+
+        sim = self._reference_simulation()
+        monitor = self._add_monitor(sim)
+        self._run_until_done(sim)
+        self._incident_flux_data = sim.get_flux_data(monitor)
+        return {
+            "frequency_meep": np.array(mp.get_flux_freqs(monitor)),
+            "incident": np.array(mp.get_fluxes(monitor)),
+        }
+
+    def signal_run(self):
+        """Record only the reflected flux from the full structure."""
+
+        sim = self._signal_simulation()
+        monitor = self._add_monitor(sim)
+        self._subtract_incident(sim, monitor)
+        self._run_until_done(sim)
+        return {"reflected": np.array(mp.get_fluxes(monitor))}
+
+    def postprocess(self, reference, signals):
+        """Return the R and A = 1 - R spectra of an opaque structure."""
+
+        freqs = reference["frequency_meep"]
+        reflection = -signals["reflected"] / reference["incident"]
+        return self._assemble_result(
+            1.0e7 * freqs / self.cavity.length_units_nm,
+            frequency_meep=freqs,
+            reflection=reflection,
+            absorption=1.0 - reflection,
+        )
+
+
 class MeepScatteringSpectroscopy(MeepCavityMeasurement):
     """
     Scattering spectroscopy of a localized scatterer (two Meep runs).
@@ -445,23 +542,38 @@ class MeepScatteringSpectroscopy(MeepCavityMeasurement):
 
         The stored incident fields are subtracted at the collection surface
         (scattered power only); the closed box keeps the total fields (for
-        the absorbed power).
+        the absorbed power). The total intensity ``|E|^2`` at the hotspot is
+        recorded for the field-enhancement spectrum.
         """
 
         sim = self._signal_simulation()
         scattered, box = self._add_monitors(sim)
+        component = self.setup["component"]
+        norm = self.setup["normalization"]
+        probe = sim.add_dft_fields(
+            [component], self.freqs, center=norm["center"], size=norm["size"]
+        )
         self._subtract_incident(sim, scattered)
         self._run_until_done(sim)
 
+        internal = np.array(
+            [
+                np.mean(np.abs(sim.get_dft_array(probe, component, i)) ** 2)
+                for i in range(self.nfreq)
+            ]
+        )
         return {
             "scattered": np.array(mp.get_fluxes(scattered)),
             "box_flux": np.array(mp.get_fluxes(box)),
+            "internal": internal,
         }
 
     def postprocess(self, reference, signals):
         """
         Combine the two runs into the scattering, absorption, and extinction
-        spectra, all divided by the incident intensity at the hotspot.
+        spectra, all divided by the incident intensity at the hotspot, plus
+        the field-enhancement spectrum ``enhancement = |E|^2 / |E_inc|^2`` at
+        the hotspot (the sharpest signature of a high-Q resonance).
         """
 
         freqs = reference["frequency_meep"]
@@ -475,6 +587,7 @@ class MeepScatteringSpectroscopy(MeepCavityMeasurement):
             scattering=scattering,
             absorption=absorption,
             extinction=scattering + absorption,
+            enhancement=signals["internal"] / incident,
         )
 
 

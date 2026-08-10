@@ -551,8 +551,8 @@ class MultiModeSimulation(DummyEMSimulation):
         self.dipole_prev = self.dipole.copy()
         self.dmudt = dmudt_initial * self.axis
         self.dmudt_prev = self.dmudt.copy()
-        self.dipole_lookahead = self.dipole.copy()
-        self.has_dipole_lookahead = False
+        self.dipole_next = self.dipole.copy()
+        self.has_dipole_next = False
         self.acceleration = np.zeros((self.n_mode, 3), dtype=float)
 
         if isinstance(excited_mode_list, list):
@@ -896,7 +896,7 @@ class MultiModeSimulation(DummyEMSimulation):
             dipole_vec -= self.dipole_baseline
         return dipole_vec
 
-    def _calc_dipole_lookahead_vec(self):
+    def _calc_dipole_vec_next(self):
         """
         Reconstruct force-time dipoles one VV drift ahead from returned JSON.
 
@@ -1061,12 +1061,8 @@ class MultiModeSimulation(DummyEMSimulation):
         # this interpolation is not very accurate
         # dipole = self.dipole + 0.5 * self.dt * (1.5 * self.dmudt - 0.5 * self.dmudt_prev)
         # the following expression is accurate to the order of dt^4
-        if (
-            self.include_dse
-            and self.has_dipole_lookahead
-            and not self.molecule_half_step
-        ):
-            dipole = self.dipole_lookahead.copy()
+        if self.include_dse and self.has_dipole_next and not self.molecule_half_step:
+            dipole = self.dipole_next.copy()
         else:
             dipole = self.dipole_prev + self.dt * (
                 9.0 / 8.0 * self.dmudt + 3.0 / 8.0 * self.dmudt_prev
@@ -1082,9 +1078,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
         # the value for n+1/2 time step
         self.dipole, self.dmudt = self._step_molecules(efield_vec)
-        self.dipole_lookahead, self.has_dipole_lookahead = (
-            self._calc_dipole_lookahead_vec()
-        )
+        self.dipole_next, self.has_dipole_next = self._calc_dipole_vec_next()
 
         # extrapolate to n+1 time step (ONLY NEEDED FOR VELOCITY VERLET MOLECULE PROPAGATION)
         if self.molecule_half_step:

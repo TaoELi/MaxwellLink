@@ -224,16 +224,28 @@ def _accumulate_source_amplitudes(m, amp_mu, touched):
         instantaneous_source_amplitudes[key] += float(val)
 
     if m.dimensions == mp.CYLINDRICAL:
-        # currently only z-dipole of molecules is coupled in cylindrical cells (m=0)
-        if m.polarization_type == "transverse":
-            # both Er and Ez components are needed for the transverse Pz kernel
-            for field_tag in ("Er", "Ez"):
-                key = _transverse_source_key(
-                    m.polarization_fingerprint_hash, field_tag, "z"
-                )
-                add(key, amp_mu[2])
+        if m.azimuthal_mode == 0:
+            if m.polarization_type == "transverse":
+                # Er and Ez form the transverse kernel of the z dipole.
+                for field_tag in ("Er", "Ez"):
+                    key = _transverse_source_key(
+                        m.polarization_fingerprint_hash, field_tag, "z"
+                    )
+                    add(key, amp_mu[2])
+            else:
+                add((m.polarization_fingerprint_hash, "Ez"), amp_mu[2])
         else:
-            add((m.polarization_fingerprint_hash, "Ez"), amp_mu[2])
+            # A fixed x or y dipole is represented by one complex |m|=1
+            # sector.  The y kernel is a -i*m rotation of the x kernel.
+            for molecule_axis, val in (("x", amp_mu[0]), ("y", amp_mu[1])):
+                for field_tag in ("Er", "Ep"):
+                    key = (
+                        m.polarization_fingerprint_hash,
+                        "analytical",
+                        field_tag,
+                        molecule_axis,
+                    )
+                    add(key, val)
     elif m.dimensions in (1, 2):
         add((m.polarization_fingerprint_hash, "Ez"), amp_mu[2])
     elif m.polarization_type == "transverse":
@@ -438,6 +450,7 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         time_units_fs: float = 0.1,
         dt: Optional[float] = None,
         molecule: Molecule = None,
+        azimuthal_mode: int = 0,
     ):
         """
         Initialize the Meep molecule wrapper.
@@ -450,6 +463,8 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
             Time step in Meep units; if provided, propagated to the molecule.
         molecule : Molecule
             The molecule to wrap and couple to Meep.
+        azimuthal_mode : int, default: 0
+            Meep cylindrical Fourier sector. Ignored in Cartesian cells.
         """
         super().__init__(molecule)
         # self.m = molecule
@@ -472,6 +487,7 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         self.sources = self.m.sources
         self.dt_au = self.m.dt_au
         self.polarization_type = self.m.polarization_type
+        self.azimuthal_mode = int(azimuthal_mode)
 
         # if polarization_type is "numerical", "transverse", "point", or "point-raw",
         # self.m.resolution must be set to a positive number.
@@ -503,22 +519,33 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                 "###! Please consider using 'analytical', 'numerical' or 'transverse' polarization_type with a small sigma instead. !###",
             )
 
-        # Cylindrical cells couple an on-axis, z-oriented molecule only.
-        # Molecule center/size are public Cartesian quantities; convert only
-        # the wrapper size to Meep's native (r, phi, z) representation.
+        # Cylindrical cells support an on-axis z dipole at m=0 and an on-axis
+        # Cartesian x/y dipole at |m|=1 (analytical polarization only).
+        # Molecule center/size remain Cartesian; only the wrapper size is
+        # converted to Meep's (r, phi, z) notation.
         if self.dimensions == mp.CYLINDRICAL:
             if self.polarization_type not in ("analytical", "transverse"):
                 raise ValueError(
-                    "Cylindrical (m = 0) cells currently support 'analytical' and 'transverse' polarization_type only."
+                    "Cylindrical molecule coupling supports 'analytical' and "
+                    "'transverse' polarization_type only."
+                )
+            if self.azimuthal_mode not in (-1, 0, 1):
+                raise ValueError(
+                    "Cylindrical molecule coupling supports only m=0 and m=+/-1."
+                )
+            if self.azimuthal_mode != 0 and self.polarization_type != "analytical":
+                raise ValueError(
+                    "Cylindrical m=+/-1 coupling supports 'analytical' "
+                    "polarization_type only."
                 )
             if abs(self.center.x) > 1.0e-9 or abs(self.center.y) > 1.0e-9:
                 raise ValueError(
-                    "Cylindrical (m = 0) coupling requires a Cartesian molecule "
+                    "Cylindrical molecule coupling requires a Cartesian molecule "
                     "center on the z axis (center.x = center.y = 0)."
                 )
             if not np.isclose(self.size.x, self.size.y, rtol=0.0, atol=1.0e-9):
                 raise ValueError(
-                    "Cylindrical (m = 0) coupling requires an axisymmetric "
+                    "Cylindrical molecule coupling requires an axisymmetric "
                     "Cartesian molecule size (size.x = size.y)."
                 )
             self.size = mp.Vector3(self.size.x, 0.0, self.size.z)
@@ -652,19 +679,60 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                 )
             srcs.append(_fingerprint_source[key])
         elif self.dimensions == mp.CYLINDRICAL:
-            # m = 0: only the z-oriented dipole needed
-            key = (self.polarization_fingerprint_hash, "Ez")
-            if key not in _fingerprint_source:
-                instantaneous_source_amplitudes[key] = 0.0
-                _fingerprint_source[key] = mp.Source(
-                    src=_make_custom_time_src(key),
-                    component=mp.Ez,
-                    center=center,
-                    size=size,
-                    amplitude=1.0,
-                    amp_func=amp_func_3d_z,
+            if self.azimuthal_mode == 0:
+                # The rotationally symmetric z dipole belongs to m=0.
+                key = (self.polarization_fingerprint_hash, "Ez")
+                if key not in _fingerprint_source:
+                    instantaneous_source_amplitudes[key] = 0.0
+                    _fingerprint_source[key] = mp.Source(
+                        src=_make_custom_time_src(key),
+                        component=mp.Ez,
+                        center=center,
+                        size=size,
+                        amplitude=1.0,
+                        amp_func=amp_func_3d_z,
+                    )
+                srcs.append(_fingerprint_source[key])
+            else:
+                # An x dipole regularized by the isotropic Gaussian density
+                # mu * g(r) is exactly one |m|=1 sector with coefficients
+                # Pr = G/2 and Pphi = i*m*G/2, where G = mu * g on the (r, z)
+                # half plane.
+                gaussian_prefactor = (
+                    1.0 / (2.0 * np.pi) ** 1.5 / self.sigma**3 * self.rescaling_factor
                 )
-            srcs.append(_fingerprint_source[key])
+
+                def amp_func_cylindrical_xy(R):
+                    return gaussian_prefactor * np.exp(
+                        -(R.x**2 + R.z**2) / (2.0 * self.sigma**2)
+                    )
+
+                components = (
+                    (mp.Er, "Er", 0.5),
+                    (mp.Ep, "Ep", 0.5j * self.azimuthal_mode),
+                )
+                for molecule_axis in ("x", "y"):
+                    axis_factor = (
+                        -1j * self.azimuthal_mode if molecule_axis == "y" else 1.0
+                    )
+                    for comp, field_tag, component_factor in components:
+                        key = (
+                            self.polarization_fingerprint_hash,
+                            "analytical",
+                            field_tag,
+                            molecule_axis,
+                        )
+                        if key not in _fingerprint_source:
+                            instantaneous_source_amplitudes[key] = 0.0
+                            _fingerprint_source[key] = mp.Source(
+                                src=_make_custom_time_src(key),
+                                component=comp,
+                                center=center,
+                                size=size,
+                                amplitude=axis_factor * component_factor,
+                                amp_func=amp_func_cylindrical_xy,
+                            )
+                        srcs.append(_fingerprint_source[key])
         else:  # 3D
             for comp, tag, amp_func in (
                 (mp.Ex, "Ex", amp_func_3d_x),
@@ -1237,6 +1305,25 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         -------
         list of float
             Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
+
+        Notes
+        -----
+        Cylindrical cells with ``azimuthal_mode`` m = +/-1 need extra attention.
+        Meep evolves the complex Fourier coefficients ``E_m(r, z)`` of the
+        physical field ``E(r, phi, z) = sum_m E_m(r, z) exp(i m phi)``, and
+        only the single sector m (such as m=1) is simulated. The omitted conjugate
+        sector (such as m=-1) satisfies ``E_{-m} = E_m^*``.
+
+        The couplings we need are overlaps of the Gaussian kernel g with the
+        real Cartesian components ``E \\dot x = E_r cos(phi) - E_phi sin(phi)``
+        and ``E \\dot y = E_r sin(phi) + E_phi cos(phi)``. Performing the phi
+        integral analytically (only m = +/-1 survive) and eliminating the
+        conjugate sector via ``E_{-m} = E_m^*`` reduces both couplings to one
+        complex overlap with the conjugated emission kernel,
+
+            S = integral g (E_r / 2 - i m E_phi / 2) dV_cyl ,
+
+        such that ``I_x = 2 Re(S)`` and ``I_y = -2 m Im(S)``.
         """
 
         vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
@@ -1267,22 +1354,74 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                 vol,
             )
         elif self.dimensions == mp.CYLINDRICAL:
-            # m = 0: only the on-axis z-component couples. The integrand is
-            # the same z^2-weighted Gaussian as in 3D (with center.x =
-            # center.y = 0 and R = (r, 0, z)); Meep's cylindrical
-            # integration supplies the 2 pi r volume element.
-            z = sim.integrate_field_function(
-                [mp.Ez],
-                lambda R, ez: self._polarization_prefactor_3d
-                * (R.z - self.center.z)
-                * (R.z - self.center.z)
-                * exp(
-                    -(R.x * R.x + (R.z - self.center.z) * (R.z - self.center.z))
-                    / (2.0 * self.sigma**2)
+            if self.azimuthal_mode == 0:
+                # Only the on-axis z-component couples at m=0. Meep's
+                # cylindrical integration supplies the 2*pi*r measure
+                z = sim.integrate_field_function(
+                    [mp.Ez],
+                    lambda R, ez: self._polarization_prefactor_3d
+                    * (R.z - self.center.z)
+                    * (R.z - self.center.z)
+                    * exp(
+                        -(R.x * R.x + (R.z - self.center.z) * (R.z - self.center.z))
+                        / (2.0 * self.sigma**2)
+                    )
+                    * (ez),
+                    vol,
                 )
-                * (ez),
-                vol,
-            )
+            else:
+                # Read back with the same |m|=1 isotropic Gaussian kernel
+                # used for emission (Pr = G/2, Pphi = i*m*G/2, conjugated).
+                # Adding its omitted conjugate sector converts the complex
+                # cylindrical overlap to a real Cartesian field.
+                gaussian_prefactor = (
+                    1.0 / (2.0 * np.pi) ** 1.5 / self.sigma**3 * self.rescaling_factor
+                )
+                if not hasattr(self, "_cylindrical_analytical_normalization"):
+                    # Correct the continuous Gaussian normalization for
+                    # Meep's component-dependent cylindrical quadrature
+                    radial_integral = sim.integrate_field_function(
+                        [mp.Er],
+                        lambda R, er: 0.5
+                        * gaussian_prefactor
+                        * exp(
+                            -(R.x * R.x + (R.z - self.center.z) * (R.z - self.center.z))
+                            / (2.0 * self.sigma**2)
+                        ),
+                        vol,
+                    )
+                    azimuthal_integral = sim.integrate_field_function(
+                        [mp.Ep],
+                        lambda R, ep: 0.5j
+                        * self.azimuthal_mode
+                        * gaussian_prefactor
+                        * exp(
+                            -(R.x * R.x + (R.z - self.center.z) * (R.z - self.center.z))
+                            / (2.0 * self.sigma**2)
+                        ),
+                        vol,
+                    )
+                    kernel_integral = np.real(
+                        radial_integral - 1j * self.azimuthal_mode * azimuthal_integral
+                    )
+                    self._cylindrical_analytical_normalization = (
+                        self.rescaling_factor / kernel_integral
+                    )
+                sector_overlap = (
+                    sim.integrate_field_function(
+                        [mp.Er, mp.Ep],
+                        lambda R, er, ep: gaussian_prefactor
+                        * exp(
+                            -(R.x * R.x + (R.z - self.center.z) * (R.z - self.center.z))
+                            / (2.0 * self.sigma**2)
+                        )
+                        * (0.5 * er - 0.5j * self.azimuthal_mode * ep),
+                        vol,
+                    )
+                    * self._cylindrical_analytical_normalization
+                )
+                x = 2.0 * np.real(sector_overlap)
+                y = -2.0 * self.azimuthal_mode * np.imag(sector_overlap)
         else:  # 3D
             z = sim.integrate_field_function(
                 [mp.Ez],
@@ -2119,9 +2258,13 @@ class MeepSimulation(mp.Simulation):
 
         self.socket_hub = hub
         self.molecules = molecules if molecules is not None else []
-        if self.dimensions == mp.CYLINDRICAL and self.molecules and self.m != 0:
+        if (
+            self.dimensions == mp.CYLINDRICAL
+            and self.molecules
+            and self.m not in (-1, 0, 1)
+        ):
             raise ValueError(
-                "Cylindrical molecule coupling currently supports only m=0."
+                "Cylindrical molecule coupling supports only m=0 and m=+/-1."
             )
 
         if (time_units_fs is None) and (length_units_nm is None):
@@ -2156,6 +2299,7 @@ class MeepSimulation(mp.Simulation):
                     time_units_fs=self.time_units_fs,
                     dt=self.dt,
                     molecule=self.molecules[idx],
+                    azimuthal_mode=self.m if self.dimensions == mp.CYLINDRICAL else 0,
                 )
                 self.molecules[idx] = m
 

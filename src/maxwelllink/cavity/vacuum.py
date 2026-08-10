@@ -31,7 +31,8 @@ class Vacuum(DummyCavity):
 
     Since the field of a z-polarized dipole on the axis has full rotational
     symmetry, an m = 0 cylindrical run (``make_simulation(m=0)``) reproduces
-    3D free-space physics at 2D cost.
+    3D free-space physics at 2D cost. An on-axis x- or y-polarized dipole can
+    instead use one complex m = +1 or m = -1 sector.
 
     Examples
     --------

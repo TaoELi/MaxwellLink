@@ -33,12 +33,12 @@ from ._meep_hub_base import (
     _MeepRankServerMixin,
     _pump_rank_stats,
     _resolve_bound_endpoint,
-    lorentzian_to_sho_parameters,
 )
 
 # Names that historically lived in this module; re-exported so existing
 # imports (tests, aggregated_susceptibility, user scripts) keep working.
 from ._meep_hub_base import (  # noqa: F401  re-exported for backward compatibility
+    lorentzian_to_sho_parameters,
     FS_TO_AU,
     MEEP_EFIELD_TO_AU_PREFAC,
     MXL_SOURCE_AMP_AU_TO_MEEP,
@@ -50,8 +50,10 @@ from ._meep_hub_base import (  # noqa: F401  re-exported for backward compatibil
     _strip_mpi_env_for_child_start,
 )
 from .protocol import _close_socket
-from .sockets import SocketHub, _ClientState, am_master
+from .sockets import SocketHub
 
+# also re-exported for backward compatibility
+from .sockets import _ClientState, am_master  # noqa: F401
 
 # ----------------------------------------------------------------------
 # Child-process entry point
@@ -164,17 +166,13 @@ class _SusceptibilitySocketHubServer(_MeepRankServerMixin, SocketHub):
 
         Drivers send nothing at connect time, so a socket that produced no
         ``MXLINIT`` banner within the classify window is handed to the
-        inherited SocketHub pool as an unbound client (``molecule_id=-1``)
-        for later binding.
+        inherited hub pool as an unbound client for later binding.
         """
 
         if self._stop:
             _close_socket(csock)
             return
-        csock.settimeout(self.timeout)
-        st = _ClientState(sock=csock, address=peer, molecule_id=-1)
-        with self._lock:
-            self.clients[id(csock)] = st
+        self._park_client(csock, peer)
 
     # -------------- MXLINIT handshake hooks --------------
 
@@ -271,21 +269,24 @@ class _SusceptibilitySocketHubServer(_MeepRankServerMixin, SocketHub):
             for mid, field in efields.items()
         }
 
-        deadline = time.time() + self.timeout
+        def rebind(window: float) -> None:
+            self.wait_until_bound(
+                {mid: init_payloads[mid] for mid in requests.keys()},
+                require_init=True,
+                timeout=window,
+            )
+
+        # _step_lock serializes the rank threads through the shared
+        # (non-reentrant) step_barrier scratch buffers.
         with self._step_lock:
-            while not self._stop:
-                remaining = max(0.0, deadline - time.time())
-                if remaining <= 0.0:
-                    break
-                responses = self.step_barrier(requests, timeout=remaining)
-                if responses:
-                    return responses
-                self.wait_until_bound(
-                    {mid: init_payloads[mid] for mid in requests.keys()},
-                    require_init=True,
-                    timeout=min(1.0, remaining),
-                )
-        raise TimeoutError("Timed out waiting for susceptibility driver responses.")
+            return self._step_with_rebind(
+                deadline=time.time() + self.timeout,
+                step_fn=lambda remaining: self.step_barrier(
+                    requests, timeout=remaining
+                ),
+                rebind_fn=rebind,
+                timeout_msg=("Timed out waiting for susceptibility driver responses."),
+            )
 
 
 # ----------------------------------------------------------------------
@@ -354,8 +355,7 @@ class SusceptibilitySocketHub(_HubProcessProxy):
                 "SusceptibilitySocketHub currently supports TCP host/port only."
             )
 
-        self.timeout = float(timeout)
-        self.latency = float(latency)
+        super().__init__(timeout=timeout, latency=latency)
         self.driver_count_file = driver_count_file
         self._start_server_process(host, port)
 
@@ -365,68 +365,15 @@ class SusceptibilitySocketHub(_HubProcessProxy):
     def _server_config(self) -> tuple:
         return (self.driver_count_file,)
 
-    def lorentzian_conversion(
-        self,
-        frequency: float,
-        sigma: float,
-        resolution: float,
-        *,
-        gamma: float = 0.0,
-        dimensions: int = 1,
-        time_units_fs: float = 0.1,
-        mu0_au: float = 187.0819866,
-        orientation: int = 0,
-    ) -> dict:
-        """
-        Convert a Meep Lorentzian susceptibility to SHO driver parameters.
+    def _driver_command_for(
+        self, converted: dict, *, mu0_au: float, orientation: int
+    ) -> str:
+        """Ready-to-run ``mxl_driver --model sho`` command for this endpoint."""
 
-        The numerical mapping is :func:`lorentzian_to_sho_parameters`; this
-        method adds the ready-to-run ``mxl_driver --model sho`` command line
-        targeting this hub's endpoint.
-
-        Returns
-        -------
-        dict
-            ``{"rescaling_factor", "driver_command"}`` where
-            ``rescaling_factor`` is the symmetric bright-state coupling scale
-            to pass to ``mp.MXLSocketSusceptibility(rescaling_factor=...)``.
-
-        Raises
-        ------
-        ValueError
-            If any argument is outside its documented valid range.
-        """
-
-        converted = lorentzian_to_sho_parameters(
-            frequency,
-            sigma,
-            resolution,
-            gamma=gamma,
-            dimensions=dimensions,
-            time_units_fs=time_units_fs,
-            mu0_au=mu0_au,
-            orientation=orientation,
-        )
-        rescaling_factor = converted["rescaling_factor"]
-        driver_command = (
+        return (
             f"mxl_driver --model sho --address {self.host} --port {self.port} "
             f'--param "{converted["driver_param"]}"'
         )
-
-        if am_master():
-            if gamma != 0.0:
-                print(
-                    f"[{self._log_prefix}] gamma={gamma} ignored "
-                    "(SHO driver is lossless).",
-                    flush=True,
-                )
-            print(
-                f"[{self._log_prefix}] rescaling_factor={rescaling_factor:.12g}",
-                flush=True,
-            )
-            print(f"[{self._log_prefix}] {driver_command}", flush=True)
-
-        return {"rescaling_factor": rescaling_factor, "driver_command": driver_command}
 
 
 __all__ = ["SusceptibilitySocketHub"]

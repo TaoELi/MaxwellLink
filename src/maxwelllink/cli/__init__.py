@@ -1,4 +1,5 @@
-"""Command-line interface modules for MaxwellLink.
+"""
+Command-line interface modules for MaxwellLink.
 
 Notes
 -----

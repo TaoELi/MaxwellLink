@@ -5,7 +5,8 @@
 # See AGENTS.md and README.md for details.                                             #
 # --------------------------------------------------------------------------------------#
 
-"""Clean local MaxwellLink workspace artifacts created by ``mxl-init``.
+"""
+Clean local MaxwellLink workspace artifacts created by ``mxl-init``.
 
 This module provides the implementation behind ``mxl-clean`` and
 ``mxl clean``.
@@ -23,7 +24,8 @@ from . import mxl_init
 def _remove_managed_symlink(
     target_path: Path, expected_source: Path, force: bool = False
 ) -> None:
-    """Remove a managed symlink if it matches the expected source.
+    """
+    Remove a managed symlink if it matches the expected source.
 
     Parameters
     ----------
@@ -41,10 +43,7 @@ def _remove_managed_symlink(
     """
     if not mxl_init._path_exists(target_path):
         return
-    if force:
-        mxl_init._remove_path(target_path)
-        return
-    if mxl_init._symlink_matches(target_path, expected_source):
+    if force or mxl_init._symlink_matches(target_path, expected_source):
         mxl_init._remove_path(target_path)
         return
     raise FileExistsError(
@@ -56,7 +55,8 @@ def _remove_managed_symlink(
 def _remove_managed_agents_file(
     target_path: Path, expected_source: Path, force: bool = False
 ) -> None:
-    """Remove local ``AGENTS.md`` when it matches the managed content.
+    """
+    Remove local ``AGENTS.md`` when it matches the managed content.
 
     Parameters
     ----------
@@ -74,15 +74,7 @@ def _remove_managed_agents_file(
     """
     if not mxl_init._path_exists(target_path):
         return
-    if force:
-        mxl_init._remove_path(target_path)
-        return
-    if (
-        target_path.is_file()
-        and not target_path.is_symlink()
-        and expected_source.is_file()
-        and target_path.read_bytes() == expected_source.read_bytes()
-    ):
+    if force or mxl_init._is_unmodified_copy(target_path, expected_source):
         mxl_init._remove_path(target_path)
         return
     raise FileExistsError(
@@ -96,7 +88,8 @@ def clean_workspace(
     payload_root: Path,
     force: bool = False,
 ) -> None:
-    """Clean managed workspace files and symlinks from a destination folder.
+    """
+    Clean managed workspace files and symlinks from a destination folder.
 
     Parameters
     ----------
@@ -114,22 +107,14 @@ def clean_workspace(
     FileExistsError
         If conflicting managed paths are found and ``force`` is ``False``.
     """
-    if not mxl_init._is_valid_payload_root(payload_root):
-        raise FileNotFoundError(
-            f"Invalid payload root {payload_root}. "
-            f"Expected: {', '.join(mxl_init._REQUIRED_PAYLOAD_ITEMS)}"
-        )
+    mxl_init._require_valid_payload_root(payload_root)
 
     agents_src = payload_root / "AGENTS.md"
     agents_dst = destination / "AGENTS.md"
 
     local_hpc_profile = destination / mxl_init._HPC_PROFILE_FILE
     global_hpc_profile = mxl_init._global_hpc_profile_path()
-    _remove_managed_symlink(
-        local_hpc_profile,
-        global_hpc_profile,
-        force=force,
-    )
+    _remove_managed_symlink(local_hpc_profile, global_hpc_profile, force=force)
 
     for name in mxl_init._AGENT_LINKS:
         dst = destination / name
@@ -144,7 +129,8 @@ def clean_workspace(
 
 
 def mxl_clean_main(argv: list[str] | None = None) -> int:
-    """Run the ``mxl-clean`` CLI entry point.
+    """
+    Run the ``mxl-clean`` CLI entry point.
 
     Parameters
     ----------

@@ -141,22 +141,22 @@ class NPoM(DummyCavity):
 
         # PRACTICAL CALCULATIONS FOR NATURE 2016 PAPER:
         20-radius nm and 1 nm gap particle, 500-800 nm measurement window:
-        - Linear scattering spectrum: ``NPoM(padding_nm=300.0, pml_nm=300.0)``, resolution 4000. 
+        - Linear scattering spectrum: ``NPoM(padding_nm=300.0, pml_nm=300.0)``, resolution 4000.
         - Purcell factor: ``NPoM(padding_nm=500.0, pml_nm=700.0)``, resolution 4000.
 
-        For converged spectra, size the cell from the *reddest* wavelength 
+        For converged spectra, size the cell from the *reddest* wavelength
         ``lam_max`` of the window to be measured:
 
             padding_nm >= 0.75 * lam_max - radius_nm
             pml_nm     >= 0.9  * lam_max
-        
-        Half of it is enough when ``linear_spectrum`` is only used for the 
-        resonance position and linewidth, while the full value is needed for 
-        ``purcell`` and for the long-wavelength tail of the scattering spectrum. 
-        
-        With a cell that is too small, the scattering resonance comes out redshifted 
+
+        Half of it is enough when ``linear_spectrum`` is only used for the
+        resonance position and linewidth, while the full value is needed for
+        ``purcell`` and for the long-wavelength tail of the scattering spectrum.
+
+        With a cell that is too small, the scattering resonance comes out redshifted
         and too broad, and the total Purcell factor rises with wavelength instead of
-        decaying. 
+        decaying.
         """
 
         # a dispersive metal and a rotationally symmetric mode: 1D/2D cells
@@ -180,6 +180,7 @@ class NPoM(DummyCavity):
         is_default_gold = material is None
         if is_default_gold:
             from meep.materials import Au
+
             material = Au
         self.material = material
 

@@ -76,7 +76,18 @@ from .protocol import (  # noqa: F401  re-exported for backward compatibility
     _ResultCodec,
     _StepCodec,
 )
-from .sockets import SocketHub, _ClientState
+from .sockets import (
+    SocketHub,
+    _ClientState,
+    _DEFAULT_PORT,
+    _SELECT_CAP_S,
+    _UNBOUND_MOLECULE_ID,
+    _stop_grace,
+)
+
+# floor (seconds) for the per-client HELLO poll so one slow client cannot
+# stall the entire hub even when the hub latency is tiny
+_HELLO_POLL_FLOOR_S = 0.05
 
 # ---------------------------------------------------------------------------
 # Hub-side state and manifest specs
@@ -112,6 +123,84 @@ class _AggregateGroupState:
     bridge: Optional[_ClientState] = None
     step_codec: _StepCodec = field(default_factory=_StepCodec)
     result_codec: _ResultCodec = field(default_factory=_ResultCodec)
+
+    # -- channel helpers ---------------------------------------------------
+    #
+    # These centralize the socket-timeout choreography for one bridge link so
+    # the dict path (AggregatedSocketHub.step_barrier) and the block fast path
+    # (aggregated_susceptibility.py) share one implementation. They only touch
+    # the socket and codecs; liveness checks and _mark_group_dead stay with
+    # the owning hub.
+
+    def recv_result(self, deadline: float) -> Dict[int, dict]:
+        """
+        Receive one AGGRESULT reply, bounding the read by ``deadline``.
+
+        The bridge socket's timeout is set to the remaining time and restored
+        afterwards, whatever happens.
+
+        Parameters
+        ----------
+        deadline : float
+            Absolute ``time.time()`` deadline for the receive.
+
+        Returns
+        -------
+        dict[int, dict]
+            Mapping ``molecule_id -> {"amp": ndarray(3,), "extra": bytes}``.
+
+        Raises
+        ------
+        socket.timeout, _SocketClosed, OSError, RuntimeError
+            On transport failure or a malformed reply; the caller is
+            responsible for marking the group dead.
+        """
+
+        sock = self.bridge.sock
+        old_timeout = sock.gettimeout()
+        try:
+            sock.settimeout(max(0.0, deadline - time.time()))
+            return self.result_codec.recv(sock)
+        finally:
+            try:
+                sock.settimeout(old_timeout)
+            except OSError:
+                pass  # socket already closed; keep the original error
+
+    def recv_result_block(self, deadline: float):
+        """
+        Receive one AGGRESULT reply as contiguous arrays, bounded by ``deadline``.
+
+        Vectorized variant of :meth:`recv_result` used by the block fast path.
+
+        Parameters
+        ----------
+        deadline : float
+            Absolute ``time.time()`` deadline for the receive.
+
+        Returns
+        -------
+        tuple
+            ``(mids, amps, extra_lens, extras)`` as produced by
+            ``_ResultCodec.recv_block``.
+
+        Raises
+        ------
+        socket.timeout, _SocketClosed, OSError, RuntimeError
+            On transport failure or a malformed reply; the caller is
+            responsible for marking the group dead.
+        """
+
+        sock = self.bridge.sock
+        old_timeout = sock.gettimeout()
+        try:
+            sock.settimeout(max(0.0, deadline - time.time()))
+            return self.result_codec.recv_block(sock)
+        finally:
+            try:
+                sock.settimeout(old_timeout)
+            except OSError:
+                pass  # socket already closed; keep the original error
 
 
 @dataclass(frozen=True)
@@ -272,6 +361,45 @@ def _assign_molecule_to_group(
     payload["aggregate_group"] = group_id
 
 
+def _aggregation_manifest(
+    *,
+    hub_host,
+    hub_port,
+    timeout: float,
+    latency: float,
+    unix_prefix: str,
+    molecules_per_bridge: Optional[int],
+    bridges: list,
+) -> dict:
+    """
+    Build one aggregation manifest payload.
+
+    This is the single place that defines the manifest schema shared by
+    :meth:`AggregatedSocketHub.init_remote_bridges`, the aggregated
+    susceptibility hub's ``bridge_info``, and the on-disk manifest consumed by
+    :func:`run_bridge_node`. On disk the keys are written alphabetically
+    (:func:`_write_manifest` uses ``sort_keys=True``).
+    """
+
+    return {
+        "version": AGGREGATION_INFO_VERSION,
+        "hub_host": hub_host,
+        "hub_port": hub_port,
+        "timeout": float(timeout),
+        "latency": float(latency),
+        "unix_prefix": unix_prefix,
+        "molecules_per_bridge": molecules_per_bridge,
+        "bridges": bridges,
+    }
+
+
+def _write_manifest(path: str, payload: dict) -> None:
+    """Write one aggregation manifest to ``path`` as pretty, sorted JSON."""
+
+    with open(os.fspath(path), "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+
 def _load_aggregation_info(info="aggregation.json") -> dict:
     """
     Load one JSON aggregation manifest from disk.
@@ -391,7 +519,7 @@ def run_bridge_node(info="aggregation.json", *, idx: int = 0) -> None:
         pass
     finally:
         try:
-            bridge.stop(wait=max(2.0, 10.0 * bridge.latency))
+            bridge.stop(wait=_stop_grace(bridge.latency))
         except Exception:
             pass
 
@@ -648,7 +776,7 @@ class AggregatedSocketHub(SocketHub):
         self._bridge_connect_host = (
             "127.0.0.1" if host in (None, "", "0.0.0.0") else str(host)
         )
-        self._bridge_connect_port = int(port or 31415)
+        self._bridge_connect_port = int(port or _DEFAULT_PORT)
         self._owned_bridges: list[AggregatedBridge] = []
         self._bridge_counter = 0
         self.remote_bridges: list[RemoteBridgeSpec] = []
@@ -788,18 +916,16 @@ class AggregatedSocketHub(SocketHub):
                 )
             )
 
-        payload = {
-            "version": AGGREGATION_INFO_VERSION,
-            "hub_host": self._bridge_connect_host,
-            "hub_port": self._bridge_connect_port,
-            "timeout": float(self.timeout),
-            "latency": float(self.latency),
-            "unix_prefix": prefix,
-            "molecules_per_bridge": molecules_per_group,
-            "bridges": [spec.to_dict() for spec in specs],
-        }
-        with open(os.fspath(save_file), "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        payload = _aggregation_manifest(
+            hub_host=self._bridge_connect_host,
+            hub_port=self._bridge_connect_port,
+            timeout=self.timeout,
+            latency=self.latency,
+            unix_prefix=prefix,
+            molecules_per_bridge=molecules_per_group,
+            bridges=[spec.to_dict() for spec in specs],
+        )
+        _write_manifest(save_file, payload)
 
         self.remote_bridges = list(specs)
         self.remote_bridge_info = payload
@@ -1013,7 +1139,9 @@ class AggregatedSocketHub(SocketHub):
 
         group = self._groups[group_id]
         group.bridge = st
-        st.molecule_id = group.molecule_ids[0] if group.molecule_ids else -1
+        st.molecule_id = (
+            group.molecule_ids[0] if group.molecule_ids else _UNBOUND_MOLECULE_ID
+        )
         st.initialized = False
         st.extras["aggregate_group"] = group_id
         self.clients[group_id] = st
@@ -1128,7 +1256,9 @@ class AggregatedSocketHub(SocketHub):
 
         for st_key, st in self._snapshot_unbound_clients(identified=False):
             try:
-                msg = _recv_msg_with_timeout(st.sock, max(self.latency, 0.05))
+                msg = _recv_msg_with_timeout(
+                    st.sock, max(self.latency, _HELLO_POLL_FLOOR_S)
+                )
             except socket.timeout:
                 continue
             except (RuntimeError, _SocketClosed, OSError):
@@ -1237,7 +1367,9 @@ class AggregatedSocketHub(SocketHub):
             Also require that each backing bridge completed its AGGINIT
             handshake.
         timeout : float or None, optional
-            Maximum time to wait (seconds). Uses the hub default if ``None``.
+            Maximum time to wait (seconds). When ``None`` (the default) this
+            method waits indefinitely — the hub-wide ``self.timeout`` is *not*
+            applied here (matching the base-class behavior).
 
         Returns
         -------
@@ -1399,15 +1531,11 @@ class AggregatedSocketHub(SocketHub):
         if remaining <= 0.0:
             return None
 
-        old_timeout = st.sock.gettimeout()
         try:
-            st.sock.settimeout(max(0.0, remaining))
-            group_responses = group.result_codec.recv(st.sock)
+            group_responses = group.recv_result(deadline)
         except (socket.timeout, RuntimeError, _SocketClosed, OSError):
             self._mark_group_dead(group_id, reason="recv")
             return None
-        finally:
-            st.sock.settimeout(old_timeout)
 
         actual = set(group_responses.keys())
         if actual != expected_ids:
@@ -1488,7 +1616,9 @@ class AggregatedSocketHub(SocketHub):
                 return {}
 
             try:
-                events = self._bridge_selector.select(timeout=min(remaining, 1.0))
+                events = self._bridge_selector.select(
+                    timeout=min(remaining, _SELECT_CAP_S)
+                )
             except OSError:
                 return {}
             if not events:
@@ -1575,7 +1705,7 @@ class AggregatedSocketHub(SocketHub):
             elapses.
         """
 
-        deadline = time.time() + max(2.0, 10.0 * self.latency)
+        deadline = time.time() + _stop_grace(self.latency)
         while time.time() < deadline:
             remaining_alive = False
             for _group_id, st, _molecule_ids in group_clients:
@@ -1661,7 +1791,7 @@ class AggregatedSocketHub(SocketHub):
 
         for handle in owned_bridges:
             try:
-                handle.stop(wait=max(2.0, 10.0 * self.latency))
+                handle.stop(wait=_stop_grace(self.latency))
             except Exception:
                 pass
 

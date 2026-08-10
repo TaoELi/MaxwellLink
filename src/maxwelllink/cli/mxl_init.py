@@ -5,7 +5,8 @@
 # See AGENTS.md and README.md for details.                                             #
 # --------------------------------------------------------------------------------------#
 
-"""Initialize local MaxwellLink workspace links for agent workflows.
+"""
+Initialize local MaxwellLink workspace links for agent workflows.
 
 This module provides the implementation behind ``mxl-init`` and ``mxl init``.
 """
@@ -36,28 +37,15 @@ _REQUIRED_PAYLOAD_ITEMS = (
 
 
 def _path_exists(path: Path) -> bool:
-    """Return whether a path exists, including symlink entries.
-
-    Parameters
-    ----------
-    path : pathlib.Path
-        Path to inspect.
-
-    Returns
-    -------
-    bool
-        ``True`` when the target exists or is a symlink.
+    """
+    Return whether a path exists, including broken symlink entries.
     """
     return path.exists() or path.is_symlink()
 
 
 def _remove_path(path: Path) -> None:
-    """Remove a file, symlink, or directory path.
-
-    Parameters
-    ----------
-    path : pathlib.Path
-        Path to remove.
+    """
+    Remove a file, symlink, or directory path.
 
     Raises
     ------
@@ -74,85 +62,71 @@ def _remove_path(path: Path) -> None:
 
 
 def _global_hpc_profile_path() -> Path:
-    """Return the user-global HPC profile path.
-
-    Returns
-    -------
-    pathlib.Path
-        Path to ``~/.maxwelllink/HPC_PROFILE.json``.
     """
-    home = Path(os.path.expanduser("~"))
-    return home / ".maxwelllink" / _HPC_PROFILE_FILE
-
-
-def _default_hpc_profile_path(payload_root: Path) -> Path:
-    """Return the default HPC profile path from the payload.
-
-    Parameters
-    ----------
-    payload_root : pathlib.Path
-        Workspace payload root.
-
-    Returns
-    -------
-    pathlib.Path
-        Path to payload ``HPC_PROFILE.json``.
+    Return the user-global HPC profile path (``~/.maxwelllink/HPC_PROFILE.json``).
     """
-    return payload_root / _HPC_PROFILE_FILE
+    return Path.home() / ".maxwelllink" / _HPC_PROFILE_FILE
 
 
 def _ensure_global_hpc_profile(payload_root: Path) -> Path:
-    """Ensure a persistent user-global HPC profile exists.
+    """
+    Ensure a persistent user-global HPC profile exists.
+
+    The profile is copied from ``payload_root`` on first use and reused
+    afterwards.
 
     Parameters
     ----------
     payload_root : pathlib.Path
-        Workspace payload root containing default ``HPC_PROFILE.json``.
+        Workspace payload root containing the default ``HPC_PROFILE.json``.
 
     Returns
     -------
     pathlib.Path
-        Path to user-global ``HPC_PROFILE.json``.
+        Path to the user-global ``HPC_PROFILE.json``.
     """
     global_profile = _global_hpc_profile_path()
     if global_profile.exists():
         return global_profile
 
-    default_profile = _default_hpc_profile_path(payload_root)
     global_profile.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(default_profile, global_profile)
+    shutil.copy2(payload_root / _HPC_PROFILE_FILE, global_profile)
     return global_profile
 
 
 def _slurm_available() -> bool:
-    """Return whether SLURM's ``sbatch`` command is available.
-
-    Returns
-    -------
-    bool
-        ``True`` when ``sbatch`` is found on ``PATH``.
+    """
+    Return whether SLURM's ``sbatch`` command is available on ``PATH``.
     """
     return shutil.which("sbatch") is not None
 
 
 def _is_valid_payload_root(path: Path) -> bool:
-    """Check whether a payload root contains all required items.
-
-    Parameters
-    ----------
-    path : pathlib.Path
-        Candidate payload root.
-
-    Returns
-    -------
-    bool
-        ``True`` if all required files/directories are present.
+    """
+    Return whether a payload root contains all required items.
     """
     return all((path / item).exists() for item in _REQUIRED_PAYLOAD_ITEMS)
 
 
+def _require_valid_payload_root(payload_root: Path) -> None:
+    """
+    Raise if a payload root is missing any required item.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``payload_root`` does not contain every required item.
+    """
+    if not _is_valid_payload_root(payload_root):
+        raise FileNotFoundError(
+            f"Invalid payload root {payload_root}. "
+            f"Expected: {', '.join(_REQUIRED_PAYLOAD_ITEMS)}"
+        )
+
+
 def _resolve_payload_root() -> Path:
-    """Resolve the installed (or local) workspace payload root.
+    """
+    Resolve the installed (or local) workspace payload root.
 
     Returns
     -------
@@ -188,19 +162,8 @@ def _resolve_payload_root() -> Path:
 
 
 def _symlink_matches(target_path: Path, source_path: Path) -> bool:
-    """Check whether a symlink resolves to the expected source path.
-
-    Parameters
-    ----------
-    target_path : pathlib.Path
-        Existing symlink path to validate.
-    source_path : pathlib.Path
-        Expected symlink target.
-
-    Returns
-    -------
-    bool
-        ``True`` if ``target_path`` is a symlink resolving to ``source_path``.
+    """
+    Return whether ``target_path`` is a symlink resolving to ``source_path``.
     """
     if not target_path.is_symlink():
         return False
@@ -208,8 +171,21 @@ def _symlink_matches(target_path: Path, source_path: Path) -> bool:
     return resolved == source_path.resolve()
 
 
+def _is_unmodified_copy(target_path: Path, source_path: Path) -> bool:
+    """
+    Return whether ``target_path`` is a plain file byte-identical to ``source_path``.
+    """
+    return (
+        target_path.is_file()
+        and not target_path.is_symlink()
+        and source_path.is_file()
+        and target_path.read_bytes() == source_path.read_bytes()
+    )
+
+
 def _ensure_copied_file(source_path: Path, target_path: Path, force: bool) -> None:
-    """Ensure a destination file is copied from source.
+    """
+    Ensure a destination file is copied from source.
 
     Parameters
     ----------
@@ -226,11 +202,7 @@ def _ensure_copied_file(source_path: Path, target_path: Path, force: bool) -> No
         If ``target_path`` conflicts and ``force`` is ``False``.
     """
     if _path_exists(target_path):
-        if (
-            target_path.is_file()
-            and not target_path.is_symlink()
-            and target_path.read_bytes() == source_path.read_bytes()
-        ):
+        if _is_unmodified_copy(target_path, source_path):
             return
         if not force:
             raise FileExistsError(
@@ -243,7 +215,8 @@ def _ensure_copied_file(source_path: Path, target_path: Path, force: bool) -> No
 
 
 def _ensure_symlink(source_path: Path, target_path: Path, force: bool) -> None:
-    """Ensure a destination symlink points to the expected source path.
+    """
+    Ensure a destination symlink points to the expected source path.
 
     Parameters
     ----------
@@ -283,7 +256,8 @@ def initialize_workspace(
     payload_root: Path,
     force: bool = False,
 ) -> None:
-    """Initialize a local workspace directory for MaxwellLink agent use.
+    """
+    Initialize a local workspace directory for MaxwellLink agent use.
 
     Parameters
     ----------
@@ -301,11 +275,7 @@ def initialize_workspace(
     FileExistsError
         If conflicts are found and ``force`` is ``False``.
     """
-    if not _is_valid_payload_root(payload_root):
-        raise FileNotFoundError(
-            f"Invalid payload root {payload_root}. "
-            f"Expected: {', '.join(_REQUIRED_PAYLOAD_ITEMS)}"
-        )
+    _require_valid_payload_root(payload_root)
 
     agents_src = payload_root / "AGENTS.md"
     agents_dst = destination / "AGENTS.md"
@@ -330,7 +300,8 @@ def initialize_workspace(
 
 
 def mxl_init_main(argv: list[str] | None = None) -> int:
-    """Run the ``mxl-init`` CLI entry point.
+    """
+    Run the ``mxl-init`` CLI entry point.
 
     Parameters
     ----------
