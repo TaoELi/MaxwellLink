@@ -43,6 +43,7 @@ __all__ = [
     "MeepSimulation",
     "meep_units_helper",
     "Molecule",
+    "MoleculeBatch",
     "SingleModeSimulation",
     "FabryPerotCavity",
     "MultiModeSimulation",
@@ -109,10 +110,12 @@ def __getattr__(name):
 
     if name in {
         "Molecule",
+        "MoleculeBatch",
         "Vector3",
     }:
         from .molecule import (
             Molecule,
+            MoleculeBatch,
             Vector3,
         )
 

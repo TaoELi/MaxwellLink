@@ -17,6 +17,7 @@ __all__ = [
     "update_molecules_no_mpi",
     "update_molecules_no_socket",
     "Molecule",
+    "MoleculeBatch",
     "Vector3",
 ]
 
@@ -69,3 +70,8 @@ def __getattr__(name: str):
         )
 
         return locals()[name]
+
+    if name == "MoleculeBatch":
+        from .molecule_batch import MoleculeBatch
+
+        return MoleculeBatch
