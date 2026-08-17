@@ -19,6 +19,7 @@ __all__ = [
     "RTEhrenfestModel",
     "ASEModel",
     "LorentzBathModel",
+    "MDModel",
     "__drivers__",
 ]
 
@@ -76,6 +77,10 @@ def __getattr__(name: str):
         from .lorentz_bath_model import LorentzBathModel
 
         return LorentzBathModel
+    if name == "MDModel":
+        from .md_model import MDModel
+
+        return MDModel
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -143,4 +148,5 @@ __drivers__: Dict[str, Callable] = {
     "rtehrenfest": _factory(".rt_ehrenfest_model:RTEhrenfestModel"),
     "ase": _factory(".ase_model:ASEModel"),
     "lorentz_bath": _factory(".lorentz_bath_model:LorentzBathModel"),
+    "md": _factory(".md_model.md_model:MDModel"),
 }

@@ -265,3 +265,52 @@ def test_batch_bridge_amps_only_omits_extra_json(backend):
         amp_ref = np.asarray(model.commit_step(), dtype=float)
         np.testing.assert_allclose(responses[mid]["amp"], amp_ref, rtol=0.0, atol=1e-12)
     bridge._teardown()
+
+
+# --------------------------------------------------------------------------- #
+# Device path: the numba.cuda kernel matches the CPU reference (GPU-only)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.optional
+def test_gpu_sho_kernel_matches_cpu_reference():
+    """
+    The fused numba.cuda kernel (xp=cupy) reproduces the NumPy reference.
+    """
+
+    cp = pytest.importorskip("cupy")
+    pytest.importorskip("numba")
+    try:
+        if cp.cuda.runtime.getDeviceCount() < 1:
+            pytest.skip("No CUDA device available for the GPU SHO kernel.")
+    except Exception:  # pragma: no cover - CuPy present but no usable driver
+        pytest.skip("No usable CUDA runtime for the GPU SHO kernel.")
+
+    driver_kwargs = {
+        "omega": 0.21,
+        "mu0": 187.0,
+        "orientation": 2,
+        "q_initial": 0.3,
+        "p_initial": -0.15,
+    }
+    dt_au = 0.1
+    n_osc = 1024  # spans many CUDA blocks (128 threads each)
+    mids = list(range(n_osc))
+    field_seq = _field_sequence(mids, driver_kwargs["orientation"], n_steps=200)
+
+    cpu = SHOGPUBatchModel(num=n_osc, driver_kwargs=driver_kwargs, xp=np)
+    gpu = SHOGPUBatchModel(num=n_osc, driver_kwargs=driver_kwargs, xp=cp)
+    cpu.initialize(dt_au, mids)
+    gpu.initialize(dt_au, mids)
+
+    for fields in field_seq:
+        block = np.stack([fields[mid] for mid in mids])
+        ref = cpu.step(block)
+        got = gpu.step(block)
+        for column_ref, column_got in (
+            (ref.amplitude_au, got.amplitude_au),
+            (ref.dipole_half_au, got.dipole_half_au),
+            (ref.dipole_force_au, got.dipole_force_au),
+            (ref.energy_au, got.energy_au),
+        ):
+            np.testing.assert_allclose(column_got, column_ref, rtol=0.0, atol=1e-10)

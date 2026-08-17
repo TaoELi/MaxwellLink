@@ -5,8 +5,25 @@
 # See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
-"""
-GPU-batched simple-harmonic-oscillator (SHO) model built on the scalar ``SHOModel``
+"""GPU-batched simple-harmonic-oscillator (SHO) model built on the scalar ``SHOModel``.
+
+This driver runs one execution path on each backend, behind a single interface:
+
+- **CPU reference** (``xp=numpy``): a vectorized velocity-Verlet step.  It needs
+  no extra dependency, runs on any host (e.g. a laptop without CUDA), and is the
+  readable ground truth used by the test suite.
+- **GPU kernel** (``xp=cupy``): a *fused* ``numba.cuda.jit`` kernel that gives
+  **one GPU thread to each oscillator**.  Every thread advances its own
+  oscillator with the same equations of motion, entirely in registers, in a
+  single kernel launch.
+
+The GPU path is the pattern to copy when writing a more complicated batched
+driver (for example, molecular dynamics): put the per-system physics in a
+``@cuda.jit(device=True)`` function and let one thread own one system.  That
+generalizes to force fields with branches and per-atom loops, which the
+vectorized whole-array style cannot express cleanly.  The two paths are kept in
+lock-step by :func:`~maxwelllink...test_gpu_batch_sho`, which pins both to the
+scalar :class:`SHOModel` to float64 tolerance.
 """
 
 import numpy as np
@@ -17,6 +34,126 @@ from .base import BatchStepResult, DummyBatchModel
 # Flags whose per-oscillator side effects (checkpoint files, log streams) defeat
 # batching; rejected for the GPU backend in this first implementation.
 _UNSUPPORTED_GPU_FLAGS = ("checkpoint", "restart", "verbose")
+
+# Threads per block for the CUDA launch.  A multiple of the warp size (32); 128
+# is a solid default that keeps the GPU busy without heavy register pressure.
+_THREADS_PER_BLOCK = 128
+
+# The fused kernel is compiled once per process and cached here, so creating many
+# batch models never recompiles it.
+_STEP_KERNEL = None
+
+# ``numba.cuda`` is an optional dependency, so it is imported lazily by
+# :func:`_load_cuda` and stored in this MODULE GLOBAL.  Keeping it global (rather
+# than a local/closure variable) matters: the compiled kernel then refers to
+# ``cuda`` by a global name, which is what lets the very same kernel also run
+# under numba's CUDA simulator (``NUMBA_ENABLE_CUDASIM=1``) for laptop debugging.
+cuda = None
+
+
+def _load_cuda():
+    """Import ``numba.cuda`` lazily, raising a clear error if numba is absent.
+
+    Returns
+    -------
+    module
+        The ``numba.cuda`` module (also cached in the module global ``cuda``).
+
+    Raises
+    ------
+    ImportError
+        If numba (or its CUDA target) cannot be imported.
+    """
+
+    global cuda
+    if cuda is None:
+        try:
+            from numba import cuda as numba_cuda
+        except Exception as exc:  # ImportError, or a numba/CUDA runtime failure
+            raise ImportError(
+                "The GPU SHO backend requires numba for its CUDA kernel. Install "
+                "it alongside CuPy, e.g. 'pip install maxwelllink[gpu-cuda12]'. On "
+                "hosts without CUDA, inject xp=numpy to run the CPU reference."
+            ) from exc
+        cuda = numba_cuda
+    return cuda
+
+
+def _build_step_kernel():
+    """Compile (once) and return the fused velocity-Verlet CUDA kernel.
+
+    The kernel launches one GPU thread per oscillator.  The per-oscillator
+    physics lives in a small ``device`` function so that heavier drivers can
+    reuse the same structure -- a thin kernel that indexes one system, plus a
+    device function that advances it.
+
+    Returns
+    -------
+    numba.cuda.dispatcher.CUDADispatcher
+        The compiled ``step_kernel`` ready to launch with ``kernel[blocks, tpb]``.
+    """
+
+    global _STEP_KERNEL
+    if _STEP_KERNEL is not None:
+        return _STEP_KERNEL
+
+    _load_cuda()  # populates the module-global ``cuda`` the kernel closes over
+
+    @cuda.jit(device=True)
+    def advance_one_oscillator(q, p, acc, drive, omega_sq, dt):
+        """Advance ONE oscillator by a single velocity-Verlet step.
+
+        Mirrors :meth:`SHOModel.propagate` line by line, so the batched result
+        matches the scalar driver.  Returns the updated state together with the
+        half-step momentum/position used for the source amplitude and dipole.
+        """
+
+        p = p + 0.5 * acc * dt  # momentum to the half step
+        q = q + p * dt  # position to the full step
+        acc = -omega_sq * q + drive  # force at the field (force) time
+        p = p + 0.5 * acc * dt  # momentum to the full step
+        p_half = p + 0.5 * acc * dt  # momentum half a step later (dmu/dt)
+        q_half = q + 0.5 * p_half * dt  # position half a step later (dipole)
+        return q, p, acc, p_half, q_half
+
+    @cuda.jit
+    def step_kernel(
+        q,
+        p,
+        acc,
+        field,
+        omega_sq,
+        mu0,
+        orientation,
+        dt,
+        amp,
+        mu_half,
+        mu_force,
+        energy,
+    ):
+        """One thread per oscillator: advance it and write its outputs.
+
+        Off-axis output columns are left untouched (they were zero-initialized
+        and only the driving ``orientation`` column ever changes), exactly like
+        the scalar and CPU-reference paths.
+        """
+
+        i = cuda.grid(1)  # global thread index == oscillator index
+        if i < q.shape[0]:
+            drive = mu0 * field[i, orientation]
+            q_new, p_new, acc_new, p_half, q_half = advance_one_oscillator(
+                q[i], p[i], acc[i], drive, omega_sq, dt
+            )
+            q[i] = q_new
+            p[i] = p_new
+            acc[i] = acc_new
+            amp[i, orientation] = mu0 * p_half  # dmu/dt   (source amplitude)
+            mu_half[i, orientation] = mu0 * q_half  # dipole half a step later
+            mu_force[i, orientation] = mu0 * q_new  # dipole at the force time
+            energy[i] = 0.5 * omega_sq * q_half * q_half + 0.5 * p_half * p_half
+
+    _STEP_KERNEL = step_kernel
+    return _STEP_KERNEL
 
 
 class SHOGPUBatchModel(DummyBatchModel):
@@ -30,7 +167,9 @@ class SHOGPUBatchModel(DummyBatchModel):
     driver_kwargs : mapping
         Keyword arguments for the template :class:`SHOModel`.
     xp : module
-        Array module exposing the NumPy API (``numpy`` or ``cupy``).
+        Array module exposing the NumPy API (``numpy`` or ``cupy``).  ``cupy``
+        selects the fused ``numba.cuda.jit`` kernel; ``numpy`` selects the
+        vectorized CPU reference.
     driver_args : sequence, optional
         Positional arguments for the template :class:`SHOModel`, forwarded
         exactly as ``mxl_driver``/``mxl_bridge`` forward bare ``--param`` tokens.
@@ -89,11 +228,15 @@ class SHOGPUBatchModel(DummyBatchModel):
         self.dt = 0.0  # shared time step in a.u.
         self.t = 0.0  # current time in a.u.
         self.molecule_ids = ()  # molecule IDs, set in initialize()
-        self.q = self.p = self.acc = None  # oscillator state, allocated in initialize()
+        self.q = self.p = self.acc = None  # oscillator state, set in initialize()
+        self._on_gpu = False  # True when xp is CuPy (use the CUDA kernel)
+        self._kernel = None  # compiled numba kernel, built in initialize()
 
     def initialize(self, dt_au, molecule_ids):
         """
         Allocate the contiguous oscillator state and output buffers.
+
+        On a CuPy backend this also compiles the fused CUDA kernel once.
 
         Parameters
         ----------
@@ -118,6 +261,10 @@ class SHOGPUBatchModel(DummyBatchModel):
         self.dt = float(dt_au)
         self.t = 0.0
 
+        # Backend choice: CuPy means a real CUDA device (use the fused kernel);
+        # NumPy means a CUDA-less host (use the vectorized CPU reference).
+        self._on_gpu = getattr(xp, "__name__", "") == "cupy"
+
         # oscillator state (num,); acceleration starts at 0, matching SHOModel
         self.q = xp.full(n, self.q0, dtype=xp.float64)
         self.p = xp.full(n, self.p0, dtype=xp.float64)
@@ -129,13 +276,17 @@ class SHOGPUBatchModel(DummyBatchModel):
         self._mu_force = xp.zeros((n, 3), dtype=xp.float64)
         self._energy = xp.zeros(n, dtype=xp.float64)
 
+        # Compile the CUDA kernel once, only when actually on a GPU (this also
+        # imports numba and populates the module-global ``cuda``).
+        self._kernel = _build_step_kernel() if self._on_gpu else None
+
     def step(self, efield_au):
         """
         Advance every oscillator by one velocity-Verlet step.
 
-        Reproduces :meth:`SHOModel.propagate` verbatim, but vectorized across
-        all oscillators, so results match the scalar driver to float64
-        tolerance.
+        Dispatches to the fused CUDA kernel on a CuPy backend, or the vectorized
+        NumPy reference on a CPU backend.  Both implement the same equations of
+        motion, so results match the scalar driver to float64 tolerance.
 
         Parameters
         ----------
@@ -158,14 +309,44 @@ class SHOGPUBatchModel(DummyBatchModel):
 
         if self.q is None:
             raise RuntimeError("SHOGPUBatchModel.step() called before initialize().")
-        xp, o, dt = self.xp, self.orientation, self.dt
-        w2, mu0 = self.omega**2, self.mu0
 
+        xp = self.xp
         field = xp.asarray(efield_au, dtype=xp.float64)  # host -> device (one copy)
         if field.shape != (self.num, 3):
             raise ValueError(
                 f"efield_au must have shape ({self.num}, 3); got {tuple(field.shape)}."
             )
+
+        if self._on_gpu:
+            self._step_on_gpu(field)
+        else:
+            self._step_on_cpu(field)
+        self.t += self.dt
+
+        h = self._to_host
+        return BatchStepResult(
+            amplitude_au=h(self._amp),
+            dipole_half_au=h(self._mu_half),
+            dipole_force_au=h(self._mu_force),
+            energy_au=h(self._energy),
+        )
+
+    def _step_on_cpu(self, field):
+        """
+        Vectorized velocity-Verlet reference (NumPy; CUDA-less hosts and tests).
+
+        This is the readable ground truth the CUDA kernel is validated against;
+        the two backends implement the *same* equations of motion in the *same*
+        order (see :meth:`SHOModel.propagate`).
+
+        Parameters
+        ----------
+        field : numpy.ndarray of float, shape (num, 3)
+            Effective electric field vectors in a.u. (already an ``xp`` array).
+        """
+
+        o, dt = self.orientation, self.dt
+        w2, mu0 = self.omega**2, self.mu0
         drive = mu0 * field[:, o]
 
         # EXACT scalar velocity-Verlet order (see SHOModel.propagate).
@@ -175,20 +356,46 @@ class SHOGPUBatchModel(DummyBatchModel):
         self.p += 0.5 * self.acc * dt
         p_half = self.p + 0.5 * self.acc * dt
         q_half = self.q + 0.5 * p_half * dt
-        self.t += dt
 
         self._amp[:, o] = mu0 * p_half  # dmu/dt   (calc_amp_vector)
         self._mu_half[:, o] = mu0 * q_half  # mux_au   (half step)
         self._mu_force[:, o] = mu0 * self.q  # mux_m_au (force time)
         self._energy[:] = 0.5 * w2 * q_half**2 + 0.5 * p_half**2
 
-        h = self._to_host
-        return BatchStepResult(
-            amplitude_au=h(self._amp),
-            dipole_half_au=h(self._mu_half),
-            dipole_force_au=h(self._mu_force),
-            energy_au=h(self._energy),
+    def _step_on_gpu(self, field):
+        """
+        Fused CUDA step: one ``numba.cuda`` thread advances one oscillator.
+
+        The whole velocity-Verlet update and all diagnostics run in a single
+        kernel launch, so each oscillator's state stays in registers for the
+        entire step.  This is the template to extend for heavier batched
+        drivers.
+
+        Parameters
+        ----------
+        field : cupy.ndarray of float, shape (num, 3)
+            Effective electric field vectors in a.u. on the device.  CuPy arrays
+            are passed straight to numba via the CUDA array interface (no copy).
+        """
+
+        blocks = (self.num + _THREADS_PER_BLOCK - 1) // _THREADS_PER_BLOCK
+        self._kernel[blocks, _THREADS_PER_BLOCK](
+            self.q,
+            self.p,
+            self.acc,
+            field,
+            self.omega**2,
+            self.mu0,
+            self.orientation,
+            self.dt,
+            self._amp,
+            self._mu_half,
+            self._mu_force,
+            self._energy,
         )
+        # numba and CuPy may schedule on different CUDA streams; synchronize once
+        # here so the subsequent device->host copies see the finished results.
+        cuda.synchronize()
 
     def append_additional_data(self):
         """
@@ -240,11 +447,13 @@ class SHOGPUBatchModel(DummyBatchModel):
         Notes
         -----
         CuPy frees the underlying device memory once these references are
-        released (and on the next memory-pool collection).
+        released (and on the next memory-pool collection).  The compiled kernel
+        is process-global and intentionally kept for reuse by later models.
         """
 
         self.q = self.p = self.acc = None
         self._amp = self._mu_half = self._mu_force = self._energy = None
+        self._kernel = None
 
     def _to_host(self, array):
         """

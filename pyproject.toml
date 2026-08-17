@@ -70,6 +70,7 @@ include = ["maxwelllink*", "mxl_drivers*"]
 [tool.setuptools.package-data]
 "maxwelllink" = ["_workspace_payload/*", "_workspace_payload/**/*"]
 "maxwelllink.mxl_drivers.lammps" = ["fix_maxwelllink.*", "README.md"]
+"maxwelllink.mxl_drivers.python.models.md_model" = ["*.xyz"]
 
 [project.optional-dependencies]
 dev = [
@@ -81,12 +82,15 @@ dev = [
 # GPU cuda support
 gpu-cuda11 = [
   "cupy-cuda11x>=13",
+  "numba>=0.59",
 ]
 gpu-cuda12 = [
   "cupy-cuda12x>=13",
+  "numba>=0.59",
 ]
 gpu-cuda13 = [
   "cupy-cuda13x>=13",
+  "numba>=0.59",
 ]
 docs = [
   "sphinx>=7.2",
