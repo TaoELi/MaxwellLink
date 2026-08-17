@@ -18,8 +18,10 @@ from .transverse_components import (
     calc_transverse_components_3d,
     project_transverse_field_3d,
 )
+from .fast_json import json_loads
 
 __all__ = [
+    "json_loads",
     "ir_spectrum",
     "rt_tddft_spectrum",
     "lr_tddft_spectrum",
