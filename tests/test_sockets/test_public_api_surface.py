@@ -289,7 +289,10 @@ _SIGNATURE_SNAPSHOT = {
     "get_available_host_port": "(localhost=True, save_to_file=None)",
     "am_master": "()",
     "mpi_bcast_from_master": "(value)",
-    "run_bridge_node": "(info='aggregation.json', *, idx=0)",
+    "run_bridge_node": (
+        "(info='aggregation.json', *, idx=0, backend=None, model=None, "
+        "driver_args=None, driver_kwargs=None, xp=None)"
+    ),
     "mxl_bridge_main": "(argv=None)",
     "lorentzian_to_sho_parameters": "(frequency, sigma, resolution, *, gamma=0.0, dimensions=1, time_units_fs=0.1, mu0_au=187.0819866, orientation=0)",
 }

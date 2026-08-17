@@ -760,6 +760,7 @@ def _send_aggregate_init(
     *,
     group_id: str,
     init_payloads: Mapping[int, dict],
+    result_format: str = "full",
 ) -> None:
     """
     Send group membership plus per-molecule INIT payloads to a bridge.
@@ -773,10 +774,16 @@ def _send_aggregate_init(
     init_payloads : Mapping[int, dict]
         Mapping from molecule ID to its INIT payload. Each payload is copied
         and stamped with its own ``"molecule_id"`` before transmission.
+    result_format : str, default: ``"full"``
+        Result frame the bridge should return: ``"full"`` (amplitude plus the
+        driver's JSON additional data) or ``"amps_only"`` (dmu/dt amplitudes
+        only). Hubs that discard the extra -- e.g. the Meep susceptibility hub
+        -- pass ``"amps_only"`` so batch bridges skip building the JSON.
     """
 
     payload = {
         "group_id": str(group_id),
+        "result_format": str(result_format),
         "molecule_ids": [int(mid) for mid in init_payloads.keys()],
         "init_payloads": {
             str(int(mid)): {**dict(init_payloads[mid]), "molecule_id": int(mid)}

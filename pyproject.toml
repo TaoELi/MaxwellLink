@@ -77,6 +77,16 @@ dev = [
   "flake8>=7.0",
   "pre-commit>=3.6",
 ]
+# GPU cuda support
+gpu-cuda11 = [
+  "cupy-cuda11x>=13",
+]
+gpu-cuda12 = [
+  "cupy-cuda12x>=13",
+]
+gpu-cuda13 = [
+  "cupy-cuda13x>=13",
+]
 docs = [
   "sphinx>=7.2",
   "furo>=2024.1.29",                
