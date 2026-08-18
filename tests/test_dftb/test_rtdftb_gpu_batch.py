@@ -255,6 +255,23 @@ def test_ehrenfest_systems_do_not_share_a_geometry(backend):
 
 
 @pytest.mark.core
+@pytest.mark.parametrize("ehrenfest", [False, True])
+def test_a_batch_of_one_runs_on_the_cpu_backend(ehrenfest):
+    """A batch of one system must be writable on the CPU backend, like any other batch.
+
+    ``spread()`` broadcasts the template state over the batch; for one system the
+    broadcast view is already contiguous, so it must still be copied or the kernels
+    write into a read-only array.
+    """
+    fields = _fields(n_steps=3, num=1)
+    dipole, amplitude, energy, model = _run_batch(np, fields, ehrenfest=ehrenfest)
+    model.close()
+    reference = _scalar_reference(fields, ehrenfest=ehrenfest)
+    assert np.abs(dipole - reference[0]).max() < 1e-13
+    assert np.abs(energy - reference[2]).max() < 1e-12
+
+
+@pytest.mark.core
 def test_reset_dipole_matches_the_scalar_driver():
     """The baseline is captured once and subtracted, exactly as the scalar does."""
 

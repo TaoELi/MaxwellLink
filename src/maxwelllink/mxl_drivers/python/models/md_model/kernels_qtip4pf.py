@@ -314,7 +314,8 @@ def _build_terms(ft, jit, sqrt_, exp_, acos_, rint_, sincos_):
         Returns
         -------
         tuple
-            The nine force components ``(f0x .. f2z)``, then the energy.
+            The nine force components ``(f0x .. f2z)``, then the stretch energy and
+            the bend energy.
         """
 
         i0 = 3 * m
@@ -379,7 +380,7 @@ def _build_terms(ft, jit, sqrt_, exp_, acos_, rint_, sincos_):
         dtheta_dr1 = darg * ((ft(2.0) * r1) * vv - (ft(2.0) * r2) * u) * v2
         dtheta_dr2 = darg * ((ft(2.0) * r2) * vv - (ft(2.0) * r1) * u) * v2
         dtheta_dr3 = darg * ((ft(-2.0) * r3) * vv) * v2
-        v += deb * dang * dang
+        v_bend = deb * dang * dang
         a3 = ft(2.0) * deb * dang
 
         # dV/d(bond length) for each internal coordinate, divided by that length so
@@ -408,6 +409,7 @@ def _build_terms(ft, jit, sqrt_, exp_, acos_, rint_, sincos_):
             -g2y - g3y,
             -g2z - g3z,
             v,
+            v_bend,
         )
 
     return {
@@ -461,7 +463,7 @@ def build_cpu_kernel():
     intramolecular = terms["intramolecular"]
 
     @njit
-    def compute(x, F, efield, sites, fsite, s_re, s_im, q3, kvec, ak, par):
+    def compute(x, F, efield, sites, fsite, s_re, s_im, q3, kvec, ak, par, terms):
         na = x.shape[0]
         nm = na // 3
         nk = kvec.shape[0]
@@ -470,6 +472,8 @@ def build_cpu_kernel():
         potential = 0.0
 
         # bonded terms: each molecule owns its three atoms outright, so they write
+        terms[0] = 0.0
+        terms[1] = 0.0
         for m in range(nm):
             r = intramolecular(m, x, par)
             i0 = 3 * m
@@ -477,7 +481,9 @@ def build_cpu_kernel():
                 F[i0, c] = r[c]
                 F[i0 + 1, c] = r[3 + c]
                 F[i0 + 2, c] = r[6 + c]
-            potential += r[9]
+            terms[0] += r[9]
+            terms[1] += r[10]
+        potential += terms[0] + terms[1]
 
         # charge-site positions, and the external field acting on their charges
         for i in range(na):
@@ -601,19 +607,20 @@ def build_cuda_kernels(n_atoms, n_kvec, threads_per_block=_THREADS_PER_BLOCK):
     intramolecular64 = f64["intramolecular"]
 
     @cuda.jit
-    def k_intra(x, F, potential, par):
-        """Bonded forces and energy of every molecule, in double precision."""
+    def k_intra(x, F, potential, par, terms):
+        """Bonded forces, stretch and bend energies of every molecule, in float64."""
 
         d = cuda.blockIdx.x
         tid = cuda.threadIdx.x
-        block_energy = cuda.shared.array(shape=1, dtype=float64)
-        if tid == 0:
-            block_energy[0] = 0.0
+        block_energy = cuda.shared.array(shape=2, dtype=float64)  # stretch, bend
+        if tid < 2:
+            block_energy[tid] = 0.0
         cuda.syncthreads()
 
         xd = x[d]
         Fd = F[d]
-        energy = 0.0
+        stretch = 0.0
+        bend = 0.0
         for m in range(tid, NM, TPB):
             r = intramolecular64(m, xd, par)
             i0 = 3 * m
@@ -621,11 +628,15 @@ def build_cuda_kernels(n_atoms, n_kvec, threads_per_block=_THREADS_PER_BLOCK):
                 Fd[i0, c] = r[c]
                 Fd[i0 + 1, c] = r[3 + c]
                 Fd[i0 + 2, c] = r[6 + c]
-            energy += r[9]
-        cuda.atomic.add(block_energy, 0, energy)
+            stretch += r[9]
+            bend += r[10]
+        cuda.atomic.add(block_energy, 0, stretch)
+        cuda.atomic.add(block_energy, 1, bend)
         cuda.syncthreads()
         if tid == 0:
-            potential[d] = block_energy[0]
+            terms[d, 0] = block_energy[0]
+            terms[d, 1] = block_energy[1]
+            potential[d] = block_energy[0] + block_energy[1]
 
     @cuda.jit
     def k_nonbonded(x, F, potential, efield, q3, kvec, ak, par, e_self):
@@ -780,6 +791,9 @@ class QTIP4PFForceKernels:
     Compiled q-TIP4P/F forces for a batch of identical systems.
     """
 
+    #: energy terms reported next to the potential, in this column order
+    term_names = ("stretch_au", "bend_au")
+
     def __init__(self, ff, xp, threads_per_block=_THREADS_PER_BLOCK):
         """
         Compile the kernels and upload the constants of one water force field.
@@ -862,6 +876,7 @@ class QTIP4PFForceKernels:
             self.par32 = xp.asarray(par, dtype=xp.float32)
             self.par = xp.asarray(par)  # the bonded kernel stays in float64
             self._efield32 = None  # sized on the first forces_gpu() call
+            self._terms = None  # likewise; used when the caller passes no terms array
         else:
             self.compute = build_cpu_kernel()
             self.q3 = q3
@@ -872,8 +887,9 @@ class QTIP4PFForceKernels:
             self._fsite = np.zeros((na, 3))
             self._s_re = np.zeros(max(self.n_kvec, 1))
             self._s_im = np.zeros(max(self.n_kvec, 1))
+            self._terms = np.zeros(2)  # used when the caller passes no terms array
 
-    def forces_cpu(self, x, F, efield):
+    def forces_cpu(self, x, F, efield, terms=None):
         """
         Evaluate the force and potential of one system.
 
@@ -885,6 +901,8 @@ class QTIP4PFForceKernels:
             Output force array, overwritten in place.
         efield : numpy.ndarray of float, shape (3,)
             Effective electric field in atomic units.
+        terms : numpy.ndarray of float, shape (2,), optional
+            Output stretch and bend energy, in the order of :attr:`term_names`.
 
         Returns
         -------
@@ -892,6 +910,8 @@ class QTIP4PFForceKernels:
             Mechanical potential energy in atomic units (Hartree).
         """
 
+        if terms is None:
+            terms = self._terms
         return self.compute(
             x,
             F,
@@ -904,9 +924,10 @@ class QTIP4PFForceKernels:
             self.kvec,
             self.ak,
             self.par,
+            terms,
         )
 
-    def forces_gpu(self, x, F, potential, efield):
+    def forces_gpu(self, x, F, potential, efield, terms=None):
         """
         Evaluate the force and potential of every system, with two kernel launches.
 
@@ -920,14 +941,21 @@ class QTIP4PFForceKernels:
             Output potential energy of every system.
         efield : cupy.ndarray of float, shape (num, 3)
             Effective electric field of every system in atomic units.
+        terms : cupy.ndarray of float, shape (num, 2), optional
+            Output stretch and bend energy of every system, in the order of
+            :attr:`term_names`.
         """
 
         num = x.shape[0]
         tpb = self.threads_per_block
         if self._efield32 is None:
             self._efield32 = self.xp.zeros((num, 3), dtype=self.xp.float32)
+        if terms is None:
+            if self._terms is None:
+                self._terms = self.xp.zeros((num, 2), dtype=self.xp.float64)
+            terms = self._terms
         self._efield32[:] = efield.astype(self.xp.float32)
-        self.kernels["intra"][num, tpb](x, F, potential, self.par)
+        self.kernels["intra"][num, tpb](x, F, potential, self.par, terms)
         self.kernels["nonbonded"][num, tpb](
             x,
             F,

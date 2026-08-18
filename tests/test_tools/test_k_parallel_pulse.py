@@ -198,7 +198,7 @@ def test_photon_target_needs_no_stored_mode_functions():
     functions, so a cavity built with ``save_mode_functions=False`` must give the
     modes and amplitudes of the definition ``ftilde_k[:, grid, axis] @ source``.
     """
-    stored = _make_cavity(**_LOPSIDED)
+    stored = _make_cavity(save_mode_functions=True, **_LOPSIDED)  # the reference table
     lean = _make_cavity(save_mode_functions=False, **_LOPSIDED)
     assert not hasattr(lean, "ftilde_k")
 
@@ -238,7 +238,7 @@ def test_vortex_seed_projects_like_the_stored_mode_functions():
     projection must still follow the definition and not depend on whether the
     cavity stores its mode functions.
     """
-    stored = _make_cavity(**_LOPSIDED)
+    stored = _make_cavity(save_mode_functions=True, **_LOPSIDED)  # the reference table
     lean = _make_cavity(save_mode_functions=False, **_LOPSIDED)
 
     def build(cavity):

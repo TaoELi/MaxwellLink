@@ -268,6 +268,12 @@ def run_driver(
         else:
             raise RuntimeError(f"Unexpected header: {msg!r}")
 
+    # let the model close what it holds open (e.g. a trajectory file); models written
+    # against an older DummyModel may not have the method
+    close = getattr(driver, "close", None)
+    if callable(close):
+        close()
+
 
 def mxl_driver_main():
     """

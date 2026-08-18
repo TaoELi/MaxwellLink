@@ -252,6 +252,9 @@ class QTIP4PFForceField(DummyForceField):
     # ------------------------------ compiled kernels -------------------------------
     has_compiled_kernels = True
 
+    #: energy terms reported next to the potential: the two bond stretches and the bend
+    term_names = ("stretch_au", "bend_au")
+
     def build_force_kernels(self, xp, threads_per_block=128):
         """
         Return this force field's compiled kernels from :mod:`kernels_qtip4pf`.
@@ -274,7 +277,7 @@ class QTIP4PFForceField(DummyForceField):
         return QTIP4PFForceKernels(self, xp, threads_per_block)
 
     # ---------------------------------force evaluation ----------------------------
-    def compute(self, x, efield):
+    def compute(self, x, efield, terms=None):
         """
         Evaluate the total q-TIP4P/F force and potential energy.
 
@@ -289,6 +292,8 @@ class QTIP4PFForceField(DummyForceField):
             Atomic positions in atomic units (Bohr).
         efield : numpy.ndarray of float, shape (3,)
             Effective electric field ``[E_x, E_y, E_z]`` in atomic units.
+        terms : numpy.ndarray of float, shape (2,), optional
+            Filled with the stretch and the bend energy when given.
 
         Returns
         -------
@@ -303,9 +308,11 @@ class QTIP4PFForceField(DummyForceField):
         potential = 0.0
 
         # (1) intramolecular quartic-Morse stretch + harmonic bend
-        f_intra, v_intra = self._intramolecular(x3)
+        f_intra, v_stretch, v_bend = self._intramolecular(x3)
         forces += f_intra
-        potential += v_intra
+        potential += v_stretch + v_bend
+        if terms is not None:
+            terms[:] = (v_stretch, v_bend)
 
         # (2) Lennard-Jones between oxygens
         if self.n_molecules > 1:
@@ -342,8 +349,10 @@ class QTIP4PFForceField(DummyForceField):
         -------
         forces : numpy.ndarray of float, shape (n_molecules, 3, 3)
             Intramolecular force on each atom in atomic units.
-        potential : float
-            Intramolecular potential energy in atomic units (Hartree).
+        stretch : float
+            Total stretch energy in atomic units (Hartree).
+        bend : float
+            Total bend energy in atomic units (Hartree).
         """
 
         o = x3[:, 0, :]
@@ -401,7 +410,7 @@ class QTIP4PFForceField(DummyForceField):
         forces[:, 1, :] = -g1 + g3  # on H1
         forces[:, 2, :] = -g2 - g3  # on H2
 
-        return forces, float(np.sum(v_stretch + v_bend))
+        return forces, float(np.sum(v_stretch)), float(np.sum(v_bend))
 
     def _lennard_jones(self, xo):
         """

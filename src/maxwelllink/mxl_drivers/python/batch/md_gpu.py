@@ -21,8 +21,9 @@ import os
 
 import numpy as np
 
-from maxwelllink.units import FS_TO_AU
+from maxwelllink.units import FS_TO_AU, K_TO_AU
 from ..models.md_model.md_model import MDModel, _PRE_NVT_FRICTION_FS
+from ..models.md_model.trajectory import TrajectoryRecorder, trajectory_filename
 from .dummy_gpu import BatchStepResult, DummyBatchModel
 
 # Threads per block for the CUDA launches. A multiple of the warp size (32).
@@ -270,12 +271,22 @@ class MDGPUBatchModel(DummyBatchModel):
         self.seed = template.seed
         self.checkpoint = template.checkpoint
         self.restart = template.restart
+        # run-time trajectory output, as the scalar driver configures it; one file for
+        # the whole batch, opened in initialize()
+        self.record_filename = template.record_filename
+        self.record_every_steps = template.record_every_steps
+        self.record_max_steps = template.record_max_steps
+        self.record_names = template.record_names
+        self.n_terms = len(template.ff.term_names)
+        self._recorder = None
+        self._step_index = 0
 
         self.dt = 0.0  # shared time step in a.u.
         self.t = 0.0  # current time in a.u.
         self.molecule_ids = ()  # molecule IDs, set in initialize()
         self._rngs = ()  # one host generator per molecule, set in initialize()
         self.x = self.p = self.F = None  # system state, set in initialize()
+        self._terms = None  # (num, n_terms) force-field energy terms of the last forces
         self.c1h = 1.0  # Langevin O half-step scaling
         self.mu_initial = None  # dipole baseline, set in initialize()
         self._on_gpu = False  # True when xp is CuPy (use the CUDA kernels)
@@ -354,6 +365,7 @@ class MDGPUBatchModel(DummyBatchModel):
         self.mass = xp.asarray(mass)
         self.qeff = xp.asarray(qeff)
         self.potential = xp.zeros(n, dtype=xp.float64)
+        self._terms = xp.zeros((n, self.n_terms), dtype=xp.float64)
         self.zero_field = xp.zeros((n, 3), dtype=xp.float64)
         self._amp = xp.zeros((n, 3), dtype=xp.float64)  # dmu/dt
         self._mu_half = xp.zeros((n, 3), dtype=xp.float64)  # mu half a step later
@@ -384,7 +396,7 @@ class MDGPUBatchModel(DummyBatchModel):
         # forces at the starting geometry, as MDModel.initialize() does
         if self._on_gpu:
             self.force_kernels.forces_gpu(
-                self.x, self.F, self.potential, self.zero_field
+                self.x, self.F, self.potential, self.zero_field, self._terms
             )
         else:
             self._forces_on_cpu(self.zero_field)
@@ -403,6 +415,21 @@ class MDGPUBatchModel(DummyBatchModel):
             else:
                 self.mu_initial = xp.zeros((n, 3), dtype=xp.float64)
 
+        if self.record_filename is not None:
+            self._recorder = TrajectoryRecorder(
+                trajectory_filename(self.record_filename, self.molecule_ids[0]),
+                self.record_names,
+                self.molecule_ids,
+                self.dt,
+                record_every_steps=self.record_every_steps,
+                record_max_steps=self.record_max_steps,
+                append=bool(self.restart and self.checkpoint),
+            )
+            print(
+                f"[MDGPUBatchModel] Recording {self.record_names} to "
+                f"{self._recorder.path}"
+            )
+
     # ----------------------- one FDTD step under E-field ----------------------------
 
     def _forces_on_cpu(self, efield):
@@ -417,7 +444,10 @@ class MDGPUBatchModel(DummyBatchModel):
 
         for d in range(self.num):
             self.potential[d] = self.force_kernels.forces_cpu(
-                self.x[d], self.F[d], np.ascontiguousarray(efield[d], dtype=float)
+                self.x[d],
+                self.F[d],
+                np.ascontiguousarray(efield[d], dtype=float),
+                self._terms[d],
             )
 
     def _step_on_cpu(self, efield, c1h, noise):
@@ -504,7 +534,9 @@ class MDGPUBatchModel(DummyBatchModel):
             self.rng_states,
             thermostat,
         )
-        self.force_kernels.forces_gpu(self.x, self.F, self.potential, efield)
+        self.force_kernels.forces_gpu(
+            self.x, self.F, self.potential, efield, self._terms
+        )
         self.kernels["post"][self.num, _THREADS_PER_BLOCK](
             self.x,
             self.p,
@@ -564,6 +596,20 @@ class MDGPUBatchModel(DummyBatchModel):
         self.t += self.dt
 
         h = self._to_host
+        # the trajectory record, as MDModel takes it: T = 2 K / (3 N k_B) with
+        # K = E - U the kinetic energy at the force time, E, then the force field's terms
+        self._step_index += 1
+        if (
+            self._recorder is not None
+            and self._step_index % self.record_every_steps == 0
+        ):
+            energy, potential = h(self._energy), h(self.potential)
+            temperature = 2.0 * (energy - potential) / (3.0 * self.na) / K_TO_AU
+            self._recorder.record(
+                self._step_index,
+                self.t,
+                np.column_stack((temperature, energy, h(self._terms))),
+            )
         return BatchStepResult(
             amplitude_au=h(self._amp),
             dipole_half_au=h(self._mu_half),
@@ -776,7 +822,11 @@ class MDGPUBatchModel(DummyBatchModel):
 
         if self.x is not None and self.checkpoint:
             self.save_checkpoint()
+        if self._recorder is not None:
+            self._recorder.close()
+            self._recorder = None
         self.x = self.p = self.F = None
+        self._terms = None
         self._amp = self._mu_half = self._mu_force = self._energy = None
         self.mu_initial = None
         self.potential = None

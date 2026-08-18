@@ -126,6 +126,10 @@ class DummyForceField:
     #: whether this force field provides compiled (numba) kernels
     has_compiled_kernels = False
 
+    #: names of the per-system energy terms the force field reports next to the
+    #: potential, e.g. ``("stretch_au", "bend_au")``; empty when it reports none
+    term_names = ()
+
     def build_force_kernels(self, xp, threads_per_block=128):
         """
         Return the compiled force evaluator of this force field.
@@ -154,7 +158,7 @@ class DummyForceField:
             f"compute() path is available for it."
         )
 
-    def compute_fast(self, x, efield):
+    def compute_fast(self, x, efield, terms=None):
         """
         Evaluate the force and potential with the compiled (numba) kernels.
 
@@ -168,6 +172,8 @@ class DummyForceField:
             Atomic positions in atomic units (Bohr).
         efield : numpy.ndarray of float, shape (3,)
             Effective electric field ``[E_x, E_y, E_z]`` in atomic units.
+        terms : numpy.ndarray of float, shape (len(term_names),), optional
+            Filled with the energy terms of :attr:`term_names` when given.
 
         Returns
         -------
@@ -184,10 +190,11 @@ class DummyForceField:
             np.ascontiguousarray(x, dtype=float),
             self._forces,
             np.ascontiguousarray(efield, dtype=float).reshape(3),
+            terms,
         )
         return self._forces, float(potential)
 
-    def compute(self, x, efield):
+    def compute(self, x, efield, terms=None):
         """
         Evaluate the total force and potential energy for a geometry and field.
 
@@ -206,6 +213,8 @@ class DummyForceField:
             Atomic positions in atomic units (Bohr).
         efield : numpy.ndarray of float, shape (3,)
             Effective electric field ``[E_x, E_y, E_z]`` in atomic units.
+        terms : numpy.ndarray of float, shape (len(term_names),), optional
+            Filled with the energy terms of :attr:`term_names` when given.
 
         Returns
         -------

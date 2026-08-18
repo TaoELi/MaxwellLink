@@ -14,8 +14,7 @@ the initial conditions (geometry and density matrix); only the field, and with
 
 This driver runs one execution path on each backend:
 
-- **GPU kernel** (``xp=cupy``): one thread per system, calling the same scalar-loop
-  device functions the CPU path compiles.
+- **GPU** (``xp=cupy``): one thread per system with cuda optimization.
 - **CPU reference** (``xp=numpy``): the same compiled physics through ``numba.njit``.
 """
 
@@ -29,8 +28,11 @@ from ..models.rtdftb_model.rtdftb_model import RTDFTBModel
 from ..models.rtdftb_model.scc import scf
 from .dummy_gpu import BatchStepResult, DummyBatchModel
 
-# Threads per block for the CUDA launch. A multiple of the warp size (32).
+# Threads per block for the CUDA launches. A multiple of the warp size (32).
 _THREADS_PER_BLOCK = 128
+
+# Below this batch size S^-1 is inverted one system at a time through cuSOLVER
+_INVERSE_BATCH_MIN = 16
 
 # Additional-data field names, in the component order the dipole arrays hold.
 _HALF_DIPOLE_KEYS = ("mux_au", "muy_au", "muz_au")
@@ -51,7 +53,7 @@ _N_INTERPOLATION = 8
 _State = namedtuple(
     "_State",
     "rho rho_old coupling q_orb dq_atom dq_shell v_scc_shell v_shell v_orb h "
-    "work_a work_b work_c",
+    "work_a work_b work_c energy_start e_kin",
 )
 _Shared = namedtuple(
     "_Shared",
@@ -76,26 +78,33 @@ _Scratch = namedtuple(
     "density product weight_e weight gradient pair work_r pivot",
 )
 
-# The step kernels are compiled once per process and cached here, keyed by whether the
+#: The per-thread stages of one step. ``geometry`` and ``force`` exist only when the
+#: nuclei move; the dense linear algebra between the stages is CuPy's.
+_Stages = namedtuple("_Stages", "pre geometry post force")
+
+# The stage kernels are compiled once per process and cached here, keyed by whether the
 # nuclei move.
 _STEP_KERNELS = {}
 
 
-def _build_step_kernel(ehrenfest):
-    """Compile (once) and return the fused RT-TDDFTB CUDA kernel.
+def _build_stage_kernels(ehrenfest):
+    """Compile (once) and return the per-thread stage kernels of one RT-TDDFTB step.
 
-    The kernel is one ``doTdStep`` per thread, assembled from the device builds of the
-    validated scalar kernels.
+    Each stage is one slice of ``doTdStep`` per thread, assembled from the device builds
+    of the validated scalar kernels. The step is cut where its dense linear algebra
+    sits, so that the host can hand those products to cuBLAS/cuSOLVER for the whole
+    batch: a lone thread multiplying ``n_orb x n_orb`` matrices is the slowest thing a
+    GPU can do, and for medium-sized molecules it was most of the step.
 
     Parameters
     ----------
     ehrenfest : bool
-        Whether the nuclei move, which decides which of the two kernels is built.
+        Whether the nuclei move, which decides which stages are built.
 
     Returns
     -------
-    numba.cuda.dispatcher.CUDADispatcher
-        The compiled kernel, ready to launch with ``kernel[blocks, tpb]``.
+    _Stages
+        The compiled kernels, ready to launch with ``kernel[blocks, tpb]``.
 
     Raises
     ------
@@ -125,7 +134,6 @@ def _build_step_kernel(ehrenfest):
     scc_potential = d["scc_potential"]
     scc_hamiltonian = d["scc_hamiltonian"]
     external_potential = d["external_potential"]
-    leapfrog_step = d["leapfrog_step"]
     rt_orbital_charges = d["rt_orbital_charges"]
     atom_charges = d["atom_charges"]
     shell_charges_from_orbital = d["shell_charges_from_orbital"]
@@ -134,13 +142,11 @@ def _build_step_kernel(ehrenfest):
     external_energy = d["external_energy"]
     build_h0_overlap_kernel = d["build_h0_overlap_kernel"]
     build_gamma = d["build_gamma"]
-    lu_invert = d["lu_invert"]
     repulsive_sum = d["repulsive_sum"]
     coupling_kernel = d["coupling_kernel"]
     nuclear_step = d["nuclear_step"]
     kinetic_sum = d["kinetic_sum"]
     real_part = d["real_part"]
-    energy_weighted_density = d["energy_weighted_density"]
     overlap_weight = d["overlap_weight"]
     band_gradient_kernel = d["band_gradient_kernel"]
     gamma_gradient_kernel = d["gamma_gradient_kernel"]
@@ -206,9 +212,76 @@ def _build_step_kernel(ehrenfest):
             out.mu_end[i, k] = end
         out.energy[i] = 0.5 * (energy_start + energy_end)
 
+    if not ehrenfest:
+
+        @cuda.jit
+        def k_pre(st, sh, gm, field):
+            """``H(t)`` and the energy at ``t`` of ONE system, at the fixed geometry."""
+
+            i = cuda.grid(1)
+            if i >= st.rho.shape[0]:
+                return
+            n_orb = st.rho.shape[1]
+            n_shell = st.dq_shell.shape[1]
+            n_atom = st.dq_atom.shape[1]
+
+            rebuild_h(
+                i, st, sh, gm.coords, gm.h0, gm.overlap, gm.gamma, field, n_orb, n_shell
+            )
+            st.energy_start[i] = total_energy(
+                i,
+                st,
+                st.rho,
+                gm.coords,
+                gm.h0,
+                field,
+                gm.e_repulsive,
+                0.0,
+                n_orb,
+                n_shell,
+                n_atom,
+            )
+
+        @cuda.jit
+        def k_post(st, sh, gm, out, field, dt):
+            """Charges, dipole and energy at ``t + dt`` of ONE system, and its reply."""
+
+            i = cuda.grid(1)
+            if i >= st.rho.shape[0]:
+                return
+            n_orb = st.rho.shape[1]
+            n_shell = st.dq_shell.shape[1]
+            n_atom = st.dq_atom.shape[1]
+            mu = cuda.local.array(3, float64)
+
+            # rho(t+dt) is in rho_old, where the leapfrog products left it
+            recharge(
+                i, st, sh, st.rho_old, gm.overlap, gm.coords, mu, n_orb, n_shell, n_atom
+            )
+            rebuild_h(
+                i, st, sh, gm.coords, gm.h0, gm.overlap, gm.gamma, field, n_orb, n_shell
+            )
+            energy_end = total_energy(
+                i,
+                st,
+                st.rho_old,
+                gm.coords,
+                gm.h0,
+                field,
+                gm.e_repulsive,
+                0.0,
+                n_orb,
+                n_shell,
+                n_atom,
+            )
+            report(i, out, sh, st.energy_start[i], energy_end, mu, dt)
+
+        _STEP_KERNELS[ehrenfest] = _Stages(k_pre, None, k_post, None)
+        return _STEP_KERNELS[ehrenfest]
+
     @cuda.jit
-    def k_step_frozen(st, sh, gm, out, field, step, dt):
-        """One RT-TDDFTB step per thread, at a fixed geometry."""
+    def k_pre(st, sh, gm, nu, sc, field, dt):
+        """Nuclear step, ``H(t)``, energy at ``t`` and ``D(t)`` of ONE system."""
 
         i = cuda.grid(1)
         if i >= st.rho.shape[0]:
@@ -216,71 +289,6 @@ def _build_step_kernel(ehrenfest):
         n_orb = st.rho.shape[1]
         n_shell = st.dq_shell.shape[1]
         n_atom = st.dq_atom.shape[1]
-        mu = cuda.local.array(3, float64)
-
-        rebuild_h(
-            i, st, sh, gm.coords, gm.h0, gm.overlap, gm.gamma, field, n_orb, n_shell
-        )
-        energy_start = total_energy(
-            i,
-            st,
-            st.rho,
-            gm.coords,
-            gm.h0,
-            field,
-            gm.e_repulsive,
-            0.0,
-            n_orb,
-            n_shell,
-            n_atom,
-        )
-
-        # leapfrog_step writes rho(t+dt) into rho_old; the host swaps the two buffers
-        leapfrog_step(
-            st.rho_old[i],
-            st.rho[i],
-            st.h[i],
-            gm.s_inv,
-            st.coupling[i],
-            step,
-            st.work_a[i],
-            st.work_b[i],
-            st.work_c[i],
-            n_orb,
-        )
-
-        recharge(
-            i, st, sh, st.rho_old, gm.overlap, gm.coords, mu, n_orb, n_shell, n_atom
-        )
-        rebuild_h(
-            i, st, sh, gm.coords, gm.h0, gm.overlap, gm.gamma, field, n_orb, n_shell
-        )
-        energy_end = total_energy(
-            i,
-            st,
-            st.rho_old,
-            gm.coords,
-            gm.h0,
-            field,
-            gm.e_repulsive,
-            0.0,
-            n_orb,
-            n_shell,
-            n_atom,
-        )
-        report(i, out, sh, energy_start, energy_end, mu, dt)
-
-    @cuda.jit
-    def k_step_ehrenfest(st, sh, gm, nu, sc, out, field, step, dt):
-        """One RT-TDDFTB-Ehrenfest step per thread: the nuclei move with the density."""
-
-        i = cuda.grid(1)
-        if i >= st.rho.shape[0]:
-            return
-        n_orb = st.rho.shape[1]
-        n_shell = st.dq_shell.shape[1]
-        n_atom = st.dq_atom.shape[1]
-        mu = cuda.local.array(3, float64)
 
         # the integrator consumes a(t) and returns r(t+dt) together with v(t)
         nuclear_step(
@@ -291,7 +299,7 @@ def _build_step_kernel(ehrenfest):
             n_atom,
             nu.velocity[i],
         )
-        e_kin = kinetic_sum(sh.mass, nu.velocity[i], n_atom)
+        st.e_kin[i] = kinetic_sum(sh.mass, nu.velocity[i], n_atom)
 
         rebuild_h(
             i,
@@ -305,7 +313,7 @@ def _build_step_kernel(ehrenfest):
             n_orb,
             n_shell,
         )
-        energy_start = total_energy(
+        st.energy_start[i] = total_energy(
             i,
             st,
             st.rho,
@@ -313,7 +321,7 @@ def _build_step_kernel(ehrenfest):
             gm.h0[i],
             field,
             gm.e_repulsive[i],
-            e_kin,
+            st.e_kin[i],
             n_orb,
             n_shell,
             n_atom,
@@ -341,20 +349,16 @@ def _build_step_kernel(ehrenfest):
                 sc.b_dcore[i],
             ),
         )
-        leapfrog_step(
-            st.rho_old[i],
-            st.rho[i],
-            st.h[i],
-            gm.s_inv[i],
-            st.coupling[i],
-            step,
-            st.work_a[i],
-            st.work_b[i],
-            st.work_c[i],
-            n_orb,
-        )
 
-        # adopt r(t+dt) and rebuild every geometry-dependent matrix there
+    @cuda.jit
+    def k_geometry(st, sh, gm, nu, sc):
+        """Adopt ``r(t+dt)`` and rebuild ``H0``, ``S``, gamma and ``E_rep`` there."""
+
+        i = cuda.grid(1)
+        if i >= st.rho.shape[0]:
+            return
+        n_atom = st.dq_atom.shape[1]
+
         for a in range(n_atom):
             for k in range(3):
                 gm.coords[i, a, k] = nu.coords_next[i, a, k]
@@ -380,11 +384,22 @@ def _build_step_kernel(ehrenfest):
                 sc.h0_y_high[i],
             ),
         )
-        lu_invert(gm.overlap[i], n_orb, sc.work_r[i], sc.pivot[i], gm.s_inv[i])
         build_gamma(gm.coords[i], sh.shell_atom, sh.shell_u, gm.gamma[i])
         gm.e_repulsive[i] = repulsive_sum(
             sh.sk, gm.coords[i], sh.atom_species, n_atom, RepulsiveScratch(sc.pair[i])
         )
+
+    @cuda.jit
+    def k_post(st, sh, gm, sc, out, field, dt):
+        """Charges, dipole, energy and reply at ``t + dt`` of ONE system, and ``Re[rho]``."""
+
+        i = cuda.grid(1)
+        if i >= st.rho.shape[0]:
+            return
+        n_orb = st.rho.shape[1]
+        n_shell = st.dq_shell.shape[1]
+        n_atom = st.dq_atom.shape[1]
+        mu = cuda.local.array(3, float64)
 
         recharge(
             i,
@@ -418,18 +433,24 @@ def _build_step_kernel(ehrenfest):
             gm.h0[i],
             field,
             gm.e_repulsive[i],
-            e_kin,
+            st.e_kin[i],
             n_orb,
             n_shell,
             n_atom,
         )
-        report(i, out, sh, energy_start, energy_end, mu, dt)
-
-        # the Ehrenfest force at r(t+dt), which drives the next nuclear step
+        report(i, out, sh, st.energy_start[i], energy_end, mu, dt)
         real_part(st.rho_old[i], sc.density[i], n_orb)
-        energy_weighted_density(
-            sc.density[i], st.h[i], gm.s_inv[i], sc.product[i], sc.weight_e[i], n_orb
-        )
+
+    @cuda.jit
+    def k_force(st, sh, gm, nu, sc, field):
+        """The Ehrenfest force at ``r(t+dt)`` of ONE system, from the weighted densities."""
+
+        i = cuda.grid(1)
+        if i >= st.rho.shape[0]:
+            return
+        n_shell = st.dq_shell.shape[1]
+        n_atom = st.dq_atom.shape[1]
+
         overlap_weight(sc.density[i], sc.weight_e[i], st.v_orb[i], sc.weight[i])
         for a in range(n_atom):
             for k in range(3):
@@ -476,7 +497,7 @@ def _build_step_kernel(ehrenfest):
                 nu.force[i, a, k] = -sc.gradient[i, a, k]
                 nu.accel[i, a, k] = nu.force[i, a, k] / sh.mass[a]
 
-    _STEP_KERNELS[ehrenfest] = k_step_ehrenfest if ehrenfest else k_step_frozen
+    _STEP_KERNELS[ehrenfest] = _Stages(k_pre, k_geometry, k_post, k_force)
     return _STEP_KERNELS[ehrenfest]
 
 
@@ -550,7 +571,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self.n_atom = 0
         self.n_shell = 0
         self._on_gpu = False
-        self._kernel = None
+        self._kernels = None
         self._bundles = None
         self._field = None
         self._coords = None
@@ -637,7 +658,9 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
             """Copy one system's array into every row of a contiguous batch array."""
 
             batched = np.broadcast_to(np.asarray(array), (num,) + np.shape(array))
-            return xp.asarray(np.ascontiguousarray(batched), dtype=dtype)
+            # np.array, not np.ascontiguousarray: for num == 1 the broadcast view is
+            # already contiguous and would be handed on read-only
+            return xp.asarray(np.array(batched, order="C"), dtype=dtype)
 
         # geometry-dependent matrices: one copy while the nuclei are frozen, one per
         # system once they move and the trajectories diverge
@@ -670,6 +693,9 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._work_a = xp.zeros((num, n, n), dtype=xp.complex128)
         self._work_b = xp.zeros((num, n, n), dtype=xp.complex128)
         self._work_c = xp.zeros((num, n, n), dtype=xp.complex128)
+        # per-system scalars carried from one stage kernel to the next
+        self._energy_start = xp.zeros(num, dtype=xp.float64)
+        self._e_kin = xp.zeros(num, dtype=xp.float64)
 
         # nuclear integrator state, also seeded from the template's bootstrap
         if self.ehrenfest:
@@ -695,7 +721,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._stepped = False
 
         if self._on_gpu:
-            self._kernel = _build_step_kernel(self.ehrenfest)
+            self._kernels = _build_stage_kernels(self.ehrenfest)
         self._bundles = self._build_bundles()
 
     def _allocate_scratch(self):
@@ -859,31 +885,85 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._bundles = tuple(bundles)
 
     def _step_on_gpu(self):
-        """Launch the fused kernel, one thread per system."""
+        """One step of the whole batch: stage kernels around the dense linear algebra.
+
+        The stage kernels run one thread per system; between them CuPy applies the
+        leapfrog products, ``S^-1`` and the energy-weighted density to every system at
+        once through cuBLAS/cuSOLVER. Both libraries queue on the default CUDA stream,
+        which keeps the stages in order; the one synchronization at the end is for the
+        device->host copies of the results.
+        """
 
         from numba import cuda
 
         state, shared, geometry, nuclear, scratch, out, field = self._bundles
         blocks = (self.num + _THREADS_PER_BLOCK - 1) // _THREADS_PER_BLOCK
+        stages, dt = self._kernels, self.dt
         if self.ehrenfest:
-            self._kernel[blocks, _THREADS_PER_BLOCK](
-                state,
-                shared,
-                geometry,
-                nuclear,
-                scratch,
-                out,
-                field,
-                2.0 * self.dt,
-                self.dt,
+            stages.pre[blocks, _THREADS_PER_BLOCK](
+                state, shared, geometry, nuclear, scratch, field, dt
+            )
+            self._leapfrog_on_device(2.0 * dt)
+            stages.geometry[blocks, _THREADS_PER_BLOCK](
+                state, shared, geometry, nuclear, scratch
+            )
+            self._invert_overlap_on_device()
+            stages.post[blocks, _THREADS_PER_BLOCK](
+                state, shared, geometry, scratch, out, field, dt
+            )
+            self._energy_weighted_density_on_device()
+            stages.force[blocks, _THREADS_PER_BLOCK](
+                state, shared, geometry, nuclear, scratch, field
             )
         else:
-            self._kernel[blocks, _THREADS_PER_BLOCK](
-                state, shared, geometry, out, field, 2.0 * self.dt, self.dt
+            stages.pre[blocks, _THREADS_PER_BLOCK](state, shared, geometry, field)
+            self._leapfrog_on_device(2.0 * dt)
+            stages.post[blocks, _THREADS_PER_BLOCK](
+                state, shared, geometry, out, field, dt
             )
-        # numba and CuPy may schedule on different CUDA streams; synchronize once here
-        # so the subsequent device->host copies see the finished results.
         cuda.synchronize()
+
+    def _leapfrog_on_device(self, step):
+        """
+        The leapfrog products of ``rt.leapfrog_step`` for the whole batch, with cuBLAS.
+
+        ``rho(t+dt) = rho(t-dt) - step (T1 rho + rho T1^dagger)`` with
+        ``T1 = S^-1 (D + iH)``, written into ``rho_old`` as the kernel does; the host
+        swaps the two buffers afterwards. ``T1`` is assembled from two real products
+        rather than one complex one, which is half the work.
+        """
+
+        xp = self.xp
+        t1, work_b, work_c = self._work_a, self._work_b, self._work_c
+        xp.multiply(xp.matmul(self._s_inv, self._h), 1j, out=t1)  # i S^-1 H
+        if self.ehrenfest:
+            t1 += xp.matmul(self._s_inv, self._coupling)  # + S^-1 D
+        xp.matmul(t1, self._rho, out=work_b)  # T1 rho
+        xp.conj(t1, out=t1)
+        xp.matmul(self._rho, t1.transpose(0, 2, 1), out=work_c)  # rho T1^dagger
+        work_b += work_c
+        work_b *= step
+        self._rho_old -= work_b
+
+    def _invert_overlap_on_device(self):
+        """``S^-1`` at the new geometry, the LU inverse ``rt.lu_invert`` takes."""
+
+        xp = self.xp
+        if self.num < _INVERSE_BATCH_MIN:
+            for i in range(self.num):
+                self._s_inv[i] = xp.linalg.inv(self._overlap[i])
+        else:
+            self._s_inv[...] = xp.linalg.inv(self._overlap)
+
+    def _energy_weighted_density_on_device(self):
+        """``W = 0.5 (S^-1 H P + P H S^-1)`` as ``ehrenfest.energy_weighted_density``."""
+
+        xp, sc = self.xp, self._scratch
+        product, weight_e = sc.product, sc.weight_e
+        xp.matmul(sc.density, self._h, out=product)  # P H
+        xp.matmul(self._s_inv, product.transpose(0, 2, 1), out=weight_e)
+        weight_e += xp.matmul(product, self._s_inv.transpose(0, 2, 1))
+        weight_e *= 0.5
 
     def _step_on_cpu(self):
         """The same physics through the njit kernels, one system at a time.
@@ -1057,7 +1137,9 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
             "_mu_end",
             "_mu_half",
             "_energy",
-            "_kernel",
+            "_energy_start",
+            "_e_kin",
+            "_kernels",
             "_field",
             "_bundles",
             "_velocity",

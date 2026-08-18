@@ -313,3 +313,18 @@ class DummyModel:
         self._pending_amp = None
         self._have = False
         return amp
+
+    def close(self):
+        """
+        Release what the model holds at the end of a run.
+
+        ``mxl_driver`` calls this once the hub says STOP or the socket closes. The base
+        model holds nothing; subclasses that keep files open (e.g. a trajectory being
+        written) override it.
+
+        Notes
+        -----
+        This method *may be* overridden by subclasses.
+        """
+
+        return None

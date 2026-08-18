@@ -5,11 +5,8 @@
 # See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
-"""Integrated test of the GPU-batched MD driver behind the aggregate socket hub.
-
-This wires the whole production path together -- hub, bridge manifest, ``GPUBatchBridge``,
-``MDGPUBatchModel`` -- and checks that a batch of flexible-CO2 systems drives a cavity
-mode without the total energy drifting.
+"""
+Integrated test of the GPU-batched MD driver behind the aggregate socket hub.
 """
 
 from __future__ import annotations
@@ -87,7 +84,13 @@ def test_md_batch_drives_a_single_mode_cavity(xp_name, tmp_path):
             backend="gpu",
             model="md",
             driver_kwargs=dict(
-                ff="co2jcp2021", thermostat="nve", pre_nvt=False, seed=3
+                ff="co2jcp2021",
+                thermostat="nve",
+                pre_nvt=False,
+                seed=3,
+                # the run-time trajectory, written by the batch and closed at teardown
+                record_filename=str(tmp_path / f"traj_{xp_name}.h5"),
+                record_every_steps=5,
             ),
             xp=xp,
         ),
@@ -128,3 +131,19 @@ def test_md_batch_drives_a_single_mode_cavity(xp_name, tmp_path):
     assert qc.std() > 1e-3, "the cavity mode never responded to the molecules"
     drift = (energy.max() - energy.min()) / max(abs(energy).max(), 1e-30)
     assert drift < 1e-2, f"total energy drift {drift:.2e} is too large"
+
+    # the trajectory file: one column per system, one row every five steps
+    import h5py
+
+    (trajectory,) = list(tmp_path.glob(f"traj_{xp_name}_id_*.h5"))
+    with h5py.File(trajectory, "r") as handle:
+        assert set(handle) >= {
+            "time_au",
+            "temperature_K",
+            "energy_au",
+            "stretch_au",
+            "bend_au",
+            "molecule_ids",
+        }
+        assert handle["energy_au"].shape == (STEPS // 5, N_SYSTEMS)
+        assert np.all(handle["temperature_K"][...] > 0.0)

@@ -20,6 +20,7 @@ import os
 import numpy as np
 
 from maxwelllink.units import FS_TO_AU, K_TO_AU
+from .trajectory import BASE_RECORD_NAMES, TrajectoryRecorder, trajectory_filename
 
 try:
     from ..dummy_model import DummyModel
@@ -68,6 +69,9 @@ class MDModel(DummyModel):
         reset_dipole: bool = True,
         seed: int = 0,
         force_backend: str = "auto",
+        record_filename=None,
+        record_every_steps: int = 10,
+        record_max_steps=None,
         checkpoint: bool = False,
         restart: bool = False,
         verbose: bool = False,
@@ -125,6 +129,13 @@ class MDModel(DummyModel):
             forces the reference implementation. ``'auto'`` picks ``'numba'`` whenever
             the force field provides a compiled-kernel description and silently falls
             back to ``'numpy'`` when it does not.
+        record_filename : str, optional
+            Turns on a run-time trajectory of per-system scalars written to this file every
+            ``record_every_steps`` production steps.
+        record_every_steps : int, default: 10
+            Record every this many production steps.
+        record_max_steps : int, optional
+            Stop recording after this many records; ``None`` for no cap.
         checkpoint : bool, default: False
             Whether to enable checkpointing.
         restart : bool, default: False
@@ -146,6 +157,14 @@ class MDModel(DummyModel):
         self.reset_dipole = bool(reset_dipole)
         self.seed = int(seed)
         self.kT = K_TO_AU * self.temperature_K
+
+        # run-time trajectory output, opened in initialize() once the molecule ID and
+        # the time step are known
+        self.record_filename = None if record_filename is None else str(record_filename)
+        self.record_every_steps = int(record_every_steps)
+        self.record_max_steps = record_max_steps
+        self._recorder = None
+        self._step_index = 0  # production steps taken; not part of the snapshot
 
         # build the force field
         key = str(ff).lower()
@@ -198,6 +217,9 @@ class MDModel(DummyModel):
         self.dipole_force = np.zeros(3)  # mu at force-evaluation position (mu_force)
         self.energy = 0.0  # kinetic + potential
         self.potential = 0.0
+        # the force field's energy terms, filled with every force evaluation
+        self.record_names = BASE_RECORD_NAMES + tuple(self.ff.term_names)
+        self._terms = np.zeros(len(self.ff.term_names))
 
     # ----------------------- heavy-load initialization ------------------------------
     def initialize(self, dt_new, molecule_id):
@@ -240,7 +262,7 @@ class MDModel(DummyModel):
             self.p = np.zeros((self.na, 3))
 
         # forces at the initial geometry
-        self.F, self.potential = self._compute(self.x, np.zeros(3))
+        self.F, self.potential = self._compute(self.x, np.zeros(3), self._terms)
 
         if self.restart and self.checkpoint:
             self._reset_from_checkpoint()
@@ -258,6 +280,25 @@ class MDModel(DummyModel):
             self.mu_initial = (
                 self.ff.dipole(self.x) if self.reset_dipole else np.zeros(3)
             )
+
+        if self.record_filename is not None:
+            self._recorder = TrajectoryRecorder(
+                trajectory_filename(self.record_filename, self.molecule_id),
+                self.record_names,
+                [self.molecule_id],
+                self.dt,
+                record_every_steps=self.record_every_steps,
+                record_max_steps=self.record_max_steps,
+                append=bool(self.restart and self.checkpoint),
+            )
+            print(f"[MDModel] Recording {self.record_names} to {self._recorder.path}")
+
+    def close(self):
+        """Close the trajectory file, if one is being written."""
+
+        if self._recorder is not None:
+            self._recorder.close()
+            self._recorder = None
 
     def _thermostat_half_step(self):
         """
@@ -300,7 +341,7 @@ class MDModel(DummyModel):
                 self._thermostat_half_step()
                 self.p += 0.5 * self.dt * self.F
                 self.x += self.dt * (self.p / self.mass)
-                self.F, self.potential = self._compute(self.x, zero)
+                self.F, self.potential = self._compute(self.x, zero, self._terms)
                 self.p += 0.5 * self.dt * self.F
                 self._thermostat_half_step()
         finally:
@@ -339,7 +380,7 @@ class MDModel(DummyModel):
         # A: full drift of the positions
         self.x += self.dt * (self.p / self.mass)
         # recompute the force at the new geometry with the current field
-        self.F, self.potential = self._compute(self.x, efield)
+        self.F, self.potential = self._compute(self.x, efield, self._terms)
         # B: second half momentum kick
         self.p += 0.5 * self.dt * self.F
 
@@ -360,6 +401,17 @@ class MDModel(DummyModel):
         # O: Langevin half-step, then advance the clock
         self._thermostat_half_step()
         self.t += self.dt
+
+        # the trajectory record: T = 2 K / (3 N k_B) over all 3 N degrees of freedom,
+        # the total energy, then the force field's terms
+        self._step_index += 1
+        if self._recorder is not None:
+            temperature = 2.0 * kinetic / (3.0 * self.na) / K_TO_AU
+            self._recorder.record(
+                self._step_index,
+                self.t,
+                np.concatenate(([temperature, self.energy], self._terms)),
+            )
 
         if self.verbose:
             print(
