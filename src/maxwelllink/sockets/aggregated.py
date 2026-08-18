@@ -115,6 +115,9 @@ class _AggregateGroupState:
         Reusable encoder for outgoing AGGSTEP fan-out frames.
     result_codec : _ResultCodec
         Reusable decoder for incoming AGGRESULT reply frames.
+    columnar : bool
+        Whether this group's bridge was asked for the columnar result
+        frame, which only batch bridges can answer.
     """
 
     group_id: str
@@ -123,6 +126,33 @@ class _AggregateGroupState:
     bridge: Optional[_ClientState] = None
     step_codec: _StepCodec = field(default_factory=_StepCodec)
     result_codec: _ResultCodec = field(default_factory=_ResultCodec)
+    columnar: bool = False
+    _sorted_ids: Optional[np.ndarray] = None
+
+    def sorted_molecule_ids(self, expected_ids) -> np.ndarray:
+        """
+        Return this group's molecule IDs, sorted, as an int32 array.
+
+        Cached because the membership is fixed for the run, so the columnar
+        reply can be validated with one array comparison per step instead of
+        building a set of tens of thousands of Python ints.
+
+        Parameters
+        ----------
+        expected_ids : set[int]
+            Molecule IDs the group serves.
+
+        Returns
+        -------
+        numpy.ndarray of int32, shape (n,)
+            The IDs in ascending order.
+        """
+
+        if self._sorted_ids is None or self._sorted_ids.shape[0] != len(expected_ids):
+            self._sorted_ids = np.sort(
+                np.fromiter(expected_ids, dtype="<i4", count=len(expected_ids))
+            )
+        return self._sorted_ids
 
     # -- channel helpers ---------------------------------------------------
     #
@@ -871,9 +901,15 @@ class AggregatedSocketHub(SocketHub):
         )
         self._groups: Dict[str, _AggregateGroupState] = {}
         self._molecule_to_group: Dict[int, str] = {}
-        # Result frame requested from batch bridges: "full" (amp + JSON extra) or
-        # "amps_only". Subclasses that discard the extra override this.
+        # Result frame requested from batch bridges: "full" (amp + JSON extra),
+        # "amps_only", or "columnar". Subclasses that discard the extra override
+        # this; solvers that want the columnar frame call
+        # ``request_columnar_extras``.
         self._bridge_result_format = "full"
+        self._bridge_extra_keys: tuple[str, ...] = ()
+        # Columnar replies of the last step_barrier, keyed by group id. Empty
+        # unless the columnar result format was negotiated.
+        self.last_columnar: Dict[str, tuple] = {}
         self._bridge_connect_host = (
             "127.0.0.1" if host in (None, "", "0.0.0.0") else str(host)
         )
@@ -1386,6 +1422,7 @@ class AggregatedSocketHub(SocketHub):
                 continue
             with self._lock:
                 st.extras["aggregate_group"] = group_id
+                st.extras["batch_bridge"] = bool(hello.get("batch", False))
 
     def _progress_group_binds(self) -> None:
         """
@@ -1434,12 +1471,20 @@ class AggregatedSocketHub(SocketHub):
         if st is None or not st.alive:
             return False
 
+        # A bridge that fans out to individual drivers cannot pack its reply
+        # into columns, so it keeps receiving the per-molecule frame.
+        result_format = self._bridge_result_format
+        if result_format == "columnar" and not st.extras.get("batch_bridge"):
+            result_format = "full"
+        group.columnar = result_format == "columnar"
+
         try:
             _send_aggregate_init(
                 st.sock,
                 group_id=group_id,
                 init_payloads=init_payloads,
-                result_format=self._bridge_result_format,
+                result_format=result_format,
+                extra_keys=self._bridge_extra_keys,
             )
             msg = _recv_msg_with_timeout(st.sock, self.timeout)
             if msg != AGGREADY:
@@ -1453,6 +1498,27 @@ class AggregatedSocketHub(SocketHub):
                 st.initialized = True
                 return True
         return False
+
+    def request_columnar_extras(self, keys) -> None:
+        """
+        Ask batch bridges for their additional data as one packed block.
+
+        Instead of one JSON document per molecule, a bridge then returns the
+        named fields as an ``(n, len(keys))`` float64 array, which
+        :meth:`step_barrier` leaves in :attr:`last_columnar` rather than in its
+        per-molecule return value. Bridges that serve individual socket drivers
+        ignore the request and keep replying molecule by molecule.
+
+        Call before the bridges bind; the request travels with AGGINIT.
+
+        Parameters
+        ----------
+        keys : sequence of str
+            Additional-data field names, in the column order to receive them.
+        """
+
+        self._bridge_extra_keys = tuple(str(key) for key in keys)
+        self._bridge_result_format = "columnar" if self._bridge_extra_keys else "full"
 
     def wait_until_bound(self, init_payloads: dict, require_init=True, timeout=None):
         """
@@ -1633,6 +1699,9 @@ class AggregatedSocketHub(SocketHub):
         if remaining <= 0.0:
             return None
 
+        if group.columnar:
+            return self._collect_group_columnar(group_id, group, expected_ids, deadline)
+
         try:
             group_responses = group.recv_result(deadline)
         except (socket.timeout, RuntimeError, _SocketClosed, OSError):
@@ -1647,6 +1716,53 @@ class AggregatedSocketHub(SocketHub):
                 f"expected {sorted(expected_ids)}."
             )
         return group_responses
+
+    def _collect_group_columnar(self, group_id, group, expected_ids, deadline):
+        """
+        Receive one group's reply as columns and stash it in ``last_columnar``.
+
+        Parameters
+        ----------
+        group_id : str
+            Aggregate group to read a reply from.
+        group : _AggregateGroupState
+            That group's state, holding the bridge socket and its codec.
+        expected_ids : set[int]
+            Molecule IDs the reply must contain, exactly.
+        deadline : float
+            Absolute ``time.time()`` deadline for the receive.
+
+        Returns
+        -------
+        dict or None
+            An empty mapping on success -- the arrays go to
+            :attr:`last_columnar`, so nothing is built per molecule -- or
+            ``None`` if the bridge died or the deadline passed.
+
+        Raises
+        ------
+        RuntimeError
+            If the bridge returns a molecule-id set other than ``expected_ids``
+            (the group is also marked dead in that case).
+        """
+
+        try:
+            mids, amps, extra_lens, extras = group.recv_result_block(deadline)
+        except (socket.timeout, RuntimeError, _SocketClosed, OSError):
+            self._mark_group_dead(group_id, reason="recv")
+            return None
+
+        if not np.array_equal(np.sort(mids), group.sorted_molecule_ids(expected_ids)):
+            self._mark_group_dead(group_id, reason="protocol")
+            raise RuntimeError(
+                f"Aggregate group {group_id!r} returned molecule ids "
+                f"{sorted(mids.tolist())}, expected {sorted(expected_ids)}."
+            )
+
+        n_keys = len(self._bridge_extra_keys)
+        block = np.frombuffer(extras, dtype=np.float64).reshape(len(mids), n_keys)
+        self.last_columnar[group_id] = (mids, amps, block)
+        return {}
 
     def step_barrier(
         self, requests: Dict[int, dict], timeout: Optional[float] = None
@@ -1687,6 +1803,7 @@ class AggregatedSocketHub(SocketHub):
         if self.paused:
             return {}
 
+        self.last_columnar.clear()
         deadline = self._deadline(timeout)
 
         with self._lock:
@@ -1941,6 +2058,10 @@ class LocalSocketHubBridge:
         If ``group_id`` is empty.
     """
 
+    #: whether one batch driver serves the whole group, announced at HELLO so
+    #: the hub knows which bridges can answer with the columnar result frame
+    serves_batch = False
+
     def __init__(
         self,
         *,
@@ -2171,7 +2292,7 @@ class LocalSocketHubBridge:
             label="aggregated hub",
         )
         self._upstream_sock = sock
-        _send_aggregate_hello(sock, group_id=self.group_id)
+        _send_aggregate_hello(sock, group_id=self.group_id, batch=self.serves_batch)
 
         try:
             while not self._stop_event.is_set():
@@ -2189,7 +2310,7 @@ class LocalSocketHubBridge:
                 elif msg == AGGSTEP:
                     efields = self._step_codec.recv(sock, header_already_read=True)
                     responses = self._run_step(efields)
-                    self._result_codec.send(sock, responses)
+                    self._send_result(sock, responses)
 
                 elif msg == STOP:
                     try:
@@ -2252,6 +2373,25 @@ class LocalSocketHubBridge:
 
         self._teardown()
 
+    def _send_result(self, sock: socket.socket, responses: Mapping[int, dict]) -> None:
+        """
+        Send one AGGRESULT reply upstream.
+
+        Notes
+        -----
+        This method can be *optionally* overridden by subclasses that reply with
+        a block frame instead of one record per molecule.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Upstream connection to the hub.
+        responses : Mapping[int, dict]
+            Per-molecule responses as produced by :meth:`_run_step`.
+        """
+
+        self._result_codec.send(sock, responses)
+
     def _teardown(self) -> None:
         """Stop the downstream local hub; overridden by in-process backends."""
 
@@ -2287,6 +2427,8 @@ class CPUBatchBridge(LocalSocketHubBridge):
     latency : float, default: 0.01
         Polling interval (seconds); used by the caller's stop grace period.
     """
+
+    serves_batch = True
 
     def __init__(
         self,
@@ -2327,6 +2469,7 @@ class CPUBatchBridge(LocalSocketHubBridge):
 
         self._drivers: Dict[int, object] = {}
         self._amps_only = False
+        self._columnar_keys: tuple[str, ...] = ()
         self._upstream_sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -2347,8 +2490,12 @@ class CPUBatchBridge(LocalSocketHubBridge):
                 f"{incoming_group!r}."
             )
 
-        self._amps_only = (
-            str(payload.get("result_format", "full")).strip().lower() == "amps_only"
+        result_format = str(payload.get("result_format", "full")).strip().lower()
+        self._amps_only = result_format == "amps_only"
+        self._columnar_keys = (
+            tuple(payload.get("extra_keys") or ())
+            if result_format == "columnar"
+            else ()
         )
         raw_payloads = payload.get("init_payloads", {})
         if not isinstance(raw_payloads, Mapping) or not raw_payloads:
@@ -2366,6 +2513,7 @@ class CPUBatchBridge(LocalSocketHubBridge):
             model.initialize(float(init_data["dt_au"]), mid)
             drivers[mid] = model
         self._drivers = drivers
+        self._mids = np.fromiter(drivers, dtype="<i4", count=len(drivers))
 
     def _run_step(self, efields: Mapping[int, np.ndarray]) -> Dict[int, dict]:
         """Advance every batched driver by one step and encode the responses."""
@@ -2378,16 +2526,34 @@ class CPUBatchBridge(LocalSocketHubBridge):
                 f"{sorted(actual)}, expected {sorted(expected)}."
             )
 
+        columnar = bool(self._columnar_keys)
+        if columnar:
+            self._amps = np.empty((len(self._drivers), 3))
+            self._columns = np.empty((len(self._drivers), len(self._columnar_keys)))
+
         responses: Dict[int, dict] = {}
-        for mid, model in self._drivers.items():
+        for row, (mid, model) in enumerate(self._drivers.items()):
             model.stage_step(np.asarray(efields[mid], dtype=float).reshape(3))
             amplitude = np.asarray(model.commit_step(), dtype=float).reshape(3)
+            if columnar:
+                data = model.append_additional_data()
+                self._amps[row] = amplitude
+                self._columns[row] = [data[key] for key in self._columnar_keys]
+                continue
             if self._amps_only:
                 responses[mid] = {"amp": amplitude, "extra": b""}
                 continue
             extra = _json_dumps_bytes(model.append_additional_data())
             responses[mid] = {"amp": amplitude, "extra": extra}
         return responses
+
+    def _send_result(self, sock: socket.socket, responses: Mapping[int, dict]) -> None:
+        """Reply with one block frame when the hub asked for columns."""
+
+        if self._columnar_keys:
+            self._result_codec.send_block(sock, self._mids, self._amps, self._columns)
+            return
+        self._result_codec.send(sock, responses)
 
     def _teardown(self) -> None:
         """No downstream hub to stop for the in-process backend."""
@@ -2434,6 +2600,8 @@ class GPUBatchBridge(LocalSocketHubBridge):
         bridge process; tests inject ``numpy`` to run the whole path on a CPU.
     """
 
+    serves_batch = True
+
     def __init__(
         self,
         *,
@@ -2474,6 +2642,7 @@ class GPUBatchBridge(LocalSocketHubBridge):
         self._model = None
         self._ids: tuple[int, ...] = ()
         self._amps_only = False
+        self._columnar_keys: tuple[str, ...] = ()
 
         self._upstream_sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
@@ -2490,8 +2659,12 @@ class GPUBatchBridge(LocalSocketHubBridge):
                 f"Bridge {self.group_id!r} received AGGINIT for group "
                 f"{incoming_group!r}."
             )
-        self._amps_only = (
-            str(payload.get("result_format", "full")).strip().lower() == "amps_only"
+        result_format = str(payload.get("result_format", "full")).strip().lower()
+        self._amps_only = result_format == "amps_only"
+        self._columnar_keys = (
+            tuple(payload.get("extra_keys") or ())
+            if result_format == "columnar"
+            else ()
         )
         raw_payloads = payload.get("init_payloads", {})
         if not isinstance(raw_payloads, Mapping) or not raw_payloads:
@@ -2510,6 +2683,7 @@ class GPUBatchBridge(LocalSocketHubBridge):
         )
         self._model.initialize(dts.pop(), ids)
         self._ids = tuple(ids)
+        self._mids = np.asarray(ids, dtype="<i4")
 
     def _run_step(self, efields: Mapping[int, np.ndarray]) -> Dict[int, dict]:
         """Milestone-1 path: step the model, repackage into the scalar frame."""
@@ -2527,6 +2701,11 @@ class GPUBatchBridge(LocalSocketHubBridge):
         )
         result = self._model.step(block)
 
+        if self._columnar_keys:
+            self._amps = result.amplitude_au
+            self._columns = self._model.additional_data_columns(self._columnar_keys)
+            return {}  # the block frame carries the whole group
+
         if self._amps_only:
             return {
                 mid: {"amp": result.amplitude_au[i], "extra": b""}
@@ -2539,6 +2718,14 @@ class GPUBatchBridge(LocalSocketHubBridge):
             extra = _json_dumps_bytes(extras[i])
             responses[mid] = {"amp": result.amplitude_au[i], "extra": extra}
         return responses
+
+    def _send_result(self, sock: socket.socket, responses: Mapping[int, dict]) -> None:
+        """Reply with one block frame when the hub asked for columns."""
+
+        if self._columnar_keys:
+            self._result_codec.send_block(sock, self._mids, self._amps, self._columns)
+            return
+        self._result_codec.send(sock, responses)
 
     def _teardown(self) -> None:
         """Release the batch model and any device arrays it holds."""

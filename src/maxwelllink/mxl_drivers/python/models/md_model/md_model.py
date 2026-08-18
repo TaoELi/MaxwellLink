@@ -65,6 +65,7 @@ class MDModel(DummyModel):
         init_velocities: bool = True,
         pre_nvt: bool = False,
         pre_nvt_duration_ps: float = 20.0,
+        reset_dipole: bool = True,
         seed: int = 0,
         force_backend: str = "auto",
         checkpoint: bool = False,
@@ -113,6 +114,8 @@ class MDModel(DummyModel):
             Duration of the pre-NVT equilibration in picoseconds. It uses a Langevin
             thermostat with a 100 fs relaxation time at ``temperature_K``, regardless
             of the production ``thermostat``.
+        reset_dipole : bool, default: True
+            Whether to report the dipole moment relative to its value at time zero.
         seed : int, default: 0
             Seed for the random-number generator in EM-coupled dynamics.
         force_backend : {'auto', 'numba', 'numpy'}, default: 'auto'
@@ -140,6 +143,7 @@ class MDModel(DummyModel):
         self.init_velocities = bool(init_velocities)
         self.pre_nvt = bool(pre_nvt)
         self.pre_nvt_duration_ps = float(pre_nvt_duration_ps)
+        self.reset_dipole = bool(reset_dipole)
         self.seed = int(seed)
         self.kT = K_TO_AU * self.temperature_K
 
@@ -188,6 +192,7 @@ class MDModel(DummyModel):
         self.c1h = 1.0  # Langevin O half-step scaling
 
         # data returned to MaxwellLink
+        self.mu_initial = None  # dipole baseline, set in initialize()
         self._amp = np.zeros(3)  # d(mu)/dt
         self.dipole_vec = np.zeros(3)  # mu half a step after force time (mu_half)
         self.dipole_force = np.zeros(3)  # mu at force-evaluation position (mu_force)
@@ -244,6 +249,15 @@ class MDModel(DummyModel):
             # decorrelates drivers that share the same initial geometry
             self._equilibrate(self.pre_nvt_duration_ps, _PRE_NVT_FRICTION_FS)
             self.t = 0.0  # reset the clock so production dynamics start fresh
+
+        # Baseline subtracted from the reported dipole, as the LAMMPS fix's
+        # reset_dipole does. It is captured here, after any equilibration or
+        # restart, so the driver reports how its dipole changes rather than the
+        # permanent dipole frozen into the starting geometry.
+        if self.mu_initial is None:
+            self.mu_initial = (
+                self.ff.dipole(self.x) if self.reset_dipole else np.zeros(3)
+            )
 
     def _thermostat_half_step(self):
         """
@@ -337,8 +351,8 @@ class MDModel(DummyModel):
         v_half = p_half / self.mass
         x_half = self.x + 0.5 * self.dt * v_half
         self._amp = self.ff.dipole_velocity(v_half)
-        self.dipole_force = self.ff.dipole(self.x)
-        self.dipole_vec = self.ff.dipole(x_half)
+        self.dipole_force = self.ff.dipole(self.x) - self.mu_initial
+        self.dipole_vec = self.ff.dipole(x_half) - self.mu_initial
 
         kinetic = 0.5 * float(np.sum(self.p**2 / self.mass))
         self.energy = kinetic + self.potential
@@ -411,6 +425,7 @@ class MDModel(DummyModel):
             x=self.x,
             p=self.p,
             F=self.F,
+            mu_initial=self.mu_initial,
         )
 
     def _reset_from_checkpoint(self):
@@ -434,6 +449,8 @@ class MDModel(DummyModel):
         self.x = data["x"]
         self.p = data["p"]
         self.F = data["F"]
+        if "mu_initial" in data:  # keep reporting against the original baseline
+            self.mu_initial = data["mu_initial"]
 
     # --------------------------------- stage / commit protocol (deep-copied state) --
     def _snapshot(self):

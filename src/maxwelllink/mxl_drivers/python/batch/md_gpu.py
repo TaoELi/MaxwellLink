@@ -28,6 +28,10 @@ from .dummy_gpu import BatchStepResult, DummyBatchModel
 # Threads per block for the CUDA launches. A multiple of the warp size (32).
 _THREADS_PER_BLOCK = 128
 
+# Additional-data field names, in the component order the dipole arrays hold.
+_HALF_DIPOLE_KEYS = ("mux_au", "muy_au", "muz_au")
+_FORCE_DIPOLE_KEYS = ("mux_m_au", "muy_m_au", "muz_m_au")
+
 # The integrator kernels are compiled once per process and cached here
 _INTEGRATOR_KERNELS = None
 
@@ -262,6 +266,7 @@ class MDGPUBatchModel(DummyBatchModel):
         self.init_velocities = template.init_velocities
         self.pre_nvt = template.pre_nvt
         self.pre_nvt_duration_ps = template.pre_nvt_duration_ps
+        self.reset_dipole = template.reset_dipole
         self.seed = template.seed
         self.checkpoint = template.checkpoint
         self.restart = template.restart
@@ -271,6 +276,7 @@ class MDGPUBatchModel(DummyBatchModel):
         self.molecule_ids = ()  # molecule IDs, set in initialize()
         self.x = self.p = self.F = None  # system state, set in initialize()
         self.c1h = 1.0  # Langevin O half-step scaling
+        self.mu_initial = None  # dipole baseline, set in initialize()
         self._on_gpu = False  # True when xp is CuPy (use the CUDA kernels)
         self.force_kernels = None  # the force field's kernels, built in initialize()
 
@@ -370,6 +376,16 @@ class MDGPUBatchModel(DummyBatchModel):
         if self.pre_nvt and not (self.restart and self.checkpoint):
             self.equilibrate(self.pre_nvt_duration_ps, _PRE_NVT_FRICTION_FS)
             self.t = 0.0  # reset the clock so production dynamics start fresh
+
+        # Baseline subtracted from the reported dipoles, as the LAMMPS fix's
+        # reset_dipole does. It is captured here, after any equilibration or
+        # restart, and is what keeps the permanent dipole of the one shared
+        # starting geometry from adding coherently over the whole batch.
+        if self.mu_initial is None:
+            if self.reset_dipole:
+                self.mu_initial = xp.sum(self.qeff * self.x, axis=1)
+            else:
+                self.mu_initial = xp.zeros((n, 3), dtype=xp.float64)
 
     # ----------------------- one FDTD step under E-field ----------------------------
 
@@ -508,6 +524,8 @@ class MDGPUBatchModel(DummyBatchModel):
             self._step_on_gpu(field, self.c1h, self.noise)
         else:
             self._step_on_cpu(field, self.c1h, self.noise)
+        self._mu_half -= self.mu_initial  # report relative to time zero
+        self._mu_force -= self.mu_initial
         self.t += self.dt
 
         h = self._to_host
@@ -614,6 +632,42 @@ class MDGPUBatchModel(DummyBatchModel):
             for i in range(self.num)
         ]
 
+    def additional_data_columns(self, keys):
+        """
+        Return the requested additional-data fields as one contiguous block.
+
+        The batch already holds every field as an array, so this copies only the
+        columns the hub asked for and never builds a dictionary per system.
+
+        Parameters
+        ----------
+        keys : sequence of str
+            Field names to return, in column order.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (num, len(keys))
+            The requested fields, one row per system.
+
+        Raises
+        ------
+        KeyError
+            If a requested field is not one this driver reports.
+        """
+
+        columns = {}
+        if any(key in _HALF_DIPOLE_KEYS for key in keys):
+            columns.update(zip(_HALF_DIPOLE_KEYS, self._to_host(self._mu_half).T))
+        if any(key in _FORCE_DIPOLE_KEYS for key in keys):
+            columns.update(zip(_FORCE_DIPOLE_KEYS, self._to_host(self._mu_force).T))
+        if "energy_au" in keys:
+            columns["energy_au"] = self._to_host(self._energy)
+        if "potential_au" in keys:
+            columns["potential_au"] = self._to_host(self.potential)
+        if "time_au" in keys:
+            columns["time_au"] = np.full(self.num, self.t)
+        return np.ascontiguousarray(np.column_stack([columns[key] for key in keys]))
+
     def save_checkpoint(self, filename=None):
         """
         Write the whole batch state to one ``.npz`` file.
@@ -633,6 +687,7 @@ class MDGPUBatchModel(DummyBatchModel):
             x=self._to_host(self.x),
             p=self._to_host(self.p),
             F=self._to_host(self.F),
+            mu_initial=self._to_host(self.mu_initial),
             molecule_ids=np.asarray(self.molecule_ids),
         )
 
@@ -670,6 +725,8 @@ class MDGPUBatchModel(DummyBatchModel):
         self.x = self.xp.asarray(data["x"])
         self.p = self.xp.asarray(data["p"])
         self.F = self.xp.asarray(data["F"])
+        if "mu_initial" in data:  # keep reporting against the original baseline
+            self.mu_initial = self.xp.asarray(data["mu_initial"])
 
     def _checkpoint_filename(self):
         """Default checkpoint filename, built from the first molecule ID."""
@@ -686,5 +743,6 @@ class MDGPUBatchModel(DummyBatchModel):
             self.save_checkpoint()
         self.x = self.p = self.F = None
         self._amp = self._mu_half = self._mu_force = self._energy = None
+        self.mu_initial = None
         self.potential = None
         self.force_kernels = None

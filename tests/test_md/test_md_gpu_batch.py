@@ -167,10 +167,53 @@ def test_nvt_reaches_the_target_temperature():
     assert 250.0 < temperature.mean() < 350.0
 
 
+@pytest.mark.core
+def test_reset_dipole_subtracts_the_dipole_at_time_zero():
+    """The reported dipole is shifted by mu(t=0), and d(mu)/dt is left alone."""
+    molecule_ids = [0, 1, 2]
+    kwargs = dict(ff="co2jcp2021", thermostat="nve", pre_nvt=False, seed=4)
+    field = np.zeros((len(molecule_ids), 3))
+
+    on = MDBatch(num=len(molecule_ids), driver_kwargs=kwargs, xp=np)
+    on.initialize(_DT_AU, molecule_ids)
+    off = MDBatch(
+        num=len(molecule_ids), driver_kwargs=dict(reset_dipole=False, **kwargs), xp=np
+    )
+    off.initialize(_DT_AU, molecule_ids)
+
+    # the baseline is the permanent dipole of the starting geometry, and it is
+    # large enough here that leaving it in would swamp the dipole fluctuations
+    baseline = np.asarray(on.mu_initial)
+    assert np.linalg.norm(baseline, axis=1).min() > 0.1
+    assert np.max(np.abs(off.mu_initial)) == 0.0
+
+    for _ in range(5):
+        shifted, absolute = on.step(field), off.step(field)
+        assert (
+            np.max(np.abs(absolute.dipole_half_au - shifted.dipole_half_au - baseline))
+            < 1e-12
+        )
+        assert (
+            np.max(
+                np.abs(absolute.dipole_force_au - shifted.dipole_force_au - baseline)
+            )
+            < 1e-12
+        )
+        assert np.max(np.abs(absolute.amplitude_au - shifted.amplitude_au)) == 0.0
+
+    # the scalar MDModel applies the same shift, so the two paths still agree
+    scalar = MDModel(**kwargs)
+    scalar.initialize(_DT_AU, molecule_ids[0])
+    assert np.max(np.abs(scalar.mu_initial - baseline[0])) < 1e-11
+    on.close()
+    off.close()
+
+
 if __name__ == "__main__":
     test_gpu_forces_match_lammps_reference()
     test_gpu_forces_match_ipi_reference()
     test_gpu_nve_trajectory_matches_ipi_reference()
     test_batch_reproduces_the_scalar_mdmodel()
     test_nvt_reaches_the_target_temperature()
+    test_reset_dipole_subtracts_the_dipole_at_time_zero()
     print("GPU-batched MD force + NVE + NVT tests match the references")

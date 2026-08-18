@@ -528,6 +528,36 @@ class MultiModeSimulation(DummyEMSimulation):
         self.time = 0.0
         self.cavity_geometry = cavity_geometry
 
+        # A batch bridge (mxl_bridge --backend cpu/gpu) can return a whole group's
+        # dipoles and energies as one packed float64 block instead of one JSON
+        # document per molecule. 
+        # The following parameters are used to handle this "columnar" (not JSON) data format.
+        self.columnar_extras = not self.non_socket_wrappers and hasattr(
+            self.hub, "request_columnar_extras"
+        )
+        self._columnar_bound = False  # set once a block reply has arrived
+        self._columnar_energy = None  # molecular energy of the current step
+        self._columnar_dipole_next = None  # drifted force-time dipole of the current step
+        self._columnar_rescaling_factor = None  # per-molecule rescaling factors as a column
+        if self.columnar_extras:
+            self.hub.request_columnar_extras(
+                (
+                    "mux_au",
+                    "muy_au",
+                    "muz_au",
+                    "mux_m_au",
+                    "muy_m_au",
+                    "muz_m_au",
+                    "energy_au",
+                )
+            )
+            self._columnar_rescaling_factor = np.ones((self.n_grid, 1), dtype=float)
+            for wrapper in self.socket_wrappers:
+                if wrapper.rescaling_factor is not None:
+                    self._columnar_rescaling_factor[wrapper.molecule_id] = float(
+                        wrapper.rescaling_factor
+                    )
+
         if mu_initial is None:
             mu_initial = np.zeros((self.n_grid, 3), dtype=float)
         else:
@@ -668,16 +698,24 @@ class MultiModeSimulation(DummyEMSimulation):
         dict of int to dict
             Mapping from molecule IDs to their response payloads.
         """
-        requests = {
-            w.molecule_id: {
-                "efield_au": efield_vec[w.molecule_id, :],
+        requests = {}
+        for wrapper in self.socket_wrappers:
+            request = {
+                "efield_au": efield_vec[wrapper.molecule_id, :],
                 "meta": {"time_au": self.time},
-                "init": {**w.init_payload, "molecule_id": w.molecule_id},
             }
-            for w in self.socket_wrappers
-        }
+            if not self._columnar_bound:
+                # the original implementation send INIT to each driver at every time
+                # step, which is unnecessary.
+                # we will not send this INIT ONLY WHEN GPU drivers are used.
+                request["init"] = {
+                    **wrapper.init_payload,
+                    "molecule_id": wrapper.molecule_id,
+                }
+            requests[wrapper.molecule_id] = request
+
         responses = self.hub.step_barrier(requests)
-        while not responses:
+        while not responses and not (self.columnar_extras and self.hub.last_columnar):
             self._ensure_socket_connections()
             responses = self.hub.step_barrier(requests)
         return responses
@@ -870,10 +908,12 @@ class MultiModeSimulation(DummyEMSimulation):
         if self.include_dse:
             potential_energy += 0.5 * self.dse_coeff[:, None] * mu_dot_f**2
 
-        e_molecule = sum(
-            wrapper.additional_data_history[-1]["energy_au"]
-            for wrapper in self.wrappers
-        )
+        e_molecule = self._columnar_energy
+        if e_molecule is None:
+            e_molecule = sum(
+                wrapper.additional_data_history[-1]["energy_au"]
+                for wrapper in self.wrappers
+            )
         total_energy = (
             np.sum((kinetic_energy + potential_energy) * self.axis) + e_molecule
         )
@@ -955,6 +995,40 @@ class MultiModeSimulation(DummyEMSimulation):
 
         return dipole_vec * self.axis, has_half_step_shift
 
+    def _calc_dipole_vec_columnar(self):
+        """
+        Read one step's dipoles, dmu/dt (amplitudes) and energies out of the block reply.
+
+        Returns
+        -------
+        dipole : numpy.ndarray of float, shape (n_grid, 3)
+            Half-step dipole of every grid point along the coupling axis.
+        dmudt : numpy.ndarray of float, shape (n_grid, 3)
+            Dipole velocity of every grid point along the coupling axis.
+        """
+
+        dipole = np.zeros((self.n_grid, 3), dtype=float)
+        dmudt = np.zeros((self.n_grid, 3), dtype=float)
+        self._columnar_dipole_next = np.zeros((self.n_grid, 3), dtype=float)
+        self._columnar_energy = 0.0
+
+        # block columns are the fields requested in __init__, in that order: mu
+        # half a step after the force time, mu at the force time, then the energy
+        for mids, amps, block in self.hub.last_columnar.values():
+            rescaling_factor = self._columnar_rescaling_factor[mids]
+            mu_half = block[:, 0:3]
+            mu_force = block[:, 3:6]
+            dmudt[mids] = amps * rescaling_factor
+            dipole[mids] = mu_half * rescaling_factor
+            self._columnar_dipole_next[mids] = (2.0 * mu_half - mu_force) * rescaling_factor
+            self._columnar_energy += float(block[:, 6].sum())
+
+        if self.shift_dipole_baseline:
+            dipole -= self.dipole_baseline
+            self._columnar_dipole_next -= self.dipole_baseline
+        self._columnar_dipole_next *= self.axis
+        return dipole * self.axis, dmudt * self.axis
+
     def _eval_pulse_field(
         self,
         pulse,
@@ -1005,6 +1079,8 @@ class MultiModeSimulation(DummyEMSimulation):
         float
             Sum of molecular dipole moment along the coupling axis.
         """
+        self._columnar_energy = None  # refilled below only on the columnar path
+
         # modify local e-field for molecules under excitation
         if self.excited_grid_list:
             efield_vec[self.excited_grid_list, :] += self._eval_pulse_field(
@@ -1023,9 +1099,15 @@ class MultiModeSimulation(DummyEMSimulation):
 
         # Socket molecules
         if self.socket_wrappers:
-            self._ensure_socket_connections()
+            if not self._columnar_bound:
+                # Re-checking the binding costs a payload copy per molecule, and the
+                # retry loop below still rebinds if a bridge is ever lost.
+                self._ensure_socket_connections()
 
             responses = self._collect_socket_responses(efield_vec)
+            if self.columnar_extras and self.hub.last_columnar:
+                self._columnar_bound = True
+                return self._calc_dipole_vec_columnar()
             for wrapper in self.socket_wrappers:
                 payload = responses.get(wrapper.molecule_id)
                 if not payload:
@@ -1091,7 +1173,10 @@ class MultiModeSimulation(DummyEMSimulation):
 
         # the value for n+1/2 time step
         self.dipole, self.dmudt = self._step_molecules(efield_vec)
-        self.dipole_next, self.has_dipole_next = self._calc_dipole_vec_next()
+        if self._columnar_energy is None:
+            self.dipole_next, self.has_dipole_next = self._calc_dipole_vec_next()
+        else:
+            self.dipole_next, self.has_dipole_next = self._columnar_dipole_next, True
 
         # extrapolate to n+1 time step (ONLY NEEDED FOR VELOCITY VERLET MOLECULE PROPAGATION)
         if self.molecule_half_step:

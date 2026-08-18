@@ -735,7 +735,9 @@ def _connect_tcp_with_retry(
 # ---------------------------------------------------------------------------
 
 
-def _send_aggregate_hello(sock: socket.socket, *, group_id: str) -> None:
+def _send_aggregate_hello(
+    sock: socket.socket, *, group_id: str, batch: bool = False
+) -> None:
     """
     Send the bridge HELLO banner used by the aggregate protocol.
 
@@ -746,10 +748,20 @@ def _send_aggregate_hello(sock: socket.socket, *, group_id: str) -> None:
     group_id : str
         Aggregate group identifier this bridge serves; sent in the JSON
         payload so the hub can match the connection to a configured group.
+    batch : bool, default: False
+        Whether this bridge serves its whole group with one batch driver and
+        can therefore answer with the ``"columnar"`` result frame. Bridges
+        that fan out to individual socket drivers leave it ``False``, so the
+        hub keeps asking them for per-molecule replies.
     """
 
     _send_msg(sock, AGGHELLO)
-    _send_bytes(sock, _json_dumps_bytes({"group_id": str(group_id), "version": 1}))
+    _send_bytes(
+        sock,
+        _json_dumps_bytes(
+            {"group_id": str(group_id), "version": 1, "batch": bool(batch)}
+        ),
+    )
 
 
 def _send_aggregate_init(
@@ -758,6 +770,7 @@ def _send_aggregate_init(
     group_id: str,
     init_payloads: Mapping[int, dict],
     result_format: str = "full",
+    extra_keys: Optional[Mapping] = None,
 ) -> None:
     """
     Send group membership plus per-molecule INIT payloads to a bridge.
@@ -773,14 +786,21 @@ def _send_aggregate_init(
         and stamped with its own ``"molecule_id"`` before transmission.
     result_format : str, default: ``"full"``
         Result frame the bridge should return: ``"full"`` (amplitude plus the
-        driver's JSON additional data) or ``"amps_only"`` (dmu/dt amplitudes
-        only). Hubs that discard the extra -- e.g. the Meep susceptibility hub
-        -- pass ``"amps_only"`` so batch bridges skip building the JSON.
+        driver's JSON additional data), ``"amps_only"`` (dmu/dt amplitudes
+        only), or ``"columnar"`` (amplitudes plus the ``extra_keys`` fields as
+        one packed float64 block). Hubs that discard the extra -- e.g. the Meep
+        susceptibility hub -- pass ``"amps_only"`` so batch bridges skip
+        building the JSON.
+    extra_keys : sequence of str, optional
+        Additional-data field names the hub wants, in the column order the
+        ``"columnar"`` result frame must use. Sent once here so the names never
+        travel again; ignored by the other result formats.
     """
 
     payload = {
         "group_id": str(group_id),
         "result_format": str(result_format),
+        "extra_keys": [str(key) for key in (extra_keys or ())],
         "molecule_ids": [int(mid) for mid in init_payloads.keys()],
         "init_payloads": {
             str(int(mid)): {**dict(init_payloads[mid]), "molecule_id": int(mid)}
@@ -1234,13 +1254,20 @@ class _ResultCodec(_FrameCodec):
         return responses
 
     def send_block(
-        self, sock: socket.socket, mids: np.ndarray, amps: np.ndarray
+        self,
+        sock: socket.socket,
+        mids: np.ndarray,
+        amps: np.ndarray,
+        extras: Optional[np.ndarray] = None,
     ) -> None:
         """
         Pack and send grouped responses from contiguous arrays.
 
         Byte-compatible with :meth:`send` for responses whose ``extra``
         payloads are all empty: every record's ``extra_len`` is written as 0.
+        With ``extras``, every record instead carries one fixed-width row of
+        packed float64s, so a whole group's additional data crosses the wire as
+        one array rather than one JSON document per molecule.
 
         Parameters
         ----------
@@ -1250,11 +1277,20 @@ class _ResultCodec(_FrameCodec):
             ``(n,)`` int32 molecule-id column, typically cached at bind time.
         amps : numpy.ndarray
             ``(n, 3)`` float64 amplitude block in the same order as ``mids``.
+        extras : numpy.ndarray, optional
+            ``(n, k)`` float64 additional-data block in the same order as
+            ``mids``. The meaning of each column is the ``extra_keys`` list
+            agreed at AGGINIT, so the names travel once instead of every step.
         """
 
         mids = np.ascontiguousarray(mids, dtype="<i4")
         n = int(mids.shape[0])
-        frame_len = _AGGRESULT_HEAD_LEN + _AGGRESULT_RECORD_LEN * n
+        row_len = 0
+        if extras is not None:
+            extras = np.ascontiguousarray(extras, dtype=DT_FLOAT).reshape(n, -1)
+            row_len = extras.shape[1] * _FLOAT64.size
+        fixed_len = _AGGRESULT_HEAD_LEN + _AGGRESULT_RECORD_LEN * n
+        frame_len = fixed_len + row_len * n
         buf = self._scratch("send", frame_len)
         buf[:_AGG_HEADER_LEN] = _AGGRESULT_HDR
         _INT32.pack_into(buf, _AGG_HEADER_LEN, n)
@@ -1263,7 +1299,12 @@ class _ResultCodec(_FrameCodec):
         )
         records["mid"] = mids
         records["amp"] = amps
-        records["extra_len"] = 0
+        records["extra_len"] = row_len
+        if row_len:
+            block = np.frombuffer(
+                buf, dtype=DT_FLOAT, count=extras.size, offset=fixed_len
+            )
+            block[:] = extras.reshape(-1)
         sock.sendall(memoryview(buf)[:frame_len])
 
     def recv_block(

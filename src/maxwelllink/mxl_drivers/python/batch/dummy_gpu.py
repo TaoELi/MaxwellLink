@@ -129,6 +129,30 @@ class DummyBatchModel:
 
         return []
 
+    def additional_data_columns(self, keys):
+        """
+        Return the requested additional-data fields as one contiguous block.
+
+        This is the columnar form of :meth:`append_additional_data`, used when
+        the hub asks for the ``"columnar"`` result format. The default builds it
+        from the per-sub-system dictionaries, so every batch model works without
+        changes; models that already hold the data in arrays should override
+        this and skip the dictionaries entirely.
+
+        Parameters
+        ----------
+        keys : sequence of str
+            Field names to return, in column order.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (num, len(keys))
+            The requested fields, one row per sub-system.
+        """
+
+        rows = self.append_additional_data()
+        return np.array([[row[key] for key in keys] for row in rows], dtype=float)
+
     def close(self):
         """
         Release any device resources held by this batch model.
