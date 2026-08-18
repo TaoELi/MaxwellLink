@@ -7,39 +7,8 @@
 
 """Integrated physics test of the GPU-batched SHO driver.
 
-Rather than unit-testing each batch helper in isolation, this test wires the
-**whole stack** together exactly as a production run would and checks that it
-reproduces a textbook piece of cavity QED -- the collective (N-molecule) Rabi
-splitting:
-
-    SingleModeSimulation  (EM cavity, dipole gauge)
-        |  hub.step_barrier  (one field vector per molecule)
-        v
-    AggregatedSocketHub    (TCP, aggregates all molecules into one group)
-        |  AGGSTEP / AGGRESULT frames over a real socket
-        v
-    GPUBatchBridge(xp)     (one in-process vectorized batch model)
-        |
-        v
-    SHOGPUBatchModel       (num oscillators advanced together)
-
-A single cavity mode coupled to ``N`` identical harmonic oscillators has a
-*collective* coupling ``g_N = sqrt(N) * coupling_strength * mu0``: only the
-bright (symmetric) combination of the oscillators talks to the cavity, and its
-coupling is enhanced by ``sqrt(N)``.  Therefore, if the per-molecule coupling
-``coupling_strength`` is reduced as ``1 / sqrt(N)``, the collective coupling --
-and hence the entire Rabi energy-exchange dynamics -- is *independent of N*.
-
-This is a much stronger correctness statement than any single-function unit test:
-it exercises the batch state layout, the field routing, the socket codecs, the
-amplitude/dipole/energy repackaging, and the driver parity with the scalar SHO
-model, all at once, and pins them to a known analytic result.
-
-The exact same code path runs on:
-
-- **CPU** by injecting ``xp=numpy`` (always exercised here), and
-- **CUDA** by injecting ``xp=cupy`` (auto-skipped when no GPU is present), which
-  routes ``SHOGPUBatchModel`` through its fused ``numba.cuda`` kernel.
+This test wires the **whole stack** together exactly as a production run would 
+and checks the collective (N-molecule) Rabi splitting.
 """
 
 from __future__ import annotations
@@ -70,9 +39,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 # --------------------------------------------------------------------------- #
-# Physical parameters (atomic units).  Chosen so a few Rabi periods fit in a
-# short run: cavity on resonance with the SHO, weak-enough coupling that the two
-# polariton branches are well separated, dt small enough to resolve omega.
+# Physical parameters (atomic units)                                          #
 # --------------------------------------------------------------------------- #
 OMEGA = 0.242  # SHO frequency == cavity frequency (exact resonance)
 MU0 = 187.0  # SHO dipole prefactor  mu(t) = mu0 * q(t)
