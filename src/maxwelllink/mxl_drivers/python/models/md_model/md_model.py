@@ -24,14 +24,17 @@ from maxwelllink.units import FS_TO_AU, K_TO_AU
 try:
     from ..dummy_model import DummyModel
     from .qtip4pf import QTIP4PFForceField
+    from .co2jcp2021 import CO2JCP2021ForceField
 except (ImportError, ValueError):  # allow running as a stand-alone script
     from dummy_model import DummyModel
     from qtip4pf import QTIP4PFForceField
+    from co2jcp2021 import CO2JCP2021ForceField
 
 
 # registry of available force fields, keyed by their short string name
 _FORCE_FIELDS = {
     QTIP4PFForceField.name: QTIP4PFForceField,
+    CO2JCP2021ForceField.name: CO2JCP2021ForceField,
 }
 
 # Langevin relaxation time (fs) used for the optional pre-NVT equilibration
@@ -73,12 +76,12 @@ class MDModel(DummyModel):
         Parameters
         ----------
         ff : str, default: 'qtip4pf'
-            Name of the force field to integrate (currently only ``'qtip4pf'`` is
-            registered).
+            Name of the force field to integrate. Registered force fields are
+            ``'qtip4pf'`` (flexible water) and ``'co2jcp2021'`` (flexible CO2).
         n_molecules : int, optional
             Number of molecules to build when ``positions`` is not given. If ``None``
             (the default) each force field applies its own default count (216 for
-            water, which loads the bundled equilibrated bulk-water box).
+            water and 36 for CO2, which load the bundled equilibrated bulk boxes).
         positions : array-like of float, shape (n_atoms, 3), optional
             Initial atomic positions in Bohr. If ``None`` the force field builds a
             default geometry from ``n_molecules`` (and ``box``).

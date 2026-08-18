@@ -70,7 +70,7 @@ include = ["maxwelllink*", "mxl_drivers*"]
 [tool.setuptools.package-data]
 "maxwelllink" = ["_workspace_payload/*", "_workspace_payload/**/*"]
 "maxwelllink.mxl_drivers.lammps" = ["fix_maxwelllink.*", "README.md"]
-"maxwelllink.mxl_drivers.python.models.md_model" = ["*.xyz"]
+"maxwelllink.mxl_drivers.python.models.md_model" = ["data/*.xyz"]
 
 [project.optional-dependencies]
 dev = [

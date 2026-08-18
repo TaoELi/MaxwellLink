@@ -11,6 +11,7 @@ Direct classical molecular-dynamics (MD) models without calling LAMMPS.
 
 from .force_field import DummyForceField
 from .qtip4pf import QTIP4PFForceField
+from .co2jcp2021 import CO2JCP2021ForceField
 from .md_model import MDModel
 
-__all__ = ["MDModel", "DummyForceField", "QTIP4PFForceField"]
+__all__ = ["MDModel", "DummyForceField", "QTIP4PFForceField", "CO2JCP2021ForceField"]

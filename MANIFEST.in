@@ -9,7 +9,7 @@ include pyproject.toml
 recursive-include src/maxwelllink/mxl_drivers/lammps *.cpp *.h *.md *.sh
 
 # Workspace payload sources used by mxl-init
-recursive-include src *.py *.md *.txt *.json *.sh *.cpp *.h
+recursive-include src *.py *.md *.txt *.json *.sh *.cpp *.h *.xyz
 recursive-include tests *
 recursive-include skills *
 recursive-include docs/source *
