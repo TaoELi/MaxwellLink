@@ -8,11 +8,11 @@
 Flexible CO2 force field (co2jcp2021).
 
 Implements the anharmonic flexible-CO2 model used by Li, Nitzan, and Subotnik
-[J. Chem. Phys. 154, 094124 (2021)], itself a modification of the Cygan, Romanov, and 
+[J. Chem. Phys. 154, 094124 (2021)], itself a modification of the Cygan, Romanov, and
 Myshakin flexible-CO2 model [J. Phys. Chem. C 116, 13079 (2012)].
 
 Comapred to the Cygan force field, the harmonic C=O stretch is replaced by a quartic (Morse-like)
-anharmonic stretch. 
+anharmonic stretch.
 """
 
 import os

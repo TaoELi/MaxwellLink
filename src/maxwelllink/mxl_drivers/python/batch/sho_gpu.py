@@ -195,7 +195,7 @@ class SHOGPUBatchModel(DummyBatchModel):
         self._kernel = None  # compiled numba kernel, built in initialize()
 
     # ----------------------- heavy-load initialization ------------------------------
-    
+
     def initialize(self, dt_au, molecule_ids):
         """
         Allocate the contiguous oscillator state and output buffers.

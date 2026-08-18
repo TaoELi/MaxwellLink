@@ -95,8 +95,21 @@ def _build_integrator_kernels():
 
     @cuda.jit
     def k_post(
-        x, p, F, mass, noise, qeff, dt, c1h, rng, thermostat,
-        potential, amp, mu_half, mu_force, energy,
+        x,
+        p,
+        F,
+        mass,
+        noise,
+        qeff,
+        dt,
+        c1h,
+        rng,
+        thermostat,
+        potential,
+        amp,
+        mu_half,
+        mu_force,
+        energy,
     ):
         """Second half-kick, the dipole and energy reductions, then the thermostat."""
 
@@ -430,14 +443,33 @@ class MDGPUBatchModel(DummyBatchModel):
         noise_dev = self.xp.asarray(noise.ravel())
         thermostat = c1h < 1.0
         self.kernels["pre"][self.num, _THREADS_PER_BLOCK](
-            self.x, self.p, self.F, self.mass_flat, noise_dev, self.dt, c1h,
-            self.rng_states, thermostat,
+            self.x,
+            self.p,
+            self.F,
+            self.mass_flat,
+            noise_dev,
+            self.dt,
+            c1h,
+            self.rng_states,
+            thermostat,
         )
         self.force_kernels.forces_gpu(self.x, self.F, self.potential, efield)
         self.kernels["post"][self.num, _THREADS_PER_BLOCK](
-            self.x, self.p, self.F, self.mass_flat, noise_dev, self.qeff_flat,
-            self.dt, c1h, self.rng_states, thermostat, self.potential,
-            self._amp, self._mu_half, self._mu_force, self._energy,
+            self.x,
+            self.p,
+            self.F,
+            self.mass_flat,
+            noise_dev,
+            self.qeff_flat,
+            self.dt,
+            c1h,
+            self.rng_states,
+            thermostat,
+            self.potential,
+            self._amp,
+            self._mu_half,
+            self._mu_force,
+            self._energy,
         )
 
     def step(self, efield_au):

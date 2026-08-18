@@ -7,7 +7,7 @@
 
 """Integrated physics test of the GPU-batched SHO driver.
 
-This test wires the **whole stack** together exactly as a production run would 
+This test wires the **whole stack** together exactly as a production run would
 and checks the collective (N-molecule) Rabi splitting.
 """
 
