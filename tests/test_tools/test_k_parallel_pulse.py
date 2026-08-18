@@ -10,7 +10,11 @@ import pytest
 
 mxl = pytest.importorskip("maxwelllink", reason="maxwelllink is required for this test")
 
-from maxwelllink.tools import gaussian_pulse, k_parallel_pulse  # noqa: E402
+from maxwelllink.tools import (  # noqa: E402
+    gaussian_pulse,
+    k_parallel_pulse,
+    k_parallel_pulse_with_seed,
+)
 
 
 def _make_cavity(**overrides):
@@ -182,7 +186,95 @@ def test_invalid_inputs_raise():
     with pytest.raises(ValueError):
         k_parallel_pulse(**{**base, "cavity": cavity_flat, "direction": "x"})
 
-    # photon target requires stored mode functions
-    cavity_nomodes = _make_cavity(save_mode_functions=False)
-    with pytest.raises(ValueError):
-        k_parallel_pulse(**{**base, "cavity": cavity_nomodes, "target": "photon"})
+
+# a lopsided cavity, so a mixed-up grid or mode ordering cannot go unnoticed
+_LOPSIDED = dict(n_grid_x=7, n_grid_y=5, n_repeat_x=2, n_mode_x=6, n_mode_y=3)
+
+
+@pytest.mark.core
+def test_photon_target_needs_no_stored_mode_functions():
+    """
+    The photon-target projection is evaluated from the cavity's factorized mode
+    functions, so a cavity built with ``save_mode_functions=False`` must give the
+    modes and amplitudes of the definition ``ftilde_k[:, grid, axis] @ source``.
+    """
+    stored = _make_cavity(**_LOPSIDED)
+    lean = _make_cavity(save_mode_functions=False, **_LOPSIDED)
+    assert not hasattr(lean, "ftilde_k")
+
+    for projection_axis in ("x", "y"):
+        source = k_parallel_pulse(
+            cavity=lean,
+            envelope=1.0,
+            omega_au=0.11,
+            k_parallel_au=2.0 * lean.delta_omega_y_au,
+            direction="y",
+            center=(0.5, 0.5),
+            size=(0.5, 0.5),
+            target="photon",
+            projection_axis=projection_axis,
+        )
+        axis = 0 if projection_axis == "x" else 1
+        grid = np.asarray(source.excited_grid_list)
+        raw = stored.ftilde_k[:, grid, axis] @ (
+            source.spatial_window * np.exp(-1j * source.spatial_phase)
+        )
+        expected = raw / np.max(np.abs(raw))
+        assert (
+            source.excited_mode_list
+            == np.flatnonzero(np.abs(expected) > 1e-12).tolist()
+        )
+        np.testing.assert_allclose(
+            source.mode_complex_amplitude,
+            expected[source.excited_mode_list],
+            atol=1e-13,
+        )
+
+
+@pytest.mark.core
+def test_vortex_seed_projects_like_the_stored_mode_functions():
+    """
+    A vortex seed selects a non-rectangular patch of the grid; its photon-mode
+    projection must still follow the definition and not depend on whether the
+    cavity stores its mode functions.
+    """
+    stored = _make_cavity(**_LOPSIDED)
+    lean = _make_cavity(save_mode_functions=False, **_LOPSIDED)
+
+    def build(cavity):
+        pulse = k_parallel_pulse_with_seed(
+            cavity=cavity,
+            envelope=1.0,
+            omega_au=0.11,
+            k_parallel_au=2.0 * cavity.delta_omega_y_au,
+            direction="y",
+            center=(0.5, 0.5),
+            size=(0.5, 0.5),
+            target="photon",
+            projection_axis="x",
+        )
+        return pulse.add_vortex_seed(
+            charge=2,
+            omega_au=0.1,
+            amplitude_au=0.5,
+            t0_au=100.0,
+            sigma_au=20.0,
+            center=(0.45, 0.55),
+            waist=0.2,
+        )
+
+    with_stored, without = build(stored), build(lean)
+    assert with_stored.excited_mode_list == without.excited_mode_list
+    for t in (0.0, 100.0, 250.0):
+        np.testing.assert_allclose(without(t), with_stored(t), atol=1e-13)
+
+    seed = without._pulses[-1]
+    grid = np.asarray(seed.excited_grid_list)
+    raw = stored.ftilde_k[:, grid, 0] @ (
+        seed.spatial_window * np.exp(-1j * seed.spatial_phase)
+    )
+    expected = raw / np.max(np.abs(raw))
+    assert seed.excited_mode_list == np.flatnonzero(np.abs(expected) > 1e-12).tolist()
+    np.testing.assert_allclose(
+        seed.mode_complex_amplitude, expected[seed.excited_mode_list], atol=1e-13
+    )

@@ -252,6 +252,42 @@ def _get_k_order(
     return k_order
 
 
+def _project_onto_modes(
+    cavity, selected: np.ndarray, source_complex: np.ndarray, axis_index: int
+) -> np.ndarray:
+    """
+    Return ``ftilde_k[:, selected, axis_index] @ source_complex`` for a cavity.
+
+    ``FabryPerotCavity`` keeps its mode functions factorized along x and y
+    (``Cx``, ``Sy``, ``Sx``, ``Cy`` times ``mode_prefactor``), so the overlap
+    with every mode is one small matrix product over the selected grid points
+    and the full ``(n_mode, n_grid, 3)`` array is never needed. Cavities that
+    expose only ``ftilde_k`` fall back to it.
+    """
+    factors = ("Cx", "Sy", "Sx", "Cy", "mode_prefactor", "n_grid_x")
+    if all(hasattr(cavity, name) for name in factors):
+        grid_x = selected % cavity.n_grid_x
+        grid_y = selected // cavity.n_grid_x
+        if axis_index == 0:
+            along_x, along_y = cavity.Cx[:, grid_x], cavity.Sy[:, grid_y]
+        else:
+            along_x, along_y = cavity.Sx[:, grid_x], cavity.Cy[:, grid_y]
+        # (n_mode_y, n_mode_x), which flattens in the cavity's mode order
+        overlap = (along_y * source_complex[None, :]) @ along_x.T
+        return cavity.mode_prefactor * overlap.reshape(-1)
+
+    ftilde_k = getattr(cavity, "ftilde_k", None)
+    if ftilde_k is None:
+        raise ValueError(
+            "target='photon' requires the cavity mode functions; construct "
+            "the cavity with save_mode_functions=True."
+        )
+    ftilde_k = np.asarray(ftilde_k, dtype=float)
+    if ftilde_k.ndim != 3 or ftilde_k.shape[2] != 3:
+        raise ValueError("cavity must expose ftilde_k with shape (n_mode, n_grid, 3).")
+    return ftilde_k[:, selected, axis_index] @ source_complex
+
+
 def k_parallel_pulse(
     cavity,
     envelope: Union[Callable[[float], float], float],
@@ -296,7 +332,8 @@ def k_parallel_pulse(
     ----------
     cavity
         A ``FabryPerotCavity`` instance. It must expose ``grid_xy`` and the
-        relevant ``delta_omega_*_au`` value.
+        relevant ``delta_omega_*_au`` value; ``target="photon"`` also uses its
+        factorized mode functions, so ``save_mode_functions=False`` is fine.
     envelope
         Time-domain envelope callable ``envelope(t_au)`` or constant scalar
         multiplier. Use helpers such as :func:`gaussian_pulse`; the carrier
@@ -407,19 +444,10 @@ def k_parallel_pulse(
         projection_axis_clean = str(projection_axis).strip().lower()
         if projection_axis_clean not in {"x", "y"}:
             raise ValueError("projection_axis must be 'x' or 'y'.")
-        ftilde_k = getattr(cavity, "ftilde_k", None)
-        if ftilde_k is None:
-            raise ValueError(
-                "target='photon' requires the cavity mode functions; construct "
-                "the cavity with save_mode_functions=True."
-            )
-        ftilde_k = np.asarray(ftilde_k, dtype=float)
-        if ftilde_k.ndim != 3 or ftilde_k.shape[2] != 3:
-            raise ValueError(
-                "cavity must expose ftilde_k with shape (n_mode, n_grid, 3)."
-            )
         projection_axis_index = 0 if projection_axis_clean == "x" else 1
-        raw_projection = ftilde_k[:, selected, projection_axis_index] @ source_complex
+        raw_projection = _project_onto_modes(
+            cavity, selected, source_complex, projection_axis_index
+        )
         projection_norm = float(np.max(np.abs(raw_projection)))
         if projection_norm <= 0.0:
             raise ValueError(
@@ -553,9 +581,10 @@ class KParallelPulseWithSeed:
         else:
             # Project the real-space vortex pattern directly onto the cavity
             # modes, using the same calculation as k_parallel_pulse.
-            ftilde_k = np.asarray(self.cavity.ftilde_k, dtype=float)
             axis_index = 0 if self.projection_axis == "x" else 1
-            raw_projection = ftilde_k[:, selected, axis_index] @ source_complex
+            raw_projection = _project_onto_modes(
+                self.cavity, selected, source_complex, axis_index
+            )
             projection_norm = float(np.max(np.abs(raw_projection)))
             if not np.isfinite(projection_norm) or projection_norm <= 0.0:
                 raise ValueError(
