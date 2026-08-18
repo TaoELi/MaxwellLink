@@ -249,6 +249,30 @@ class QTIP4PFForceField(DummyForceField):
                     count += 1
         return np.vstack(positions)
 
+    # ------------------------------ compiled kernels -------------------------------
+    has_compiled_kernels = True
+
+    def build_force_kernels(self, xp, threads_per_block=128):
+        """
+        Return this force field's compiled kernels from :mod:`kernels_qtip4pf`.
+
+        Parameters
+        ----------
+        xp : module
+            Array module: ``numpy`` for the CPU path, ``cupy`` for the GPU path.
+        threads_per_block : int, default: 128
+            CUDA block size, ignored on the CPU path.
+
+        Returns
+        -------
+        kernels_qtip4pf.QTIP4PFForceKernels
+            The compiled force evaluator.
+        """
+
+        from .kernels_qtip4pf import QTIP4PFForceKernels
+
+        return QTIP4PFForceKernels(self, xp, threads_per_block)
+
     # ---------------------------------force evaluation ----------------------------
     def compute(self, x, efield):
         """

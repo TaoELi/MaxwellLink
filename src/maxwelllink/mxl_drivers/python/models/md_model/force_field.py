@@ -72,6 +72,10 @@ class DummyForceField:
         # per-atom masses; subclasses overwrite this with the real masses
         self.masses = np.ones((self.na, 1))
 
+        # compiled kernels and their output buffer, built on the first compute_fast()
+        self._force_kernels = None
+        self._forces = None
+
     # ------------------------------------- helpers ---------------------------------
     def _minimum_image(self, dvec):
         """
@@ -118,6 +122,70 @@ class DummyForceField:
         raise NotImplementedError(
             "Subclasses must implement _build_default_geometry()."
         )
+
+    #: whether this force field provides compiled (numba) kernels
+    has_compiled_kernels = False
+
+    def build_force_kernels(self, xp, threads_per_block=128):
+        """
+        Return the compiled force evaluator of this force field.
+
+        Notes
+        -----
+        This method *should be* overridden by subclasses that want the fast (numba)
+        CPU path and the GPU batch backend. Without it only :meth:`compute` is
+        available.
+
+        Parameters
+        ----------
+        xp : module
+            Array module: ``numpy`` for the CPU path, ``cupy`` for the GPU path.
+        threads_per_block : int, default: 128
+            CUDA block size, ignored on the CPU path.
+
+        Returns
+        -------
+        object
+            The force field's compiled kernels.
+        """
+
+        raise NotImplementedError(
+            f"{type(self).__name__} provides no compiled kernels; only the NumPy "
+            f"compute() path is available for it."
+        )
+
+    def compute_fast(self, x, efield):
+        """
+        Evaluate the force and potential with the compiled (numba) kernels.
+
+        Physically identical to :meth:`compute` and agreeing with it to rounding, but
+        several times faster and without the ``(na, na, 3)`` temporaries. The kernels
+        and the output buffer are built once and reused.
+
+        Parameters
+        ----------
+        x : numpy.ndarray of float, shape (na, 3)
+            Atomic positions in atomic units (Bohr).
+        efield : numpy.ndarray of float, shape (3,)
+            Effective electric field ``[E_x, E_y, E_z]`` in atomic units.
+
+        Returns
+        -------
+        forces : numpy.ndarray of float, shape (na, 3)
+            Total force on each atom in atomic units.
+        potential : float
+            Mechanical potential energy in atomic units (Hartree).
+        """
+
+        if self._force_kernels is None:
+            self._force_kernels = self.build_force_kernels(np)
+            self._forces = np.zeros((self.na, 3))
+        potential = self._force_kernels.forces_cpu(
+            np.ascontiguousarray(x, dtype=float),
+            self._forces,
+            np.ascontiguousarray(efield, dtype=float).reshape(3),
+        )
+        return self._forces, float(potential)
 
     def compute(self, x, efield):
         """

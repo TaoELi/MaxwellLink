@@ -66,6 +66,7 @@ class MDModel(DummyModel):
         pre_nvt: bool = False,
         pre_nvt_duration_ps: float = 20.0,
         seed: int = 0,
+        force_backend: str = "auto",
         checkpoint: bool = False,
         restart: bool = False,
         verbose: bool = False,
@@ -114,6 +115,13 @@ class MDModel(DummyModel):
             of the production ``thermostat``.
         seed : int, default: 0
             Seed for the random-number generator in EM-coupled dynamics.
+        force_backend : {'auto', 'numba', 'numpy'}, default: 'auto'
+            Which force evaluator to use. ``'numba'`` uses the compiled loop-form
+            kernels, which are typically several times faster than the array-at-a-time
+            NumPy reference and allocate no ``(na, na, 3)`` temporaries; ``'numpy'``
+            forces the reference implementation. ``'auto'`` picks ``'numba'`` whenever
+            the force field provides a compiled-kernel description and silently falls
+            back to ``'numpy'`` when it does not.
         checkpoint : bool, default: False
             Whether to enable checkpointing.
         restart : bool, default: False
@@ -152,6 +160,21 @@ class MDModel(DummyModel):
             ff_params["n_molecules"] = n_molecules
         self.ff = _FORCE_FIELDS[key](**ff_params)
         self.ff_name = self.ff.name
+
+        # Pick the force evaluator
+        backend = str(force_backend).lower()
+        if backend not in ("auto", "numba", "numpy"):
+            raise ValueError("force_backend must be 'auto', 'numba' or 'numpy'.")
+        self.force_backend = "numpy"
+        self._compute = self.ff.compute
+        if backend != "numpy" and self.ff.has_compiled_kernels:
+            self.force_backend = "numba"
+            self._compute = self.ff.compute_fast
+        elif backend == "numba":
+            raise NotImplementedError(
+                f"Force field {self.ff.name!r} provides no compiled kernels; "
+                f"use force_backend='numpy'."
+            )
 
         # state pulled from the force field
         self.na = self.ff.na
@@ -212,7 +235,7 @@ class MDModel(DummyModel):
             self.p = np.zeros((self.na, 3))
 
         # forces at the initial geometry
-        self.F, self.potential = self.ff.compute(self.x, np.zeros(3))
+        self.F, self.potential = self._compute(self.x, np.zeros(3))
 
         if self.restart and self.checkpoint:
             self._reset_from_checkpoint()
@@ -263,7 +286,7 @@ class MDModel(DummyModel):
                 self._thermostat_half_step()
                 self.p += 0.5 * self.dt * self.F
                 self.x += self.dt * (self.p / self.mass)
-                self.F, self.potential = self.ff.compute(self.x, zero)
+                self.F, self.potential = self._compute(self.x, zero)
                 self.p += 0.5 * self.dt * self.F
                 self._thermostat_half_step()
         finally:
@@ -302,7 +325,7 @@ class MDModel(DummyModel):
         # A: full drift of the positions
         self.x += self.dt * (self.p / self.mass)
         # recompute the force at the new geometry with the current field
-        self.F, self.potential = self.ff.compute(self.x, efield)
+        self.F, self.potential = self._compute(self.x, efield)
         # B: second half momentum kick
         self.p += 0.5 * self.dt * self.F
 

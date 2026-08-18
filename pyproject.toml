@@ -15,7 +15,9 @@ dependencies = [
   "scipy>=1.10",
   "cmake>=3.18",
   "requests>=2.31",
-  "orjson>=3"
+  "orjson>=3",
+  # for built-in MD model and GPU path
+  "numba>=0.59"
 ]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -82,15 +84,12 @@ dev = [
 # GPU cuda support
 gpu-cuda11 = [
   "cupy-cuda11x>=13",
-  "numba>=0.59",
 ]
 gpu-cuda12 = [
   "cupy-cuda12x>=13",
-  "numba>=0.59",
 ]
 gpu-cuda13 = [
   "cupy-cuda13x>=13",
-  "numba>=0.59",
 ]
 docs = [
   "sphinx>=7.2",

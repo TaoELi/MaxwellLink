@@ -261,6 +261,30 @@ class CO2JCP2021ForceField(DummyForceField):
                     count += 1
         return np.vstack(positions)
 
+    # ------------------------------ compiled kernels -------------------------------
+    has_compiled_kernels = True
+
+    def build_force_kernels(self, xp, threads_per_block=128):
+        """
+        Return this force field's compiled kernels from :mod:`kernels_co2`.
+
+        Parameters
+        ----------
+        xp : module
+            Array module: ``numpy`` for the CPU path, ``cupy`` for the GPU path.
+        threads_per_block : int, default: 128
+            CUDA block size, ignored on the CPU path.
+
+        Returns
+        -------
+        kernels_co2.CO2ForceKernels
+            The compiled force evaluator.
+        """
+
+        from .kernels_co2 import CO2ForceKernels
+
+        return CO2ForceKernels(self, xp, threads_per_block)
+
     # ---------------------------------force evaluation ----------------------------
     def compute(self, x, efield):
         """

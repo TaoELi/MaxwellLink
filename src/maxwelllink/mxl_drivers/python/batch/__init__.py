@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from .dummy_gpu import BatchStepResult, DummyBatchModel
 
+# Batch drivers available on the GPU backend
+_GPU_BATCH_DRIVERS = ("sho", "md")
+
 __all__ = [
     "DummyBatchModel",
     "BatchStepResult",
@@ -26,7 +29,7 @@ def supported_batch_drivers(backend: str) -> tuple[str, ...]:
     """Return the driver names supported for ``backend`` (CUDA-free lookup)."""
 
     if str(backend).strip().lower() == "gpu":
-        return ("sho",)
+        return tuple(_GPU_BATCH_DRIVERS)
     return ()
 
 
@@ -51,14 +54,14 @@ def get_batch_model(backend: str, driver: str):
 
     normalized_backend = str(backend).strip().lower()
     normalized_driver = str(driver).strip().lower()
-    if normalized_backend == "gpu" and normalized_driver == "sho":
-        from .sho_gpu import SHOGPUBatchModel
+    if normalized_backend == "gpu" and normalized_driver in _GPU_BATCH_DRIVERS:
+        if normalized_driver == "sho":
+            from .sho_gpu import SHOGPUBatchModel
 
-        return SHOGPUBatchModel
-    # Future: register the in-house MD backend here, e.g.
-    #     if normalized_backend == "gpu" and normalized_driver in ("h2o", "co2"):
-    #         from .md_gpu import MDGPUBatchModel
-    #         return MDGPUBatchModel
+            return SHOGPUBatchModel
+        from .md_gpu import MDGPUBatchModel
+
+        return MDGPUBatchModel
     supported = supported_batch_drivers(normalized_backend)
     raise ValueError(
         f"No batch model for backend={backend!r}, driver={driver!r}. "
