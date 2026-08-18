@@ -530,15 +530,15 @@ class MultiModeSimulation(DummyEMSimulation):
 
         # A batch bridge (mxl_bridge --backend cpu/gpu) can return a whole group's
         # dipoles and energies as one packed float64 block instead of one JSON
-        # document per molecule. 
+        # document per molecule.
         # The following parameters are used to handle this "columnar" (not JSON) data format.
         self.columnar_extras = not self.non_socket_wrappers and hasattr(
             self.hub, "request_columnar_extras"
         )
         self._columnar_bound = False  # set once a block reply has arrived
         self._columnar_energy = None  # molecular energy of the current step
-        self._columnar_dipole_next = None  # drifted force-time dipole of the current step
-        self._columnar_rescaling_factor = None  # per-molecule rescaling factors as a column
+        self._columnar_dipole_next = None  # drifted force-time dipole
+        self._columnar_rescaling_factor = None  # per-molecule, as a column
         if self.columnar_extras:
             self.hub.request_columnar_extras(
                 (
@@ -698,27 +698,28 @@ class MultiModeSimulation(DummyEMSimulation):
         dict of int to dict
             Mapping from molecule IDs to their response payloads.
         """
-        requests = {}
-        for wrapper in self.socket_wrappers:
-            request = {
-                "efield_au": efield_vec[wrapper.molecule_id, :],
-                "meta": {"time_au": self.time},
-            }
-            if not self._columnar_bound:
-                # the original implementation send INIT to each driver at every time
-                # step, which is unnecessary.
-                # we will not send this INIT ONLY WHEN GPU drivers are used.
-                request["init"] = {
-                    **wrapper.init_payload,
-                    "molecule_id": wrapper.molecule_id,
+        # Original path
+        requests = None
+        if not self._columnar_bound:
+            requests = {
+                w.molecule_id: {
+                    "efield_au": efield_vec[w.molecule_id, :],
+                    "meta": {"time_au": self.time},
+                    "init": {**w.init_payload, "molecule_id": w.molecule_id},
                 }
-            requests[wrapper.molecule_id] = request
+                for w in self.socket_wrappers
+            }
 
-        responses = self.hub.step_barrier(requests)
-        while not responses and not (self.columnar_extras and self.hub.last_columnar):
+        # A block reply leaves the group in hub.last_columnar and returns nothing
+        # per molecule, so there an empty mapping means success instead of a lost bridge.
+        while True:
+            if requests is None:
+                responses = self.hub.step_barrier(requests, efield_au=efield_vec)
+            else:
+                responses = self.hub.step_barrier(requests)
+            if responses or (self.columnar_extras and self.hub.last_columnar):
+                return responses
             self._ensure_socket_connections()
-            responses = self.hub.step_barrier(requests)
-        return responses
 
     def _calc_mu_dot_f_subspace(self, mu: np.ndarray) -> np.ndarray:
         r"""
@@ -1020,7 +1021,9 @@ class MultiModeSimulation(DummyEMSimulation):
             mu_force = block[:, 3:6]
             dmudt[mids] = amps * rescaling_factor
             dipole[mids] = mu_half * rescaling_factor
-            self._columnar_dipole_next[mids] = (2.0 * mu_half - mu_force) * rescaling_factor
+            self._columnar_dipole_next[mids] = (
+                2.0 * mu_half - mu_force
+            ) * rescaling_factor
             self._columnar_energy += float(block[:, 6].sum())
 
         if self.shift_dipole_baseline:

@@ -68,6 +68,7 @@ from .protocol import (  # noqa: F401  re-exported for backward compatibility
     _recv_exact_into,
     _recv_msg,
     _recv_msg_with_timeout,
+    _resolve_step_records,
     _send_aggregate_hello,
     _send_aggregate_init,
     _send_bytes,
@@ -118,6 +119,12 @@ class _AggregateGroupState:
     columnar : bool
         Whether this group's bridge was asked for the columnar result
         frame, which only batch bridges can answer.
+    step_mids : numpy.ndarray or None
+        Molecule IDs of the block step frame, in the order the bridge uses;
+        also the index that gathers their fields out of the grid array.
+    step_records : bytes
+        Packed ``(molecule_id, field_idx)`` table of that frame, empty
+        unless the bridge takes block frames.
     """
 
     group_id: str
@@ -127,6 +134,8 @@ class _AggregateGroupState:
     step_codec: _StepCodec = field(default_factory=_StepCodec)
     result_codec: _ResultCodec = field(default_factory=_ResultCodec)
     columnar: bool = False
+    step_mids: Optional[np.ndarray] = None
+    step_records: bytes = b""
     _sorted_ids: Optional[np.ndarray] = None
 
     def sorted_molecule_ids(self, expected_ids) -> np.ndarray:
@@ -1477,6 +1486,16 @@ class AggregatedSocketHub(SocketHub):
         if result_format == "columnar" and not st.extras.get("batch_bridge"):
             result_format = "full"
         group.columnar = result_format == "columnar"
+        if group.columnar:
+            # Record table of the block step frame, in the molecule-id order the
+            # bridge takes from these payloads. The membership is fixed from here
+            # on, so the table and the gather index are built once.
+            group.step_mids = np.fromiter(
+                init_payloads, dtype="<i4", count=len(init_payloads)
+            )
+            group.step_records = np.column_stack(
+                (group.step_mids, np.arange(group.step_mids.size, dtype="<i4"))
+            ).tobytes()
 
         try:
             _send_aggregate_init(
@@ -1631,7 +1650,10 @@ class AggregatedSocketHub(SocketHub):
         return grouped_requests
 
     def _send_step_to_group(
-        self, group_id: str, group_request: Dict[int, dict]
+        self,
+        group_id: str,
+        group_request: Optional[Dict[int, dict]] = None,
+        fields: Optional[np.ndarray] = None,
     ) -> bool:
         """
         Send one grouped fan-out step to a single bridge.
@@ -1640,8 +1662,12 @@ class AggregatedSocketHub(SocketHub):
         ----------
         group_id : str
             Aggregate group to send to.
-        group_request : dict[int, dict]
+        group_request : dict[int, dict], optional
             Mapping from molecule ID to its ``{"efield_au": ndarray}`` request.
+        fields : numpy.ndarray of float, shape (n_grid, 3), optional
+            Fields of every molecule, indexed by molecule ID. When given, this
+            group's rows are packed into one block frame and ``group_request``
+            is not used.
 
         Returns
         -------
@@ -1656,7 +1682,12 @@ class AggregatedSocketHub(SocketHub):
             self._pause()
             return False
         try:
-            group.step_codec.send(st.sock, group_request)
+            if fields is None:
+                group.step_codec.send(st.sock, group_request)
+            else:
+                group.step_codec.send_block(
+                    st.sock, group.step_records, fields[group.step_mids]
+                )
         except (socket.timeout, _SocketClosed, OSError):
             self._mark_group_dead(group_id, reason="send")
             return False
@@ -1765,7 +1796,10 @@ class AggregatedSocketHub(SocketHub):
         return {}
 
     def step_barrier(
-        self, requests: Dict[int, dict], timeout: Optional[float] = None
+        self,
+        requests: Dict[int, dict],
+        timeout: Optional[float] = None,
+        efield_au: Optional[np.ndarray] = None,
     ) -> Dict[int, dict]:
         """
         Dispatch all requested fields group-by-group and collect grouped replies.
@@ -1779,6 +1813,12 @@ class AggregatedSocketHub(SocketHub):
         timeout : float, optional
             Maximum time (seconds) to wait for every group to reply. Defaults
             to the hub's ``timeout`` setting.
+        efield_au : numpy.ndarray of float, shape (n_grid, 3), optional
+            Fields of every molecule, indexed by molecule ID. Batch bridges
+            take them as one packed frame, which skips the request dictionary
+            per molecule on both sides of the socket; ``requests`` is then not
+            used. Only groups already bound with a record table are served, so
+            this form is for a caller that has seen a block reply already.
 
         Returns
         -------
@@ -1806,23 +1846,41 @@ class AggregatedSocketHub(SocketHub):
         self.last_columnar.clear()
         deadline = self._deadline(timeout)
 
-        with self._lock:
-            grouped_requests = self._plan_step_locked(requests)
-        if not grouped_requests:
-            return {}
-
-        for group_id, group_request in grouped_requests.items():
-            if not self._send_step_to_group(group_id, group_request):
+        if efield_au is None:
+            with self._lock:
+                grouped_requests = self._plan_step_locked(requests)
+            if not grouped_requests:
                 return {}
+            expected_ids = {
+                group_id: set(group_request)
+                for group_id, group_request in grouped_requests.items()
+            }
+            for group_id, group_request in grouped_requests.items():
+                if not self._send_step_to_group(group_id, group_request):
+                    return {}
+        else:
+            fields = np.ascontiguousarray(efield_au, dtype=float)
+            with self._lock:
+                expected_ids = {
+                    group_id: set(group.molecule_ids)
+                    for group_id, group in self._groups.items()
+                    if group.step_records
+                }
+            if not expected_ids:
+                return {}
+            for group_id in expected_ids:
+                if not self._send_step_to_group(group_id, fields=fields):
+                    return {}
 
         responses: Dict[int, dict] = {}
-        pending_groups = set(grouped_requests.keys())
+        pending_groups = set(expected_ids)
 
         # Fast path: a single group needs only a blocking recv, no selector.
         if len(pending_groups) == 1:
             group_id = next(iter(pending_groups))
-            expected = set(grouped_requests[group_id].keys())
-            group_responses = self._collect_group_result(group_id, expected, deadline)
+            group_responses = self._collect_group_result(
+                group_id, expected_ids[group_id], deadline
+            )
             if group_responses is None:
                 return {}
             responses.update(group_responses)
@@ -1847,9 +1905,8 @@ class AggregatedSocketHub(SocketHub):
                 group_id = key.data
                 if group_id not in pending_groups:
                     continue
-                expected = set(grouped_requests[group_id].keys())
                 group_responses = self._collect_group_result(
-                    group_id, expected, deadline
+                    group_id, expected_ids[group_id], deadline
                 )
                 if group_responses is None:
                     return {}
@@ -2308,7 +2365,7 @@ class LocalSocketHubBridge:
                     _send_msg(sock, AGGREADY)
 
                 elif msg == AGGSTEP:
-                    efields = self._step_codec.recv(sock, header_already_read=True)
+                    efields = self._recv_step(sock)
                     responses = self._run_step(efields)
                     self._send_result(sock, responses)
 
@@ -2372,6 +2429,28 @@ class LocalSocketHubBridge:
             self._thread.join(timeout=float(wait))
 
         self._teardown()
+
+    def _recv_step(self, sock: socket.socket):
+        """
+        Receive one AGGSTEP frame from the hub.
+
+        Notes
+        -----
+        This method can be *optionally* overridden by subclasses that take the
+        field block whole instead of one record per molecule.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Upstream connection to the hub.
+
+        Returns
+        -------
+        dict of int to numpy.ndarray
+            Mapping from molecule ID to its ``(3,)`` field vector.
+        """
+
+        return self._step_codec.recv(sock, header_already_read=True)
 
     def _send_result(self, sock: socket.socket, responses: Mapping[int, dict]) -> None:
         """
@@ -2643,6 +2722,7 @@ class GPUBatchBridge(LocalSocketHubBridge):
         self._ids: tuple[int, ...] = ()
         self._amps_only = False
         self._columnar_keys: tuple[str, ...] = ()
+        self._step_records = b""
 
         self._upstream_sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
@@ -2684,21 +2764,37 @@ class GPUBatchBridge(LocalSocketHubBridge):
         self._model.initialize(dts.pop(), ids)
         self._ids = tuple(ids)
         self._mids = np.asarray(ids, dtype="<i4")
+        # the record table a block step frame must carry to be taken whole
+        self._step_records = np.column_stack(
+            (self._mids, np.arange(self._mids.size, dtype="<i4"))
+        ).tobytes()
 
-    def _run_step(self, efields: Mapping[int, np.ndarray]) -> Dict[int, dict]:
+    def _recv_step(self, sock: socket.socket):
+        """Take the field block whole when the hub packs one, as (num, 3)."""
+
+        nreq, records, fields = self._step_codec.recv_block(
+            sock, header_already_read=True
+        )
+        if fields.shape[0] != nreq or records != self._step_records:
+            return _resolve_step_records(records, fields)  # a per-molecule frame
+        return fields
+
+    def _run_step(self, efields) -> Dict[int, dict]:
         """Milestone-1 path: step the model, repackage into the scalar frame."""
 
-        expected = set(self._ids)
-        actual = {int(mid) for mid in efields}
-        if actual != expected:
-            raise RuntimeError(
-                f"GPU batch group {self.group_id!r} received molecule ids "
-                f"{sorted(actual)}, expected {sorted(expected)}."
+        if isinstance(efields, np.ndarray):
+            block = efields  # a block frame, already in this group's id order
+        else:
+            expected = set(self._ids)
+            actual = {int(mid) for mid in efields}
+            if actual != expected:
+                raise RuntimeError(
+                    f"GPU batch group {self.group_id!r} received molecule ids "
+                    f"{sorted(actual)}, expected {sorted(expected)}."
+                )
+            block = np.stack(
+                [np.asarray(efields[m], dtype=float).reshape(3) for m in self._ids]
             )
-
-        block = np.stack(
-            [np.asarray(efields[mid], dtype=float).reshape(3) for mid in self._ids]
-        )
         result = self._model.step(block)
 
         if self._columnar_keys:

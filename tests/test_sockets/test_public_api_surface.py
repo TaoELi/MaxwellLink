@@ -263,7 +263,9 @@ _SIGNATURE_SNAPSHOT = {
     "AggregatedSocketHub.add_bridge": "(self, local_unixsocket)",
     "AggregatedSocketHub.init_remote_bridges": "(self, molecules, *, molecules_per_bridge, unix_prefix='bridge_', save_file='aggregation.json')",
     "AggregatedSocketHub.wait_until_bound": "(self, init_payloads, require_init=True, timeout=None)",
-    "AggregatedSocketHub.step_barrier": "(self, requests, timeout=None)",
+    "AggregatedSocketHub.step_barrier": (
+        "(self, requests, timeout=None, efield_au=None)"
+    ),
     "AggregatedSocketHub.stop": "(self)",
     "AggregatedBridge.__init__": "(self, *, hub, group_id, bridge)",
     "AggregatedBridge.append": "(self, molecules)",
