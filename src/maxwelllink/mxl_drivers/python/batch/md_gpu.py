@@ -274,6 +274,7 @@ class MDGPUBatchModel(DummyBatchModel):
         self.dt = 0.0  # shared time step in a.u.
         self.t = 0.0  # current time in a.u.
         self.molecule_ids = ()  # molecule IDs, set in initialize()
+        self._rngs = ()  # one host generator per molecule, set in initialize()
         self.x = self.p = self.F = None  # system state, set in initialize()
         self.c1h = 1.0  # Langevin O half-step scaling
         self.mu_initial = None  # dipole baseline, set in initialize()
@@ -286,8 +287,11 @@ class MDGPUBatchModel(DummyBatchModel):
         """
         Allocate the batch state and optionally pre-equilibrate.
 
-        Every system starts from the force field's geometry. The momenta come from the
-        same ``seed + molecule_id`` stream the scalar ``MDModel`` uses.
+        Every system starts from the force field's geometry and owns one random stream
+        keyed on ``seed + molecule_id``, as in the scalar ``MDModel``, for both its
+        initial momenta and its Langevin noise. A molecule's trajectory therefore does
+        not depend on which batch, or how many drivers, it is run in; on the CPU backend
+        it is the scalar driver's trajectory bit for bit.
 
         Parameters
         ----------
@@ -327,13 +331,19 @@ class MDGPUBatchModel(DummyBatchModel):
             self.c1h = 1.0
         self.noise = np.sqrt(mass * self.kT * (1.0 - self.c1h**2))  # (na, 1)
 
-        # positions: one geometry replicated; momenta: one draw per molecule id
+        # One host generator per molecule, seeded like MDModel.initialize(). It draws
+        # the initial momenta on both backends and, on the CPU backend, the Langevin
+        # noise as well; the GPU backend seeds its device streams the same way below.
+        self._rngs = [
+            np.random.default_rng(self.seed + mid) for mid in self.molecule_ids
+        ]
+
+        # positions: one geometry replicated; momenta: one draw per molecule
         x_host = np.broadcast_to(self.x0, (n, na, 3)).copy()
         p_host = np.zeros((n, na, 3))
         if self.init_velocities:
             sigma_p = np.sqrt(mass * self.kT)
-            for row, mid in enumerate(self.molecule_ids):
-                rng = np.random.default_rng(self.seed + int(mid))
+            for row, rng in enumerate(self._rngs):
                 p = sigma_p * rng.standard_normal((na, 3))
                 p -= mass * (p.sum(axis=0) / mass.sum())  # no center-of-mass drift
                 p_host[row] = p
@@ -351,16 +361,22 @@ class MDGPUBatchModel(DummyBatchModel):
         self._energy = xp.zeros(n, dtype=xp.float64)
 
         if self._on_gpu:
-            from numba.cuda.random import create_xoroshiro128p_states
+            from numba import cuda
+            from numba.cuda.random import init_xoroshiro128p_states, xoroshiro128p_dtype
 
             self.kernels = _build_integrator_kernels()
             self.mass_flat = xp.asarray(mass.ravel())  # the kernels index by atom
             self.qeff_flat = xp.asarray(qeff.ravel())
-            self.rng_states = create_xoroshiro128p_states(
-                n * _THREADS_PER_BLOCK, seed=self.seed
-            )
-        else:
-            self._rng = np.random.default_rng(self.seed)
+            # Langevin noise on the device: one block of thread streams per system,
+            # seeded from seed + molecule_id so the block is a property of the
+            # molecule, not of its row in this batch
+            tpb = _THREADS_PER_BLOCK
+            self.rng_states = cuda.device_array(n * tpb, dtype=xoroshiro128p_dtype)
+            for row, mid in enumerate(self.molecule_ids):
+                init_xoroshiro128p_states(
+                    self.rng_states[row * tpb : (row + 1) * tpb],
+                    seed=np.uint64(self.seed + mid),
+                )
 
         if self.restart and self.checkpoint:
             self.load_checkpoint()
@@ -423,7 +439,7 @@ class MDGPUBatchModel(DummyBatchModel):
         dt, mass = self.dt, self.mass
 
         if c1h < 1.0:  # O
-            self.p[:] = c1h * self.p + noise * self._rng.standard_normal(self.p.shape)
+            self._langevin_half_kick_on_cpu(c1h, noise)
         self.p += 0.5 * dt * self.F  # B
         self.x += dt * (self.p / mass)  # A
         self._forces_on_cpu(efield)  # force at the E-field time
@@ -440,7 +456,26 @@ class MDGPUBatchModel(DummyBatchModel):
         self._energy[:] = kinetic + self.potential
 
         if c1h < 1.0:  # O
-            self.p[:] = c1h * self.p + noise * self._rng.standard_normal(self.p.shape)
+            self._langevin_half_kick_on_cpu(c1h, noise)
+
+    def _langevin_half_kick_on_cpu(self, c1h, noise):
+        """
+        Apply one Ornstein-Uhlenbeck half-step to the momenta of every system.
+
+        Each system draws from its own generator, in the order ``MDModel`` draws, so a
+        batch member and the scalar driver with the same molecule ID stay identical.
+
+        Parameters
+        ----------
+        c1h : float
+            Langevin O half-step scaling.
+        noise : numpy.ndarray of float, shape (na, 1)
+            Momentum noise amplitude of the Langevin half-step, per atom.
+        """
+
+        shape = (self.na, 3)
+        for d, rng in enumerate(self._rngs):
+            self.p[d] = c1h * self.p[d] + noise * rng.standard_normal(shape)
 
     def _step_on_gpu(self, efield, c1h, noise):
         """
@@ -540,8 +575,8 @@ class MDGPUBatchModel(DummyBatchModel):
         """
         Run a field-free Langevin trajectory to thermalize every system.
 
-        Each system carries its own random stream, so this is what decorrelates the
-        members of a batch that all started from the same geometry.
+        Each system carries its own random stream, so this is what decorrelates systems
+        that all started from the same geometry, within a batch and across batches.
 
         Parameters
         ----------

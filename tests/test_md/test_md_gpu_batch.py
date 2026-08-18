@@ -109,10 +109,26 @@ def test_gpu_nve_trajectory_matches_ipi_reference():
 
 
 @pytest.mark.core
-def test_batch_reproduces_the_scalar_mdmodel():
-    """A batch member and the scalar MDModel with the same molecule ID agree."""
+@pytest.mark.parametrize(
+    "thermostat, pre_nvt",
+    [("nve", False), ("nvt", False), ("nvt", True)],
+    ids=["nve", "nvt", "nvt+pre_nvt"],
+)
+def test_batch_reproduces_the_scalar_mdmodel(thermostat, pre_nvt):
+    """A batch member and the scalar MDModel with the same molecule ID agree.
+
+    That includes the thermostatted cases: both draw a system's initial momenta and
+    its Langevin noise from the same ``seed + molecule_id`` generator, in the same
+    order, so the CPU batch reproduces the scalar driver bit for bit.
+    """
     molecule_ids = [0, 1, 2]
-    kwargs = dict(ff="co2jcp2021", thermostat="nve", pre_nvt=False, seed=7)
+    kwargs = dict(
+        ff="co2jcp2021",
+        thermostat=thermostat,
+        pre_nvt=pre_nvt,
+        pre_nvt_duration_ps=0.005,  # ten steps
+        seed=7,
+    )
     rng = np.random.default_rng(11)
     efields = rng.normal(0.0, 2e-4, (4, len(molecule_ids), 3))
 
@@ -134,6 +150,40 @@ def test_batch_reproduces_the_scalar_mdmodel():
             assert np.max(np.abs(result.amplitude_au[i] - m.calc_amp_vector())) < 1e-14
             assert np.max(np.abs(result.dipole_half_au[i] - mu_half)) < 1e-11
             assert abs(result.energy_au[i] - data["energy_au"]) < 1e-12
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_noise_streams_are_keyed_per_molecule(backend):
+    """A molecule's Langevin noise is set by its ID alone, never by its batch mates.
+
+    Two batches share molecule 7 at different rows, so it must follow one trajectory
+    in both. Their row-0 members are different molecules that both start with zero
+    centre-of-mass momentum; p_com is then driven by the noise alone, so it must not
+    agree either -- with streams keyed on the row it would, to round-off.
+    """
+    xp = np if backend == "numpy" else _cupy_or_skip()
+    kwargs = dict(ff="co2jcp2021", thermostat="nvt", pre_nvt=False, seed=3)
+    zero_field = np.zeros((2, 3))
+
+    def momenta_after(molecule_ids, n_steps=50):
+        batch = MDBatch(num=len(molecule_ids), driver_kwargs=kwargs, xp=xp)
+        batch.initialize(_DT_AU, molecule_ids)
+        for _ in range(n_steps):
+            batch.step(zero_field)
+        momenta = batch._to_host(batch.p)
+        batch.close()
+        return momenta
+
+    p_a = momenta_after([0, 7])
+    p_b = momenta_after([7, 10])
+    scale = np.max(np.abs(p_a))
+    # molecule 7 in either batch
+    assert np.max(np.abs(p_a[1] - p_b[0])) <= 1e-12 * scale
+    # molecules 0 and 10, both in row 0
+    p_com_a = p_a[0].sum(axis=0)
+    p_com_b = p_b[0].sum(axis=0)
+    assert np.max(np.abs(p_com_a - p_com_b)) > 1e-3 * scale
 
 
 @pytest.mark.core
@@ -213,7 +263,10 @@ if __name__ == "__main__":
     test_gpu_forces_match_lammps_reference()
     test_gpu_forces_match_ipi_reference()
     test_gpu_nve_trajectory_matches_ipi_reference()
-    test_batch_reproduces_the_scalar_mdmodel()
+    for thermostat, pre_nvt in (("nve", False), ("nvt", False), ("nvt", True)):
+        test_batch_reproduces_the_scalar_mdmodel(thermostat, pre_nvt)
+    for backend in ("numpy", "cupy"):
+        test_noise_streams_are_keyed_per_molecule(backend)
     test_nvt_reaches_the_target_temperature()
     test_reset_dipole_subtracts_the_dipole_at_time_zero()
     print("GPU-batched MD force + NVE + NVT tests match the references")
