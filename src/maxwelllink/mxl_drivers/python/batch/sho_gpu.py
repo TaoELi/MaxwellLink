@@ -5,49 +5,33 @@
 # See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
-"""GPU-batched simple-harmonic-oscillator (SHO) model built on the scalar ``SHOModel``.
+"""
+GPU-batched simple-harmonic-oscillator (SHO) model built on the scalar ``SHOModel``.
 
-This driver runs one execution path on each backend, behind a single interface:
+This driver runs one execution path on each backend:
 
-- **CPU reference** (``xp=numpy``): a vectorized velocity-Verlet step.  It needs
-  no extra dependency, runs on any host (e.g. a laptop without CUDA), and is the
-  readable ground truth used by the test suite.
+- **CPU reference** (``xp=numpy``): a vectorized velocity-Verlet step.
 - **GPU kernel** (``xp=cupy``): a *fused* ``numba.cuda.jit`` kernel that gives
-  **one GPU thread to each oscillator**.  Every thread advances its own
-  oscillator with the same equations of motion, entirely in registers, in a
-  single kernel launch.
-
-The GPU path is the pattern to copy when writing a more complicated batched
-driver (for example, molecular dynamics): put the per-system physics in a
-``@cuda.jit(device=True)`` function and let one thread own one system.  That
-generalizes to force fields with branches and per-atom loops, which the
-vectorized whole-array style cannot express cleanly.  The two paths are kept in
-lock-step by :func:`~maxwelllink...test_gpu_batch_sho`, which pins both to the
-scalar :class:`SHOModel` to float64 tolerance.
+  **one GPU thread to each oscillator**.
 """
 
 import numpy as np
 
 from ..models.sho_model import SHOModel
-from .base import BatchStepResult, DummyBatchModel
+from .dummy_gpu import BatchStepResult, DummyBatchModel
 
-# Flags whose per-oscillator side effects (checkpoint files, log streams) defeat
-# batching; rejected for the GPU backend in this first implementation.
+# The following molecular driver flags are unsupported in the GPU-batched backend
 _UNSUPPORTED_GPU_FLAGS = ("checkpoint", "restart", "verbose")
 
-# Threads per block for the CUDA launch.  A multiple of the warp size (32); 128
-# is a solid default that keeps the GPU busy without heavy register pressure.
+# Threads per block for the CUDA launch.  A multiple of the warp size (32).
 _THREADS_PER_BLOCK = 128
 
-# The fused kernel is compiled once per process and cached here, so creating many
-# batch models never recompiles it.
+# The fused kernel is compiled once per process and cached here
 _STEP_KERNEL = None
 
-# ``numba.cuda`` is an optional dependency, so it is imported lazily by
-# :func:`_load_cuda` and stored in this MODULE GLOBAL.  Keeping it global (rather
-# than a local/closure variable) matters: the compiled kernel then refers to
-# ``cuda`` by a global name, which is what lets the very same kernel also run
-# under numba's CUDA simulator (``NUMBA_ENABLE_CUDASIM=1``) for laptop debugging.
+# The ``numba.cuda`` module is imported lazily and cached here.  It is only
+# required when ``xp=cupy`` is used, so hosts without CUDA can run the CPU
+# reference without installing numba.
 cuda = None
 
 
@@ -71,8 +55,8 @@ def _load_cuda():
             from numba import cuda as numba_cuda
         except Exception as exc:  # ImportError, or a numba/CUDA runtime failure
             raise ImportError(
-                "The GPU SHO backend requires numba for its CUDA kernel. Install "
-                "it alongside CuPy, e.g. 'pip install maxwelllink[gpu-cuda12]'. On "
+                "The GPU backend requires numba for its CUDA kernel. Install "
+                "it alongside CuPy, e.g., 'pip install maxwelllink[gpu-cuda12]'. On "
                 "hosts without CUDA, inject xp=numpy to run the CPU reference."
             ) from exc
         cuda = numba_cuda
@@ -84,8 +68,7 @@ def _build_step_kernel():
 
     The kernel launches one GPU thread per oscillator.  The per-oscillator
     physics lives in a small ``device`` function so that heavier drivers can
-    reuse the same structure -- a thin kernel that indexes one system, plus a
-    device function that advances it.
+    reuse the same structure.
 
     Returns
     -------
@@ -103,9 +86,7 @@ def _build_step_kernel():
     def advance_one_oscillator(q, p, acc, drive, omega_sq, dt):
         """Advance ONE oscillator by a single velocity-Verlet step.
 
-        Mirrors :meth:`SHOModel.propagate` line by line, so the batched result
-        matches the scalar driver.  Returns the updated state together with the
-        half-step momentum/position used for the source amplitude and dipole.
+        Mirrors :meth:`SHOModel.propagate`.
         """
 
         p = p + 0.5 * acc * dt  # momentum to the half step
@@ -131,11 +112,8 @@ def _build_step_kernel():
         mu_force,
         energy,
     ):
-        """One thread per oscillator: advance it and write its outputs.
-
-        Off-axis output columns are left untouched (they were zero-initialized
-        and only the driving ``orientation`` column ever changes), exactly like
-        the scalar and CPU-reference paths.
+        """
+        One thread per oscillator computation for GPU kernel.  The thread index is the oscillator index.
         """
 
         i = cuda.grid(1)  # global thread index == oscillator index
@@ -152,6 +130,7 @@ def _build_step_kernel():
             mu_force[i, orientation] = mu0 * q_new  # dipole at the force time
             energy[i] = 0.5 * omega_sq * q_half * q_half + 0.5 * p_half * p_half
 
+    # Cache the compiled kernel so that multiple batch models do not recompile it.
     _STEP_KERNEL = step_kernel
     return _STEP_KERNEL
 
@@ -159,30 +138,13 @@ def _build_step_kernel():
 class SHOGPUBatchModel(DummyBatchModel):
     """
     Vectorized simple-harmonic-oscillator batch model.
-
-    Parameters
-    ----------
-    num : int
-        Number of oscillators in the batch.
-    driver_kwargs : mapping
-        Keyword arguments for the template :class:`SHOModel`.
-    xp : module
-        Array module exposing the NumPy API (``numpy`` or ``cupy``).  ``cupy``
-        selects the fused ``numba.cuda.jit`` kernel; ``numpy`` selects the
-        vectorized CPU reference.
-    driver_args : sequence, optional
-        Positional arguments for the template :class:`SHOModel`, forwarded
-        exactly as ``mxl_driver``/``mxl_bridge`` forward bare ``--param`` tokens.
-    store_additional_data : bool, default: False
-        Reserved for the future columnar fast path; unused on the correctness
-        path, which always reports per-oscillator data.
     """
 
     def __init__(
         self, *, num, driver_kwargs, xp, driver_args=None, store_additional_data=False
     ):
         """
-        Validate the SHO parameters and cache the canonical scalar values.
+        Initialize a GPU-batched SHO model with a single template oscillator.
 
         Parameters
         ----------
@@ -232,6 +194,8 @@ class SHOGPUBatchModel(DummyBatchModel):
         self._on_gpu = False  # True when xp is CuPy (use the CUDA kernel)
         self._kernel = None  # compiled numba kernel, built in initialize()
 
+    # ----------------------- heavy-load initialization ------------------------------
+    
     def initialize(self, dt_au, molecule_ids):
         """
         Allocate the contiguous oscillator state and output buffers.
@@ -280,13 +244,34 @@ class SHOGPUBatchModel(DummyBatchModel):
         # imports numba and populates the module-global ``cuda``).
         self._kernel = _build_step_kernel() if self._on_gpu else None
 
+    # ----------------------- internal helper methods --------------------------
+
+    def _to_host(self, array):
+        """
+        Return a fresh host NumPy snapshot of an array-module array.
+
+        Parameters
+        ----------
+        array : numpy.ndarray or cupy.ndarray
+            Array from ``self.xp`` to copy to host memory.
+
+        Returns
+        -------
+        numpy.ndarray
+            A host copy: ``cupy.asnumpy`` for a device array, otherwise a fresh
+            NumPy copy so reused output buffers cannot mutate returned data.
+        """
+
+        asnumpy = getattr(self.xp, "asnumpy", None)
+        if asnumpy is not None:  # cupy: device -> host copy
+            return asnumpy(array)
+        return np.array(array)  # numpy: force a copy so column reuse cannot mutate it
+
+    # ----------------------- per-step methods ------------------------------
+
     def step(self, efield_au):
         """
         Advance every oscillator by one velocity-Verlet step.
-
-        Dispatches to the fused CUDA kernel on a CuPy backend, or the vectorized
-        NumPy reference on a CPU backend.  Both implement the same equations of
-        motion, so results match the scalar driver to float64 tolerance.
 
         Parameters
         ----------
@@ -333,11 +318,7 @@ class SHOGPUBatchModel(DummyBatchModel):
 
     def _step_on_cpu(self, field):
         """
-        Vectorized velocity-Verlet reference (NumPy; CUDA-less hosts and tests).
-
-        This is the readable ground truth the CUDA kernel is validated against;
-        the two backends implement the *same* equations of motion in the *same*
-        order (see :meth:`SHOModel.propagate`).
+        Vectorized velocity-Verlet reference (NumPy for CPU).
 
         Parameters
         ----------
@@ -364,7 +345,7 @@ class SHOGPUBatchModel(DummyBatchModel):
 
     def _step_on_gpu(self, field):
         """
-        Fused CUDA step: one ``numba.cuda`` thread advances one oscillator.
+        CUDA step: one ``numba.cuda`` thread advances one oscillator.
 
         The whole velocity-Verlet update and all diagnostics run in a single
         kernel launch, so each oscillator's state stays in registers for the
@@ -396,6 +377,8 @@ class SHOGPUBatchModel(DummyBatchModel):
         # numba and CuPy may schedule on different CUDA streams; synchronize once
         # here so the subsequent device->host copies see the finished results.
         cuda.synchronize()
+
+    # ------------ optional operation --------------
 
     def append_additional_data(self):
         """
@@ -447,31 +430,9 @@ class SHOGPUBatchModel(DummyBatchModel):
         Notes
         -----
         CuPy frees the underlying device memory once these references are
-        released (and on the next memory-pool collection).  The compiled kernel
-        is process-global and intentionally kept for reuse by later models.
+        released.
         """
 
         self.q = self.p = self.acc = None
         self._amp = self._mu_half = self._mu_force = self._energy = None
         self._kernel = None
-
-    def _to_host(self, array):
-        """
-        Return a fresh host NumPy snapshot of an array-module array.
-
-        Parameters
-        ----------
-        array : numpy.ndarray or cupy.ndarray
-            Array from ``self.xp`` to copy to host memory.
-
-        Returns
-        -------
-        numpy.ndarray
-            A host copy: ``cupy.asnumpy`` for a device array, otherwise a fresh
-            NumPy copy so reused output buffers cannot mutate returned data.
-        """
-
-        asnumpy = getattr(self.xp, "asnumpy", None)
-        if asnumpy is not None:  # cupy: device -> host copy
-            return asnumpy(array)
-        return np.array(array)  # numpy: force a copy so column reuse cannot mutate it

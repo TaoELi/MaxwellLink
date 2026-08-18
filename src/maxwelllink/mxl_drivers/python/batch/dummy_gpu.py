@@ -5,10 +5,10 @@
 # See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
-"""Dummy vectorized batch model: the template for GPU-batched drivers.
+"""
+Dummy vectorized batch model: the template for GPU-batched drivers.
 
-Here, a vectorized batch model advances ``num`` sub-systems together using contiguous arrays
-(``numpy`` on a development host, ``cupy`` on a CUDA device).
+Here, a vectorized batch model advances ``num`` sub-systems together using contiguous arrays.
 """
 
 from dataclasses import dataclass
@@ -22,8 +22,7 @@ class BatchStepResult:
     Columnar physics outputs for one FDTD step (contiguous host arrays).
 
     All arrays are host (NumPy) arrays in atomic units for a batch of ``num``
-    sub-systems.  ``eq=False`` avoids the ambiguous-truth error that comparing
-    NumPy arrays inside a dataclass ``__eq__`` would raise.
+    sub-systems.
 
     Attributes
     ----------
@@ -49,8 +48,7 @@ class DummyBatchModel:
 
     This class serves as a template for implementing GPU-batched moleular drivers.  It
     advances ``num`` sub-systems together with contiguous arrays and provides
-    the interface consumed by
-    :class:`~maxwelllink.sockets.aggregated.GPUBatchBridge`.
+    the interface consumed by :class:`~maxwelllink.sockets.aggregated.GPUBatchBridge`.
     """
 
     # -------------- heavy-load initialization (at AGGINIT) --------------
@@ -117,9 +115,11 @@ class DummyBatchModel:
         Notes
         -----
         This method can be *optionally* overridden by subclasses to send
-        additional data to MaxwellLink. We recommend including "time_au",
-        "energy_au", and dipole components "mux_au", "muy_au", "muz_au" in each
-        dictionary, matching the scalar-driver format for easy energy analysis.
+        additional data to MaxwellLink. We recommend including 
+        "time_au", "energy_au", 
+        dipole components at half-step time: "mux_au", "muy_au", "muz_au" 
+        and the force-time dipole (``mux_m_au``/``muy_m_au``/``muz_m_au``)
+        in each dictionary, matching the scalar-driver format.
 
         Returns
         -------

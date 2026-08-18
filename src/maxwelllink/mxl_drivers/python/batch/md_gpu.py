@@ -9,7 +9,7 @@
 Placeholder for the future in-house GPU molecular-dynamics batch model.
 """
 
-from .base import DummyBatchModel
+from .dummy_gpu import DummyBatchModel
 
 _NOT_IMPLEMENTED = (
     "The GPU molecular-dynamics batch model is not implemented yet. See "
@@ -44,7 +44,6 @@ class MDGPUBatchModel(DummyBatchModel):
         Raises
         ------
         NotImplementedError
-            Always -- this backend is a placeholder.
         """
 
         raise NotImplementedError(_NOT_IMPLEMENTED)

@@ -11,7 +11,7 @@ Vectorized batch-model backends and their lazy registry.
 
 from __future__ import annotations
 
-from .base import BatchStepResult, DummyBatchModel
+from .dummy_gpu import BatchStepResult, DummyBatchModel
 
 __all__ = [
     "DummyBatchModel",
