@@ -2385,12 +2385,7 @@ class CPUBatchBridge(LocalSocketHubBridge):
             if self._amps_only:
                 responses[mid] = {"amp": amplitude, "extra": b""}
                 continue
-            extra = json.dumps(
-                model.append_additional_data(),
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
+            extra = _json_dumps_bytes(model.append_additional_data())
             responses[mid] = {"amp": amplitude, "extra": extra}
         return responses
 
@@ -2541,12 +2536,7 @@ class GPUBatchBridge(LocalSocketHubBridge):
         extras = self._model.append_additional_data()
         responses: Dict[int, dict] = {}
         for i, mid in enumerate(self._ids):
-            extra = json.dumps(
-                extras[i],
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
+            extra = _json_dumps_bytes(extras[i])
             responses[mid] = {"amp": result.amplitude_au[i], "extra": extra}
         return responses
 

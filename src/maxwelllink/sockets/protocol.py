@@ -38,6 +38,8 @@ from typing import Dict, Mapping, Optional
 
 import numpy as np
 
+from ..tools.fast_json import json_dumps
+
 # ======================================================================
 # Protocol constants and wire dtypes
 # ======================================================================
@@ -522,12 +524,7 @@ def _json_dumps_bytes(payload: Mapping) -> bytes:
     which keeps the HELLO/INIT framing deterministic across hub and bridge.
     """
 
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
+    return json_dumps(payload)
 
 
 def _json_loads_bytes(payload: bytes) -> dict:
