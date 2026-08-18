@@ -19,9 +19,17 @@ from .transverse_components import (
     project_transverse_field_3d,
 )
 from .fast_json import json_loads
+from .slko import (
+    available_sets,
+    fetch_slko,
+    resolve_slko,
+)
 
 __all__ = [
     "json_loads",
+    "available_sets",
+    "fetch_slko",
+    "resolve_slko",
     "ir_spectrum",
     "rt_tddft_spectrum",
     "lr_tddft_spectrum",

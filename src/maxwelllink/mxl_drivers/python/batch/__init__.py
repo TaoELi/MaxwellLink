@@ -14,7 +14,7 @@ from __future__ import annotations
 from .dummy_gpu import BatchStepResult, DummyBatchModel
 
 # Batch drivers available on the GPU backend
-_GPU_BATCH_DRIVERS = ("sho", "md")
+_GPU_BATCH_DRIVERS = ("sho", "md", "rtdftb")
 
 __all__ = [
     "DummyBatchModel",
@@ -44,7 +44,7 @@ def get_batch_model(backend: str, driver: str):
     backend : str
         Batch backend name (currently only ``"gpu"``).
     driver : str
-        Batch driver name (currently only ``"sho"``).
+        Batch driver name; see :func:`supported_batch_drivers`.
 
     Raises
     ------
@@ -59,6 +59,10 @@ def get_batch_model(backend: str, driver: str):
             from .sho_gpu import SHOGPUBatchModel
 
             return SHOGPUBatchModel
+        if normalized_driver == "rtdftb":
+            from .rtdftb_gpu import RTDFTBGPUBatchModel
+
+            return RTDFTBGPUBatchModel
         from .md_gpu import MDGPUBatchModel
 
         return MDGPUBatchModel
