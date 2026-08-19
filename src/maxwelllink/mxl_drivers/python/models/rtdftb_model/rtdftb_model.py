@@ -86,6 +86,7 @@ class RTDFTBModel(DummyModel):
         scc_tolerance=1.0e-10,
         ehrenfest: bool = False,
         propagator: str = "leapfrog",
+        hybrid_precision: bool = False,
         dt_rtdftb_au=None,
         delta_kick_au: float = 0.0,
         kick_direction: str = "z",
@@ -141,6 +142,14 @@ class RTDFTBModel(DummyModel):
         propagator : {'leapfrog', 'cayley', 'cayley-midpoint'}, default: 'leapfrog'
             Electronic propagator. The default is what DFTB+ itself runs, so it is the
             one that reproduces an external DFTB+ driver step for step.
+        hybrid_precision : bool, default: False
+            Opt-in hybrid FP32/FP64 arithmetic of the GPU batch driver: the dense
+            linear algebra of every step, including the leapfrog products, ``S^-1`` and the
+            energy-weighted density, runs in single precision through cuBLAS/
+            cuSOLVER, while the density matrix, every accumulator and all assembly
+            kernels stay in double precision. Roughly halves the step time of large
+            batches on consumer GPUs (whose FP64 rate is 1/64 of FP32) and keeps the
+            conservation laws at FP64 quality.
         dt_rtdftb_au : float, optional
             Electronic time step in atomic units. ``None`` (the default) takes one RT
             step per EM step, as the external DFTB+ driver does. A smaller value makes
@@ -248,6 +257,7 @@ class RTDFTBModel(DummyModel):
 
         self.ehrenfest = bool(ehrenfest)
         self.propagator = propagator
+        self.hybrid_precision = bool(hybrid_precision)
         self.dt_rtdftb_au = None if dt_rtdftb_au is None else float(dt_rtdftb_au)
         self.delta_kick_au = float(delta_kick_au)
         self.kick_direction = _DIRECTIONS[str(kick_direction).lower()]

@@ -528,6 +528,39 @@ def test_every_kernel_builds_for_cuda():
     assert set(device) == set(dftb_mod.kernels_dftb.KERNELS)
 
 
+@pytest.mark.core
+@pytest.mark.parametrize("ehrenfest", [False, True])
+def test_hybrid_precision_tracks_fp64_and_is_ignored_on_cpu(ehrenfest):
+    """``hybrid_precision=True``: FP32 dense algebra on the CUDA backend.
+
+    On the GPU the hybrid run must stay within FP32-round-off reach of the FP64 run
+    over 30 steps while being bit-identical in shape and reporting; on the numpy
+    backend the flag is ignored, so the results are bit-identical to FP64.
+    """
+
+    fields = _fields()
+    overrides = dict(ehrenfest=ehrenfest)
+    if ehrenfest:
+        overrides["velocities"] = _VELOCITIES
+
+    on_cpu = _run_batch(np, fields, **overrides)
+    on_cpu_hybrid = _run_batch(np, fields, hybrid_precision=True, **overrides)
+    on_cpu[3].close(), on_cpu_hybrid[3].close()
+    for reference, hybrid in zip(on_cpu[:3], on_cpu_hybrid[:3]):
+        assert np.array_equal(reference, hybrid)  # FP64 only on the CPU backend
+
+    cupy = _array_module("cupy")
+    on_gpu = _run_batch(cupy, fields, **overrides)
+    on_gpu_hybrid = _run_batch(cupy, fields, hybrid_precision=True, **overrides)
+    assert on_gpu_hybrid[3]._hybrid and not on_gpu[3]._hybrid
+    on_gpu[3].close(), on_gpu_hybrid[3].close()
+    # single-precision round-off enters only the per-step increment, so 30 steps stay
+    # within ~n_steps * 1e-7 of the FP64 trajectory; a wrong product would be O(1)
+    assert np.abs(on_gpu_hybrid[0] - on_gpu[0]).max() < 5e-6  # dipole
+    assert np.abs(on_gpu_hybrid[2] - on_gpu[2]).max() < 5e-6  # energy
+    assert np.abs(on_gpu_hybrid[0] - on_gpu[0]).max() > 0.0  # FP32 really ran
+
+
 if __name__ == "__main__":
     test_batch_reproduces_independent_scalar_drivers("numpy")
     test_systems_do_not_leak_into_each_other("numpy")

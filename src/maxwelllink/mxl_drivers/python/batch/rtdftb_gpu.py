@@ -92,6 +92,16 @@ _Scratch = namedtuple(
     "density product weight_e weight gradient pair work_r pivot",
 )
 
+#: Persistent single-precision mirrors of the dense-algebra operands, allocated only
+#: in hybrid mode (``RTDFTBModel(hybrid_precision=True)`` on the CUDA backend). The
+#: FP64 arrays stay the state; these hold the per-step downcasts the FP32 cuBLAS/
+#: cuSOLVER calls read, so no step allocates. Fields from ``overlap`` on exist only
+#: when the nuclei move (``None`` otherwise).
+_FP32 = namedtuple(
+    "_FP32",
+    "h s_inv rho t1 work_b work_c overlap coupling work_r density product weight",
+)
+
 #: The per-thread stages of one step. ``geometry`` and ``force`` exist only when the
 #: nuclei move; the dense linear algebra between the stages is CuPy's.
 _Stages = namedtuple("_Stages", "pre geometry post force")
@@ -671,6 +681,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._template = template
         self.ehrenfest = template.ehrenfest
         self.reset_dipole = template.reset_dipole
+        self.hybrid_precision = template.hybrid_precision
         # run-time output, as the scalar driver configures it; one file for the whole
         # batch, opened in initialize()
         self.property_filename = template.property_filename
@@ -695,6 +706,8 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self.n_atom = 0
         self.n_shell = 0
         self._on_gpu = False
+        self._hybrid = False  # hybrid_precision resolved against the backend
+        self._fp32 = None  # the _FP32 mirrors, allocated only in hybrid mode
         self._shared_geometry = True  # one geometry for all, until initialize() says
         self._kernels = None
         self._bundles = None
@@ -731,6 +744,16 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self.dt = float(dt_au)
         self.t = 0.0
         self._on_gpu = getattr(xp, "__name__", "") == "cupy"
+        self._hybrid = bool(self.hybrid_precision and self._on_gpu)
+        if self.hybrid_precision:
+            print(
+                "[RTDFTBGPUBatchModel] hybrid FP32/FP64 precision "
+                + (
+                    "enabled: FP32 dense algebra, FP64 state."
+                    if self._hybrid
+                    else "requested, but the CPU backend is FP64 only; ignored."
+                )
+            )
 
         # Every system starts as the scalar driver of its molecule ID would: ground
         # state, pre-NVT, velocities, kick and bootstrap all come from
@@ -808,6 +831,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._work_a = xp.zeros((num, n, n), dtype=xp.complex128)
         self._work_b = xp.zeros((num, n, n), dtype=xp.complex128)
         self._work_c = xp.zeros((num, n, n), dtype=xp.complex128)
+        self._fp32 = self._allocate_fp32() if self._hybrid else None
         # per-system scalars carried from one stage kernel to the next
         self._energy_start = xp.zeros(num, dtype=xp.float64)
         self._e_kin = xp.zeros(num, dtype=xp.float64)
@@ -871,6 +895,24 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         if self._on_gpu:
             self._kernels = _build_stage_kernels(self.ehrenfest)
         self._bundles = self._build_bundles()
+
+    def _allocate_fp32(self):
+        """The persistent FP32 mirrors of hybrid mode, see :data:`_FP32`."""
+
+        xp, num, n = self.xp, self.num, self.n_orb
+
+        def real():
+            return xp.zeros((num, n, n), dtype=xp.float32)
+
+        def cplx():
+            return xp.zeros((num, n, n), dtype=xp.complex64)
+
+        ehrenfest_only = (
+            (real(), real(), real(), real(), real(), real())
+            if self.ehrenfest
+            else (None,) * 6
+        )
+        return _FP32(real(), real(), cplx(), cplx(), cplx(), cplx(), *ehrenfest_only)
 
     def _allocate_scratch(self):
         """Per-system working storage, see :data:`_Scratch`."""
@@ -1100,6 +1142,28 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         """
 
         xp = self.xp
+        if self._hybrid:
+            # the same products in FP32: the operands of this step are downcast into
+            # the persistent mirrors, the FP64 density accumulates the increment.
+            # Round-off enters only the increment (~1e-7 of it per step), which keeps
+            # the energy drift and the electron count at FP64 quality; see
+            # ``RTDFTBModel(hybrid_precision=...)``.
+            fp = self._fp32
+            t1, work_b, work_c = fp.t1, fp.work_b, fp.work_c  # augmented assignment
+            fp.h[...] = self._h
+            fp.s_inv[...] = self._s_inv
+            fp.rho[...] = self._rho
+            xp.multiply(xp.matmul(fp.s_inv, fp.h), xp.complex64(1j), out=t1)  # i S^-1 H
+            if self.ehrenfest:
+                fp.coupling[...] = self._coupling
+                xp.matmul(fp.s_inv, fp.coupling, out=fp.work_r)
+                t1 += fp.work_r  # + S^-1 D
+            xp.matmul(t1, fp.rho, out=work_b)  # T1 rho
+            xp.conj(work_b.transpose(0, 2, 1), out=work_c)  # rho T1^dagger
+            work_b += work_c
+            work_b *= xp.complex64(step)
+            self._rho_old -= work_b  # upcast accumulate into the FP64 state
+            return
         t1, work_b, work_c = self._work_a, self._work_b, self._work_c
         xp.multiply(xp.matmul(self._s_inv, self._h), 1j, out=t1)  # i S^-1 H
         if self.ehrenfest:
@@ -1114,6 +1178,16 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         """``S^-1`` at the new geometry, the LU inverse ``rt.lu_invert`` takes."""
 
         xp = self.xp
+        if self._hybrid:
+            # the FP32 LU inverse; upcast into the FP64 ``s_inv`` every reader shares
+            fp = self._fp32
+            fp.overlap[...] = self._overlap
+            if self.num < _INVERSE_BATCH_MIN:
+                for i in range(self.num):
+                    self._s_inv[i] = xp.linalg.inv(fp.overlap[i])
+            else:
+                self._s_inv[...] = xp.linalg.inv(fp.overlap)
+            return
         if self.num < _INVERSE_BATCH_MIN:
             for i in range(self.num):
                 self._s_inv[i] = xp.linalg.inv(self._overlap[i])
@@ -1124,6 +1198,21 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         """``W = 0.5 (S^-1 H P + P H S^-1)`` as ``ehrenfest.energy_weighted_density``."""
 
         xp, sc = self.xp, self._scratch
+        if self._hybrid:
+            # W feeds only the nuclear forces, so FP32 throughout; ``h`` and ``s_inv``
+            # are re-downcast because both changed since the leapfrog stage
+            fp = self._fp32
+            weight = fp.weight  # augmented assignment below; a namedtuple field
+            fp.density[...] = sc.density
+            fp.h[...] = self._h
+            fp.s_inv[...] = self._s_inv
+            xp.matmul(fp.density, fp.h, out=fp.product)  # P H
+            xp.matmul(fp.s_inv, fp.product.transpose(0, 2, 1), out=weight)
+            xp.matmul(fp.product, fp.s_inv.transpose(0, 2, 1), out=fp.work_r)
+            weight += fp.work_r
+            weight *= xp.float32(0.5)
+            sc.weight_e[...] = weight  # upcast into the array the force kernel reads
+            return
         product, weight_e = sc.product, sc.weight_e
         xp.matmul(sc.density, self._h, out=product)  # P H
         xp.matmul(self._s_inv, product.transpose(0, 2, 1), out=weight_e)
