@@ -27,6 +27,7 @@ MDModel = md_mod.MDModel
 MDBatch = batch_mod.get_batch_model("gpu", "md")
 FS_TO_AU = units_mod.FS_TO_AU
 K_TO_AU = units_mod.K_TO_AU
+BOHR_PER_ANG = units_mod.BOHR_PER_ANG
 
 _DT_AU = 0.5 * FS_TO_AU
 _NAMES = ("temperature_K", "energy_au", "stretch_au", "bend_au")
@@ -62,7 +63,8 @@ def _scalar_run(tmp_path, filename, n_steps, every, **overrides):
         thermostat="nvt",
         pre_nvt=False,
         seed=3,
-        record_filename=os.path.join(str(tmp_path), filename),
+        property_filename=os.path.join(str(tmp_path), filename),
+        traj_filename=os.path.join(str(tmp_path), "geometry.xyz"),
         record_every_steps=every,
     )
     kwargs.update(overrides)
@@ -114,6 +116,15 @@ def test_scalar_driver_records_temperature_energy_and_bonded_terms(tmp_path, fil
         < 1e-9
     )
     assert 150.0 < data["temperature_K"][-1, 0] < 450.0
+    # the trajectory: one frame per record, the last one the final geometry, in Angstrom
+    from maxwelllink.tools import read_xyz_trajectory
+
+    symbols, frames = read_xyz_trajectory(
+        os.path.join(str(tmp_path), "geometry_id_7.xyz"), 1
+    )
+    assert symbols == ["C", "O", "O"] * (model.na // 3)
+    assert frames.shape == (n_records, 1, model.na, 3)
+    np.testing.assert_allclose(frames[-1, 0], model.x / BOHR_PER_ANG, atol=1e-7)
 
 
 @pytest.mark.core
@@ -146,21 +157,32 @@ def test_batch_records_what_the_scalar_drivers_record(tmp_path, backend, ff):
     batch = MDBatch(
         num=len(molecule_ids),
         driver_kwargs=dict(
-            record_filename=os.path.join(str(tmp_path), "batch.h5"), **kwargs
+            property_filename=os.path.join(str(tmp_path), "batch.h5"),
+            traj_filename=os.path.join(str(tmp_path), "batch.xyz"),
+            **kwargs,
         ),
         xp=xp,
     )
     batch.initialize(_DT_AU, molecule_ids)
     for _ in range(n_steps):
         batch.step(field)
+    x_final = batch._to_host(batch.x)
     batch.close()
     recorded = _read(os.path.join(str(tmp_path), "batch_id_4.h5"))
     assert recorded["molecule_ids"].tolist() == molecule_ids
     assert recorded["energy_au"].shape == (n_steps // every, len(molecule_ids))
+    # the batch trajectory: one frame per molecule per record, time-major
+    from maxwelllink.tools import read_xyz_trajectory
+
+    _, frames = read_xyz_trajectory(
+        os.path.join(str(tmp_path), "batch_id_4.xyz"), len(molecule_ids)
+    )
+    assert frames.shape == (n_steps // every, len(molecule_ids), batch.na, 3)
+    np.testing.assert_allclose(frames[-1], x_final / BOHR_PER_ANG, atol=1e-7)
 
     for column, molecule_id in enumerate(molecule_ids):
         scalar = MDModel(
-            record_filename=os.path.join(str(tmp_path), "scalar.h5"), **kwargs
+            property_filename=os.path.join(str(tmp_path), "scalar.h5"), **kwargs
         )
         scalar.initialize(_DT_AU, molecule_id)
         for _ in range(n_steps):
@@ -188,7 +210,7 @@ def test_recording_is_off_by_default_and_the_stride_is_checked(tmp_path):
     model.close()  # harmless without a recorder
     assert not list(tmp_path.iterdir())
     bad = MDModel(
-        ff="co2jcp2021", record_filename=str(tmp_path / "a.h5"), record_every_steps=0
+        ff="co2jcp2021", property_filename=str(tmp_path / "a.h5"), record_every_steps=0
     )
     with pytest.raises(ValueError):
         bad.initialize(_DT_AU, 0)

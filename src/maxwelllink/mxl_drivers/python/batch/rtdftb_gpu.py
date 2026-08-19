@@ -27,6 +27,12 @@ from collections import namedtuple
 
 import numpy as np
 
+from maxwelllink.tools.recorders import (
+    PropertyRecorder,
+    XYZTrajectoryWriter,
+    output_filename,
+)
+from maxwelllink.units import K_TO_AU
 from ..models.rtdftb_model.dftb_params import load_sk_set
 from ..models.rtdftb_model.h0_overlap import MAX_INTEGRAL, MAX_ORB
 from ..models.rtdftb_model.rtdftb_model import RTDFTBModel
@@ -665,6 +671,21 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._template = template
         self.ehrenfest = template.ehrenfest
         self.reset_dipole = template.reset_dipole
+        # run-time output, as the scalar driver configures it; one file for the whole
+        # batch, opened in initialize()
+        self.property_filename = template.property_filename
+        self.traj_filename = template.traj_filename
+        self.record_every_steps = template.record_every_steps
+        self.record_max_steps = template.record_max_steps
+        self.record_names = template.record_names
+        self.symbols = template.elements
+        self._recorder = None
+        self._trajectory = None
+        self._step_index = 0
+        # the batch writes for everyone: the template and the per-molecule scalar
+        # initializations must not open files of their own
+        template.property_filename = template.traj_filename = None
+        self._driver_kwargs.update(property_filename=None, traj_filename=None)
 
         # state, all set in initialize()
         self.dt = 0.0  # shared time step in a.u.
@@ -815,6 +836,37 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._energy = xp.zeros(num, dtype=xp.float64)
         self._field = xp.zeros((num, 3), dtype=xp.float64)
         self._stepped = False
+
+        output = dict(
+            record_every_steps=self.record_every_steps,
+            record_max_steps=self.record_max_steps,
+            append=bool(template.restart and template.checkpoint),
+        )
+        if self.property_filename is not None:
+            self._recorder = PropertyRecorder(
+                output_filename(self.property_filename, self.molecule_ids[0]),
+                self.record_names,
+                self.molecule_ids,
+                self.dt,
+                **output,
+            )
+            print(
+                f"[RTDFTBGPUBatchModel] Recording {self.record_names} to "
+                f"{self._recorder.path}"
+            )
+        if self.traj_filename is not None:
+            self._trajectory = XYZTrajectoryWriter(
+                output_filename(self.traj_filename, self.molecule_ids[0]),
+                self.symbols,
+                self.molecule_ids,
+                self.dt,
+                per_atom=("dq",),
+                **output,
+            )
+            print(
+                f"[RTDFTBGPUBatchModel] Writing the trajectory to "
+                f"{self._trajectory.path}"
+            )
 
         if self._on_gpu:
             self._kernels = _build_stage_kernels(self.ehrenfest)
@@ -968,6 +1020,28 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._stepped = True
 
         h = self._to_host
+        # the run-time record, as RTDFTBModel takes it: T = 2 K / (3 N k_B) of the nuclei
+        # (zero when frozen), the energies and the dipole reported to MaxwellLink; the
+        # geometry with the Mulliken charge deviation of every atom
+        self._step_index += 1
+        if self._step_index % self.record_every_steps == 0:
+            if self._recorder is not None:
+                e_kin = h(self._e_kin)
+                temperature = 2.0 * e_kin / (3.0 * self.n_atom) / K_TO_AU
+                self._recorder.record(
+                    self._step_index,
+                    self.t,
+                    np.column_stack(
+                        (temperature, h(self._energy), e_kin, h(self._mu_half))
+                    ),
+                )
+            if self._trajectory is not None:
+                self._trajectory.write(
+                    self._step_index,
+                    self.t,
+                    self.coordinates(),
+                    {"dq": h(self._dq_atom)},
+                )
         return BatchStepResult(
             amplitude_au=h(self._amp),
             dipole_half_au=h(self._mu_half),
@@ -1204,8 +1278,13 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         return self._to_host(self._velocity)
 
     def close(self):
-        """Release the device state so CuPy can free the memory."""
+        """Close the output files and release the device state."""
 
+        for name in ("_recorder", "_trajectory"):
+            writer = getattr(self, name)
+            if writer is not None:
+                writer.close()
+                setattr(self, name, None)
         for name in (
             "_rho",
             "_rho_old",
@@ -1480,6 +1559,7 @@ def _cpu_step_ehrenfest(i, st, sh, gm, nu, sc, out, field, step, dt):
         nu.coords_next[i], nu.half_velocity[i], nu.accel[i], dt, n_atom, nu.velocity[i]
     )
     e_kin = ehr.kinetic_sum(sh.mass, nu.velocity[i], n_atom)
+    st.e_kin[i] = e_kin  # recorded by step(), as the stage kernel stores it
 
     _rebuild_h(
         i,

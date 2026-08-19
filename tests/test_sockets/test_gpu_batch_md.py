@@ -89,7 +89,7 @@ def test_md_batch_drives_a_single_mode_cavity(xp_name, tmp_path):
                 pre_nvt=False,
                 seed=3,
                 # the run-time trajectory, written by the batch and closed at teardown
-                record_filename=str(tmp_path / f"traj_{xp_name}.h5"),
+                property_filename=str(tmp_path / f"traj_{xp_name}.h5"),
                 record_every_steps=5,
             ),
             xp=xp,

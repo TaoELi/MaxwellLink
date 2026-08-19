@@ -21,6 +21,11 @@ import os
 
 import numpy as np
 
+from maxwelllink.tools.recorders import (
+    PropertyRecorder,
+    XYZTrajectoryWriter,
+    output_filename,
+)
 from maxwelllink.tools.slko import resolve as resolve_slko
 from maxwelllink.tools.xyz_helper import read_xyz, read_xyz_frames
 from maxwelllink.units import FS_TO_AU, K_TO_AU
@@ -44,6 +49,17 @@ _DIRECTIONS = {"x": 0, "y": 1, "z": 2}
 # Time step of the Born-Oppenheimer pre-equilibration in fs: a classical MD step, not
 # the electronic one, which is what makes the thermalization affordable.
 _PRE_NVT_DT_FS = 0.5
+
+#: The per-molecule properties the driver records: what it reports to MaxwellLink, plus
+#: the nuclear temperature when the nuclei move.
+_RECORD_NAMES = (
+    "temperature_K",
+    "energy_au",
+    "energy_kin_au",
+    "mux_au",
+    "muy_au",
+    "muz_au",
+)
 
 
 class RTDFTBModel(DummyModel):
@@ -82,6 +98,10 @@ class RTDFTBModel(DummyModel):
         friction_fs: float = 100.0,
         reset_dipole: bool = True,
         seed: int = 0,
+        property_filename=None,
+        traj_filename=None,
+        record_every_steps: int = 10,
+        record_max_steps=None,
         checkpoint: bool = False,
         restart: bool = False,
         verbose: bool = False,
@@ -164,6 +184,25 @@ class RTDFTBModel(DummyModel):
             Whether to report the dipole moment relative to its value at time zero.
         seed : int, default: 0
             Seed for the random-number generator.
+        property_filename : str, optional
+            Turns on a run-time record of per-molecule properties -- the nuclear
+            temperature (zero with frozen nuclei), the total and the nuclear kinetic
+            energy and the dipole, i.e. what the driver reports to MaxwellLink --
+            written to this file every ``record_every_steps`` steps: HDF5, streamed
+            while the run goes, unless the name ends in ``.npz`` or ``h5py`` is
+            missing. ``_id_<molecule ID>`` is inserted before the extension, so each
+            driver process writes its own file; a batch writes one file with one column
+            per molecule. A restart appends.
+        traj_filename : str, optional
+            Turns on a geometry trajectory in extended XYZ (Angstrom) with the Mulliken
+            charge deviation ``dq`` of every atom as an extra column, one frame per
+            molecule every ``record_every_steps`` steps, with the same ``_id_`` suffix;
+            see :class:`maxwelllink.tools.XYZTrajectoryWriter` for the frame order of a
+            batch and :func:`maxwelllink.tools.read_xyz_trajectory` to read it back.
+        record_every_steps : int, default: 10
+            Record every this many steps, for both files.
+        record_max_steps : int, optional
+            Stop recording after this many records; ``None`` for no cap.
         checkpoint : bool, default: False
             Whether to enable checkpointing.
         restart : bool, default: False
@@ -226,6 +265,19 @@ class RTDFTBModel(DummyModel):
         self.reset_dipole = bool(reset_dipole)
         self.seed = int(seed)
         self._rng = None  # this molecule's random stream, made in initialize()
+
+        # run-time output, opened in initialize() once the molecule ID and the time
+        # step are known
+        self.property_filename = (
+            None if property_filename is None else str(property_filename)
+        )
+        self.traj_filename = None if traj_filename is None else str(traj_filename)
+        self.record_every_steps = int(record_every_steps)
+        self.record_max_steps = record_max_steps
+        self.record_names = _RECORD_NAMES
+        self._recorder = None
+        self._trajectory = None
+        self._step_index = 0  # steps taken; not part of the snapshot
 
         # built in initialize(), which is where the SCC ground state is converged
         self.sk_set = None
@@ -348,6 +400,33 @@ class RTDFTBModel(DummyModel):
                 self.dynamics.dipole_end.copy() if self.reset_dipole else np.zeros(3)
             )
 
+        output = dict(
+            record_every_steps=self.record_every_steps,
+            record_max_steps=self.record_max_steps,
+            append=bool(self.restart and self.checkpoint),
+        )
+        if self.property_filename is not None:
+            self._recorder = PropertyRecorder(
+                output_filename(self.property_filename, self.molecule_id),
+                self.record_names,
+                [self.molecule_id],
+                self.dt,
+                **output,
+            )
+            print(
+                f"[RTDFTBModel] Recording {self.record_names} to {self._recorder.path}"
+            )
+        if self.traj_filename is not None:
+            self._trajectory = XYZTrajectoryWriter(
+                output_filename(self.traj_filename, self.molecule_id),
+                self.elements,
+                [self.molecule_id],
+                self.dt,
+                per_atom=("dq",),
+                **output,
+            )
+            print(f"[RTDFTBModel] Writing the trajectory to {self._trajectory.path}")
+
     def _initial_velocities(self, equilibrated=None):
         """Nuclear velocities to start from: thermalized, given, sampled, or at rest."""
 
@@ -399,11 +478,41 @@ class RTDFTBModel(DummyModel):
         self.energy_kin = self.dynamics.energy_kinetic
         self.t += self.dt
 
+        # the run-time record: T = 2 K / (3 N k_B) of the nuclei (zero when frozen), the
+        # energies and the dipole reported to MaxwellLink; the geometry with the
+        # Mulliken charge deviation of every atom
+        self._step_index += 1
+        if self._recorder is not None:
+            temperature = 2.0 * self.energy_kin / (3.0 * self.system.n_atom) / K_TO_AU
+            self._recorder.record(
+                self._step_index,
+                self.t,
+                np.concatenate(
+                    ([temperature, self.energy, self.energy_kin], self.dipole_vec)
+                ),
+            )
+        if self._trajectory is not None:
+            self._trajectory.write(
+                self._step_index,
+                self.t,
+                self.system.coords[None],
+                {"dq": self.dynamics.state.dq_atom[None]},
+            )
+
         if self.verbose:
             print(
                 f"[molecule ID {self.molecule_id}] t={self.t:.3f} a.u. "
                 f"E_tot={self.energy:.8f} a.u. mu={self.dipole_vec}"
             )
+
+    def close(self):
+        """Close the output files, if any are being written."""
+
+        for name in ("_recorder", "_trajectory"):
+            writer = getattr(self, name)
+            if writer is not None:
+                writer.close()
+                setattr(self, name, None)
 
     def calc_amp_vector(self):
         """

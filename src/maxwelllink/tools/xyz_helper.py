@@ -11,7 +11,7 @@ XYZ readers shared by the molecular drivers: one geometry, or one frame per mole
 
 import numpy as np
 
-__all__ = ["read_xyz", "read_xyz_frames"]
+__all__ = ["read_xyz", "read_xyz_frames", "read_xyz_trajectory"]
 
 
 def read_xyz(path):
@@ -78,3 +78,32 @@ def read_xyz_frames(path):
     if not frames:
         raise ValueError(f"{path} holds no XYZ frame.")
     return elements, np.array(frames)
+
+
+def read_xyz_trajectory(path, num):
+    """
+    Read a trajectory a driver wrote with ``traj_filename``, back into a batch array.
+
+    Such a file is time-major with one frame per molecule per record; this undoes that.
+
+    Parameters
+    ----------
+    path : str
+        Path to the file.
+    num : int
+        Number of molecules the writing process owned (its ``molecule_ids``).
+
+    Returns
+    -------
+    elements : list of str
+        Element symbols of one molecule.
+    positions : numpy.ndarray of float, shape (n_records, num, n_atom, 3)
+        Coordinates in Angstrom.
+    """
+
+    elements, frames = read_xyz_frames(path)
+    if frames.shape[0] % int(num):
+        raise ValueError(
+            f"{path} holds {frames.shape[0]} frames, not a multiple of {num} molecules."
+        )
+    return elements, frames.reshape(-1, int(num), frames.shape[1], 3)

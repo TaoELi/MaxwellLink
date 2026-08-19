@@ -24,7 +24,8 @@ from .slko import (
     fetch_slko,
     resolve_slko,
 )
-from .xyz_helper import read_xyz, read_xyz_frames
+from .recorders import PropertyRecorder, XYZTrajectoryWriter, output_filename
+from .xyz_helper import read_xyz, read_xyz_frames, read_xyz_trajectory
 
 __all__ = [
     "json_loads",
@@ -33,6 +34,10 @@ __all__ = [
     "resolve_slko",
     "read_xyz",
     "read_xyz_frames",
+    "read_xyz_trajectory",
+    "output_filename",
+    "PropertyRecorder",
+    "XYZTrajectoryWriter",
     "ir_spectrum",
     "rt_tddft_spectrum",
     "lr_tddft_spectrum",

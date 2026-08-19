@@ -23,7 +23,11 @@ import numpy as np
 
 from maxwelllink.units import FS_TO_AU, K_TO_AU
 from ..models.md_model.md_model import MDModel, _PRE_NVT_FRICTION_FS
-from ..models.md_model.trajectory import TrajectoryRecorder, trajectory_filename
+from maxwelllink.tools.recorders import (
+    PropertyRecorder,
+    XYZTrajectoryWriter,
+    output_filename,
+)
 from .dummy_gpu import BatchStepResult, DummyBatchModel
 
 # Threads per block for the CUDA launches. A multiple of the warp size (32).
@@ -274,12 +278,15 @@ class MDGPUBatchModel(DummyBatchModel):
         self.restart = template.restart
         # run-time trajectory output, as the scalar driver configures it; one file for
         # the whole batch, opened in initialize()
-        self.record_filename = template.record_filename
+        self.property_filename = template.property_filename
+        self.traj_filename = template.traj_filename
         self.record_every_steps = template.record_every_steps
         self.record_max_steps = template.record_max_steps
         self.record_names = template.record_names
+        self.symbols = template.symbols
         self.n_terms = len(template.ff.term_names)
         self._recorder = None
+        self._trajectory = None
         self._step_index = 0
 
         self.dt = 0.0  # shared time step in a.u.
@@ -426,19 +433,33 @@ class MDGPUBatchModel(DummyBatchModel):
             else:
                 self.mu_initial = xp.zeros((n, 3), dtype=xp.float64)
 
-        if self.record_filename is not None:
-            self._recorder = TrajectoryRecorder(
-                trajectory_filename(self.record_filename, self.molecule_ids[0]),
+        output = dict(
+            record_every_steps=self.record_every_steps,
+            record_max_steps=self.record_max_steps,
+            append=bool(self.restart and self.checkpoint),
+        )
+        if self.property_filename is not None:
+            self._recorder = PropertyRecorder(
+                output_filename(self.property_filename, self.molecule_ids[0]),
                 self.record_names,
                 self.molecule_ids,
                 self.dt,
-                record_every_steps=self.record_every_steps,
-                record_max_steps=self.record_max_steps,
-                append=bool(self.restart and self.checkpoint),
+                **output,
             )
             print(
                 f"[MDGPUBatchModel] Recording {self.record_names} to "
                 f"{self._recorder.path}"
+            )
+        if self.traj_filename is not None:
+            self._trajectory = XYZTrajectoryWriter(
+                output_filename(self.traj_filename, self.molecule_ids[0]),
+                self.symbols,
+                self.molecule_ids,
+                self.dt,
+                **output,
+            )
+            print(
+                f"[MDGPUBatchModel] Writing the trajectory to {self._trajectory.path}"
             )
 
     # ----------------------- one FDTD step under E-field ----------------------------
@@ -610,17 +631,17 @@ class MDGPUBatchModel(DummyBatchModel):
         # the trajectory record, as MDModel takes it: T = 2 K / (3 N k_B) with
         # K = E - U the kinetic energy at the force time, E, then the force field's terms
         self._step_index += 1
-        if (
-            self._recorder is not None
-            and self._step_index % self.record_every_steps == 0
-        ):
-            energy, potential = h(self._energy), h(self.potential)
-            temperature = 2.0 * (energy - potential) / (3.0 * self.na) / K_TO_AU
-            self._recorder.record(
-                self._step_index,
-                self.t,
-                np.column_stack((temperature, energy, h(self._terms))),
-            )
+        if self._step_index % self.record_every_steps == 0:
+            if self._recorder is not None:
+                energy, potential = h(self._energy), h(self.potential)
+                temperature = 2.0 * (energy - potential) / (3.0 * self.na) / K_TO_AU
+                self._recorder.record(
+                    self._step_index,
+                    self.t,
+                    np.column_stack((temperature, energy, h(self._terms))),
+                )
+            if self._trajectory is not None:
+                self._trajectory.write(self._step_index, self.t, h(self.x))
         return BatchStepResult(
             amplitude_au=h(self._amp),
             dipole_half_au=h(self._mu_half),
@@ -833,9 +854,11 @@ class MDGPUBatchModel(DummyBatchModel):
 
         if self.x is not None and self.checkpoint:
             self.save_checkpoint()
-        if self._recorder is not None:
-            self._recorder.close()
-            self._recorder = None
+        for name in ("_recorder", "_trajectory"):
+            writer = getattr(self, name)
+            if writer is not None:
+                writer.close()
+                setattr(self, name, None)
         self.x = self.p = self.F = None
         self._terms = None
         self._amp = self._mu_half = self._mu_force = self._energy = None

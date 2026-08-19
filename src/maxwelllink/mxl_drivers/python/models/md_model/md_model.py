@@ -21,7 +21,11 @@ import numpy as np
 
 from maxwelllink.tools.xyz_helper import read_xyz, read_xyz_frames
 from maxwelllink.units import BOHR_PER_ANG, FS_TO_AU, K_TO_AU
-from .trajectory import BASE_RECORD_NAMES, TrajectoryRecorder, trajectory_filename
+from maxwelllink.tools.recorders import (
+    PropertyRecorder,
+    XYZTrajectoryWriter,
+    output_filename,
+)
 
 try:
     from ..dummy_model import DummyModel
@@ -41,6 +45,9 @@ _FORCE_FIELDS = {
 
 # Langevin relaxation time (fs) used for the optional pre-NVT equilibration
 _PRE_NVT_FRICTION_FS = 100.0
+
+#: The per-molecule properties every MD driver records, before the force field's own.
+_BASE_RECORD_NAMES = ("temperature_K", "energy_au")
 
 
 class MDModel(DummyModel):
@@ -72,7 +79,8 @@ class MDModel(DummyModel):
         reset_dipole: bool = True,
         seed: int = 0,
         force_backend: str = "auto",
-        record_filename=None,
+        property_filename=None,
+        traj_filename=None,
         record_every_steps: int = 10,
         record_max_steps=None,
         checkpoint: bool = False,
@@ -144,11 +152,22 @@ class MDModel(DummyModel):
             forces the reference implementation. ``'auto'`` picks ``'numba'`` whenever
             the force field provides a compiled-kernel description and silently falls
             back to ``'numpy'`` when it does not.
-        record_filename : str, optional
-            Turns on a run-time trajectory of per-system scalars written to this file every
-            ``record_every_steps`` production steps.
+        property_filename : str, optional
+            Turns on a run-time record of per-molecule properties -- the temperature,
+            the total energy and the force field's own energy terms (``stretch_au`` and
+            ``bend_au`` for CO2 and water) -- written to this file every
+            ``record_every_steps`` production steps: HDF5, streamed while the run goes,
+            unless the name ends in ``.npz`` or ``h5py`` is missing. ``_id_<molecule
+            ID>`` is inserted before the extension, so each driver process writes its
+            own file; a batch writes one file with one column per molecule. Pre-NVT is
+            not recorded; a restart appends.
+        traj_filename : str, optional
+            Turns on a geometry trajectory in extended XYZ (Angstrom), one frame per
+            molecule every ``record_every_steps`` steps, with the same ``_id_`` suffix;
+            see :class:`maxwelllink.tools.XYZTrajectoryWriter` for the frame order of a
+            batch and :func:`maxwelllink.tools.read_xyz_trajectory` to read it back.
         record_every_steps : int, default: 10
-            Record every this many production steps.
+            Record every this many production steps, for both files.
         record_max_steps : int, optional
             Stop recording after this many records; ``None`` for no cap.
         checkpoint : bool, default: False
@@ -175,10 +194,14 @@ class MDModel(DummyModel):
 
         # run-time trajectory output, opened in initialize() once the molecule ID and
         # the time step are known
-        self.record_filename = None if record_filename is None else str(record_filename)
+        self.property_filename = (
+            None if property_filename is None else str(property_filename)
+        )
+        self.traj_filename = None if traj_filename is None else str(traj_filename)
         self.record_every_steps = int(record_every_steps)
         self.record_max_steps = record_max_steps
         self._recorder = None
+        self._trajectory = None
         self._step_index = 0  # production steps taken; not part of the snapshot
 
         # the starting geometry from XYZ files: one for all, or one frame per molecule
@@ -252,7 +275,11 @@ class MDModel(DummyModel):
         self.energy = 0.0  # kinetic + potential
         self.potential = 0.0
         # the force field's energy terms, filled with every force evaluation
-        self.record_names = BASE_RECORD_NAMES + tuple(self.ff.term_names)
+        self.record_names = _BASE_RECORD_NAMES + tuple(self.ff.term_names)
+        # element symbols of the geometry, for the trajectory file
+        self.symbols = (
+            list(self.ff.molecule_symbols) * self.ff.n_molecules or ["X"] * self.na
+        )
         self._terms = np.zeros(len(self.ff.term_names))
 
     # ----------------------- heavy-load initialization ------------------------------
@@ -322,24 +349,38 @@ class MDModel(DummyModel):
                 self.ff.dipole(self.x) if self.reset_dipole else np.zeros(3)
             )
 
-        if self.record_filename is not None:
-            self._recorder = TrajectoryRecorder(
-                trajectory_filename(self.record_filename, self.molecule_id),
+        output = dict(
+            record_every_steps=self.record_every_steps,
+            record_max_steps=self.record_max_steps,
+            append=bool(self.restart and self.checkpoint),
+        )
+        if self.property_filename is not None:
+            self._recorder = PropertyRecorder(
+                output_filename(self.property_filename, self.molecule_id),
                 self.record_names,
                 [self.molecule_id],
                 self.dt,
-                record_every_steps=self.record_every_steps,
-                record_max_steps=self.record_max_steps,
-                append=bool(self.restart and self.checkpoint),
+                **output,
             )
             print(f"[MDModel] Recording {self.record_names} to {self._recorder.path}")
+        if self.traj_filename is not None:
+            self._trajectory = XYZTrajectoryWriter(
+                output_filename(self.traj_filename, self.molecule_id),
+                self.symbols,
+                [self.molecule_id],
+                self.dt,
+                **output,
+            )
+            print(f"[MDModel] Writing the trajectory to {self._trajectory.path}")
 
     def close(self):
-        """Close the trajectory file, if one is being written."""
+        """Close the output files, if any are being written."""
 
-        if self._recorder is not None:
-            self._recorder.close()
-            self._recorder = None
+        for name in ("_recorder", "_trajectory"):
+            writer = getattr(self, name)
+            if writer is not None:
+                writer.close()
+                setattr(self, name, None)
 
     def _thermostat_half_step(self):
         """
@@ -453,6 +494,8 @@ class MDModel(DummyModel):
                 self.t,
                 np.concatenate(([temperature, self.energy], self._terms)),
             )
+        if self._trajectory is not None:
+            self._trajectory.write(self._step_index, self.t, self.x[None])
 
         if self.verbose:
             print(

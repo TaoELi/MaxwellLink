@@ -355,6 +355,57 @@ def test_one_geometry_starts_every_system_alike(backend):
 
 
 @pytest.mark.core
+@pytest.mark.parametrize("ehrenfest", [False, True])
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_property_and_trajectory_files_match_the_scalar_drivers(
+    tmp_path, backend, ehrenfest
+):
+    """The batch writes one property file and one XYZ trajectory for all its molecules,
+    holding what the scalar drivers of those molecule IDs write for themselves."""
+    import h5py
+
+    from maxwelllink.tools import read_xyz_trajectory
+
+    xp = _array_module(backend)
+    n_steps, every = 6, 3
+    fields = _fields(n_steps=n_steps)
+    settings = dict(
+        ehrenfest=ehrenfest,
+        property_filename=str(tmp_path / "prop.h5"),
+        traj_filename=str(tmp_path / "traj.xyz"),
+        record_every_steps=every,
+    )
+    _, _, _, model = _run_batch(xp, fields, **settings)
+    coords = model.coordinates()
+    model.close()
+    with h5py.File(tmp_path / "prop_id_0.h5", "r") as handle:
+        batch_props = {key: handle[key][...] for key in handle}
+    assert batch_props["molecule_ids"].tolist() == list(range(_NUM))
+    assert batch_props["energy_au"].shape == (n_steps // every, _NUM)
+    _, frames = read_xyz_trajectory(str(tmp_path / "traj_id_0.xyz"), _NUM)
+    assert frames.shape == (n_steps // every, _NUM, len(_ELEMENTS), 3)
+    np.testing.assert_allclose(frames[-1] / dftb_mod.BOHR_TO_AA, coords, atol=1e-8)
+
+    # the scalar drivers of molecules 0 and 4, each writing its own files
+    for molecule_id in (0, 4):
+        model = RTDFTBModel(**_kwargs(**settings))
+        model.initialize(_DT, molecule_id)
+        for step in range(n_steps):
+            model.propagate(fields[step, molecule_id])
+        model.close()
+        with h5py.File(tmp_path / f"prop_id_{molecule_id}.h5", "r") as handle:
+            for name in ("temperature_K", "energy_au", "energy_kin_au", "muz_au"):
+                assert (
+                    np.abs(handle[name][:, 0] - batch_props[name][:, molecule_id]).max()
+                    < 1e-12
+                ), name
+        _, own = read_xyz_trajectory(str(tmp_path / f"traj_id_{molecule_id}.xyz"), 1)
+        np.testing.assert_allclose(own[:, 0], frames[:, molecule_id], atol=1e-8)
+        if ehrenfest:  # the nuclei moved, and the frames say so
+            assert np.abs(own[-1, 0] - own[0, 0]).max() > 1e-7
+
+
+@pytest.mark.core
 def test_reset_dipole_matches_the_scalar_driver():
     """The baseline is captured once and subtracted, exactly as the scalar does."""
 
