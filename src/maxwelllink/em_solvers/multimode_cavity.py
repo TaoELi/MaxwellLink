@@ -1311,7 +1311,9 @@ class MultiModeSimulation(DummyEMSimulation):
                         )
                     if "photonic_energy_with_dse" in self.record_list:
                         self.memmaps["photonic_energy_with_dse"][record_idx, :] = (
-                            self._calc_photonic_energy_with_dse(self.pc, self.qc, self.dipole)
+                            self._calc_photonic_energy_with_dse(
+                                self.pc, self.qc, self.dipole
+                            )
                         )
                     if "effective_efield" in self.record_list:
                         self.memmaps["effective_efield"][record_idx, :, :] = (
@@ -1359,7 +1361,9 @@ class MultiModeSimulation(DummyEMSimulation):
                         )
                     if "photonic_energy_with_dse" in self.record_list:
                         self.h5_file["photonic_energy_with_dse"][record_idx, :] = (
-                            self._calc_photonic_energy_with_dse(self.pc, self.qc, self.dipole)
+                            self._calc_photonic_energy_with_dse(
+                                self.pc, self.qc, self.dipole
+                            )
                         )
                     if "effective_efield" in self.record_list:
                         self.h5_file["effective_efield"][record_idx, :, :] = (
@@ -1401,7 +1405,9 @@ class MultiModeSimulation(DummyEMSimulation):
                     )
                 if "photonic_energy_with_dse" in self.record_list:
                     self.photonic_energy_with_dse_history.append(
-                        self._calc_photonic_energy_with_dse(self.pc, self.qc, self.dipole)
+                        self._calc_photonic_energy_with_dse(
+                            self.pc, self.qc, self.dipole
+                        )
                     )
                 if "molecule_response" in self.record_list:
                     self.molecule_response_history.append(self.dmudt.copy())
@@ -1441,7 +1447,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
         if record_filename == "":
             raise ValueError("record_filename cannot be empty.")
-        
+
         self.record_filename = record_filename
         self.record_to_disk = record_filename is not None
         self.filename = None
