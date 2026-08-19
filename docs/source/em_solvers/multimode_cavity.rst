@@ -313,6 +313,12 @@ the photon mode dispersion together with the spatial grid of molecular sites.
      - Number of cavity modes along :math:`x`. Default: ``1``.
    * - ``n_mode_y``
      - Number of cavity modes along :math:`y`. Default: ``1``.
+   * - ``mode_start_index``
+     - First in-plane mode index :math:`l` along each axis. ``1`` (default) indexes the
+       modes ``1 ... n_mode`` per axis as in earlier versions; ``0`` indexes
+       ``0 ... n_mode - 1`` and thereby includes the :math:`l = 0` members whose field is
+       uniform along one axis (needed to represent a transversely flat k-resolved pulse
+       without a uniform pedestal). Default: ``1``.
    * - ``abc_cutoff``
      - Absorbing boundary condition cutoff applied to the molecular grid (in
        fractional grid units). ``0.0`` disables the ABC; positive values

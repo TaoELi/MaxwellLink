@@ -11,7 +11,7 @@ description: This skill should be used when users need the MaxwellLink multimode
 
 ## Configure the cavity geometry (`FabryPerotCavity`)
 - Required: `frequency_au` (cavity reference angular frequency at k_∥=0), `delta_omega_x_au`, `delta_omega_y_au` (planar dispersion spacings; mode frequencies are `sqrt(omega_c^2 + (l_x·dωx)^2 + (l_y·dωy)^2)`).
-- Mode count: `n_mode_x`, `n_mode_y` (cavity modes per axis).
+- Mode count: `n_mode_x`, `n_mode_y` (cavity modes per axis). Mode indexing: `mode_start_index` (default `1` → indices `1 … n_mode` per axis, the original basis; `0` → `0 … n_mode-1`, which adds the `l = 0` members whose field is uniform along one axis — use `0` for k-resolved pulses so a transversely flat source is not left with a uniform pedestal along the whole cavity).
 - Molecular grid: provide either `n_grid_x`/`n_grid_y` (uniform grid, overrides explicit lists) or `x_grid_1d`/`y_grid_1d` (explicit fractional positions in `[0, 1]` of `Lx`, `Ly`). `n_repeat_x`/`n_repeat_y` stack multiple molecules per spatial site.
 - Coupling: `coupling_strength` is the prefactor ε for the lowest mode; per-mode couplings are auto-rescaled as `ε_k = ε · ω_k / min ω_k`. `coupling_axis` is a case-insensitive union of `"x"`, `"y"`, `"z"`.
 - Boundaries: `abc_cutoff` (fractional grid units, default `0.0`) enables an absorbing-boundary smooth window on large planar grids to kill unphysical reflections — recommended whenever `n_grid_x*n_grid_y` is large.

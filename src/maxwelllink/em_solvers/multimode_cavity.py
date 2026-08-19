@@ -146,6 +146,7 @@ class FabryPerotCavity:
         n_mode_y: int = 1,
         abc_cutoff: Optional[list] | float = [0.0, 0.0],
         save_mode_functions: bool = False,
+        mode_start_index: int = 1,
     ):
         r"""
         Parameters
@@ -173,13 +174,15 @@ class FabryPerotCavity:
         delta_omega_y_au : float, default: 0.0
             Frequency spacing along y-axis for cavity modes, in atomic units.
         n_mode_x : int, default: 1
-            Number of cavity modes along x-axis.
+            Number of in-plane mode indices along x.
         n_mode_y : int, default: 1
-            Number of cavity modes along y-axis.
+            Number of in-plane mode indices along y.
         abc_cutoff : list or float, optional
             Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If None, no absorbing boundary condition is applied. If a list is provided, it should contain two values representing the cutoff distances for x and y axes respectively. If a single float value is provided, it will be applied to both axes.
         save_mode_functions : bool, default: False
             Whether to save the cavity mode functions evaluated at the molecular grid points. Setting this to True can consume more memory but may speed up the simulation if the mode functions are needed multiple times.
+        mode_start_index : int, default: 1
+            The starting index for the cavity modes. If 1 (previous behavior), the modes are indexed from 1 to n_mode_x/y. If 0 (excluding 2D artifacts), the modes are indexed from 0 to n_mode_x/y - 1.
         """
         if frequency_au is None:
             raise ValueError("frequency_au must be provided.")
@@ -253,8 +256,13 @@ class FabryPerotCavity:
         # generate 2D grid points of kx, ky in units of 1/Lx, 1/Ly
         self.n_mode_x = n_mode_x
         self.n_mode_y = n_mode_y
-        kx_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_x)])
-        ky_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_y)])
+        self.mode_start_index = mode_start_index
+        # the original code indeces the modes from 1 to n_mode_x/y        
+        # kx_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_x)])
+        # ky_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_y)])
+        # let's update the index from 0 to n_mode_x/y [fix the 2D gaussian pulse issue]
+        kx_grid_1d = np.pi * np.array([i + mode_start_index for i in range(n_mode_x)])
+        ky_grid_1d = np.pi * np.array([i + mode_start_index for i in range(n_mode_y)])
         kx_grid_2d, ky_grid_2d = np.meshgrid(kx_grid_1d, ky_grid_1d)
         kx_grid_2d = np.reshape(kx_grid_2d, -1)
         ky_grid_2d = np.reshape(ky_grid_2d, -1)
@@ -272,25 +280,41 @@ class FabryPerotCavity:
         self.omega_k = (self.frequency_au**2 + omega_parallel**2) ** 0.5
         print("[MultiModeCavity] omega_k in cm-1", self.omega_k * AU_TO_CM_INV)
 
-        # construct renormalized cavity mode function for each molecular grid point
+        # construct renormalized cavity mode function for each molecular grid point;
+        # a cos(0) = 1 factor carries sqrt(2) rather than 2 to keep the mode normalised
         self.n_mode = n_mode_x * n_mode_y
+        # set the two lines below to 1.0 if switched back to the original indexing from 1 to n_mode_x/y
+        if self.mode_start_index == 0:
+            cx_norm = np.where(kx_grid_2d == 0.0, np.sqrt(0.5), 1.0)
+            cy_norm = np.where(ky_grid_2d == 0.0, np.sqrt(0.5), 1.0)
+        else:
+            cx_norm = 1.0
+            cy_norm = 1.0
 
         if save_mode_functions:
             ftilde_k = np.zeros((self.n_mode, self.n_grid, 3), dtype=float)
             for i in range(self.n_grid):
                 x, y = x_grid_2d[i], y_grid_2d[i]
                 ftilde_k[:, i, 0] = (
-                    2.0 * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y)
+                    2.0 * cx_norm * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y)
                 )
                 ftilde_k[:, i, 1] = (
-                    2.0 * np.sin(kx_grid_2d * x) * np.cos(ky_grid_2d * y)
+                    2.0 * cy_norm * np.sin(kx_grid_2d * x) * np.cos(ky_grid_2d * y)
                 )
             self.ftilde_k = ftilde_k
 
-        self.Cx = np.cos(np.outer(kx_grid_1d, x_grid_1d))  # (n_mode_x, n_grid_x)
-        self.Sy = np.sin(np.outer(ky_grid_1d, y_grid_1d))  # (n_mode_y, n_grid_y)
-        self.Sx = np.sin(np.outer(kx_grid_1d, x_grid_1d))  # (n_mode_x, n_grid_x)
-        self.Cy = np.cos(np.outer(ky_grid_1d, y_grid_1d))  # (n_mode_y, n_grid_y)
+        # the factorised mode functions, (n_mode_x, n_grid_x) and (n_mode_y, n_grid_y);
+        # the sine rows of l = 0 vanish, the cosine rows carry the sqrt(2)
+        self.Cx = np.cos(np.outer(kx_grid_1d, x_grid_1d))
+        # comment out the line below if switched back to the original indexing from 1 to n_mode_x/y
+        if self.mode_start_index == 0:
+            self.Cx[0] *= np.sqrt(0.5)
+        self.Sy = np.sin(np.outer(ky_grid_1d, y_grid_1d))
+        self.Sx = np.sin(np.outer(kx_grid_1d, x_grid_1d))
+        self.Cy = np.cos(np.outer(ky_grid_1d, y_grid_1d))
+        # comment out the line below if switched back to the original indexing from 1 to n_mode_x/y
+        if self.mode_start_index == 0:
+            self.Cy[0] *= np.sqrt(0.5)
         self.mode_prefactor = 2.0
 
         self.varepsilon_k = self.coupling_strength * self.omega_k / np.min(self.omega_k)

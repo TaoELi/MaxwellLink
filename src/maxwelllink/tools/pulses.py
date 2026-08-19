@@ -194,7 +194,8 @@ def _get_k_order(
     ----------
     cavity
         A ``FabryPerotCavity`` instance exposing ``delta_omega_x_au``,
-        ``delta_omega_y_au``, ``n_mode_x``, and ``n_mode_y``.
+        ``delta_omega_y_au``, ``n_mode_x``, ``n_mode_y`` and, optionally,
+        ``mode_start_index`` (assumed 1 when absent).
     k_parallel_au
         Physical in-plane wave vector in atomic units; a scalar for
         ``direction="x"``/``"y"``, a length-2 sequence for ``"xy"``.
@@ -234,7 +235,13 @@ def _get_k_order(
         raise ValueError("k_parallel_au must be finite.")
 
     delta_omega = np.array([cavity.delta_omega_x_au, cavity.delta_omega_y_au])
-    n_mode_max = np.array([cavity.n_mode_x, cavity.n_mode_y])
+    # the largest mode index along each axis: the cavity indexes its modes
+    # mode_start_index ... mode_start_index + n_mode - 1 (default 1 ... n_mode)
+    index_max = (
+        getattr(cavity, "mode_start_index", 1)
+        + np.array([cavity.n_mode_x, cavity.n_mode_y])
+        - 1
+    )
     if np.any((delta_omega == 0.0) & (k_parallel != 0.0)):
         raise ValueError(
             "k_parallel_au must be zero along any axis whose delta_omega_x_au "
@@ -243,11 +250,11 @@ def _get_k_order(
     k_order = np.divide(
         k_parallel, delta_omega, out=np.zeros(2), where=delta_omega != 0.0
     )
-    if np.any(np.abs(k_order) > n_mode_max):
+    if np.any(np.abs(k_order) > index_max):
         raise ValueError(
             "Absolute k_parallel_au is too large for the cavity mode spacing. "
-            f"Maximum allowed is ({delta_omega[0] * n_mode_max[0]:.3e}, "
-            f"{delta_omega[1] * n_mode_max[1]:.3e})."
+            f"Maximum allowed is ({delta_omega[0] * index_max[0]:.3e}, "
+            f"{delta_omega[1] * index_max[1]:.3e})."
         )
     return k_order
 
