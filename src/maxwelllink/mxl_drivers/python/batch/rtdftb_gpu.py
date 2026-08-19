@@ -6,13 +6,10 @@
 # --------------------------------------------------------------------------------------#
 
 """
-GPU-batched real-time TDDFTB Ehrenfest dynamics.
+GPU-batched real-time TDDFTB Ehrenfest dynamics, built on the scalar ``RTDFTBModel``.
 
-Many independent DFTB systems are advanced together, sharing the parameter set and
-the basis layout. Every system starts as the scalar driver of its molecule ID would --
-from one common geometry, or from its own frame of a ``batch_xyz`` file, its own
-Born-Oppenheimer pre-equilibration and its own thermal velocities -- and then feels its
-own field.
+Thousands of independent DFTB systems can be advanced together, sharing the parameter set and
+the basis layout.
 
 This driver runs one execution path on each backend:
 
@@ -32,11 +29,18 @@ from maxwelllink.tools.recorders import (
     XYZTrajectoryWriter,
     output_filename,
 )
-from maxwelllink.units import K_TO_AU
+from maxwelllink.units import FS_TO_AU, K_TO_AU
 from ..models.rtdftb_model.dftb_params import load_sk_set
 from ..models.rtdftb_model.h0_overlap import MAX_INTEGRAL, MAX_ORB
-from ..models.rtdftb_model.rtdftb_model import RTDFTBModel
-from ..models.rtdftb_model.scc import limit_blas_threads
+from ..models.rtdftb_model.rtdftb_model import _PRE_NVT_DT_FS, RTDFTBModel
+from ..models.rtdftb_model.scc import (
+    MIN_TEMP,
+    ShellLayout,
+    diis_mix,
+    fermi_filling,
+    limit_blas_threads,
+    shell_charges,
+)
 from .dummy_gpu import BatchStepResult, DummyBatchModel
 
 # Threads per block for the CUDA launches. A multiple of the warp size (32).
@@ -44,6 +48,14 @@ _THREADS_PER_BLOCK = 128
 
 # Below this batch size S^-1 is inverted one system at a time through cuSOLVER
 _INVERSE_BATCH_MIN = 16
+
+#: Two-phase SCF (hybrid_precision): iterate in FP32 until the charge error drops
+#: below this floor, then finish in FP64 to the requested tolerance. Single-precision
+#: eigenvectors floor the Mulliken error at ~1e-6, so the switch sits safely above it.
+_SCF_FP32_SWITCH = 1.0e-5
+#: FP32 iterations without a factor-of-two error reduction before the FP64 phase is
+#: forced -- degenerate frontier orbitals (metals) can stall the FP32 phase.
+_SCF_FP32_STALL = 8
 
 # Additional-data field names, in the component order the dipole arrays hold.
 _HALF_DIPOLE_KEYS = ("mux_au", "muy_au", "muz_au")
@@ -112,16 +124,8 @@ _STEP_KERNELS = {}
 
 
 def _build_stage_kernels(ehrenfest):
-    """Compile (once) and return the block-per-system stage kernels of one step.
-
-    Each stage runs one CUDA block per system: its threads stride over the atom pairs
-    of the Slater-Koster assemblies, the rows of the matrix passes and the shell pairs
-    of gamma, and meet in shared-memory reductions for the per-system scalars, while
-    thread 0 does the O(n_atom) bookkeeping. The bodies are the device builds of the
-    validated per-pair and per-row kernels; the CPU path drives the same bodies
-    serially. Between the stages the host applies the dense linear algebra -- the
-    leapfrog products, ``S^-1`` and the energy-weighted density -- to the whole batch
-    through cuBLAS/cuSOLVER (CuPy).
+    """
+    Compile (once) and return the block-per-system stage kernels of one step.
 
     Parameters
     ----------
@@ -617,17 +621,546 @@ def _build_stage_kernels(ehrenfest):
     return _STEP_KERNELS[ehrenfest]
 
 
+#: The phase kernels of the wide launch path, cached like :data:`_STEP_KERNELS`.
+#: ``pre_start``, ``pre_work`` and everything from ``geo_reset`` on exist only when the
+#: nuclei move (the frozen path replaces ``pre_work`` by its own variant).
+_WideStages = namedtuple(
+    "_WideStages",
+    "scc_rows finish_potentials pre_start pre_work energy_start "
+    "geo_reset geo_build post_prep post_charges post_ham report "
+    "force_weight force_pairs force_finish",
+)
+
+_WIDE_STEP_KERNELS = {}
+
+
+def _build_wide_stage_kernels(ehrenfest):
+    """
+    Compile (once) the phase-split kernels that spread ONE system over MANY blocks.
+
+    Parameters
+    ----------
+    ehrenfest : bool
+        Whether the nuclei move, which decides which phases are built.
+
+    Returns
+    -------
+    _WideStages
+        The compiled kernels; wide ones launch with ``kernel[(num, bps), tpb]``, narrow
+        ones with ``kernel[num, tpb]``.
+    """
+
+    if ehrenfest in _WIDE_STEP_KERNELS:
+        return _WIDE_STEP_KERNELS[ehrenfest]
+
+    from numba import cuda, float64
+
+    from ..models.rtdftb_model.ehrenfest import CouplingScratch
+    from ..models.rtdftb_model.forces import BandScratch
+    from ..models.rtdftb_model.h0_overlap import H0Scratch
+    from ..models.rtdftb_model.kernels_dftb import device_kernels
+
+    d = device_kernels()
+    scc_potential_row = d["scc_potential_row"]
+    external_potential = d["external_potential"]
+    scc_hamiltonian_row = d["scc_hamiltonian_row"]
+    band_energy_row = d["band_energy_row"]
+    scc_energy = d["scc_energy"]
+    external_energy = d["external_energy"]
+    rt_orbital_charge = d["rt_orbital_charge"]
+    atom_charges = d["atom_charges"]
+    shell_charges_from_orbital = d["shell_charges_from_orbital"]
+    h0_overlap_onsite = d["h0_overlap_onsite"]
+    h0_overlap_pair = d["h0_overlap_pair"]
+    gamma_element = d["gamma_element"]
+    repulsive_pair = d["repulsive_pair"]
+    coupling_pair = d["coupling_pair"]
+    nuclear_step = d["nuclear_step"]
+    kinetic_sum = d["kinetic_sum"]
+    real_part_row = d["real_part_row"]
+    overlap_weight_row = d["overlap_weight_row"]
+    band_gradient_pair = d["band_gradient_pair"]
+    gamma_gradient_pair = d["gamma_gradient_pair"]
+    field_gradient = d["field_gradient"]
+
+    @cuda.jit(device=True)
+    def ordered_pair(p, n_atom):
+        """The ``p``-th ordered atom pair ``(a, b)``, ``a != b``."""
+
+        a = p // (n_atom - 1)
+        b = p - a * (n_atom - 1)
+        if b >= a:
+            b += 1
+        return a, b
+
+    @cuda.jit(device=True)
+    def unordered_pair(p):
+        """The ``p``-th unordered atom pair ``(a, b)``, ``a < b``, enumerated by ``b``."""
+
+        b = int((1.0 + math.sqrt(1.0 + 8.0 * p)) * 0.5)
+        while b * (b - 1) // 2 > p:
+            b -= 1
+        while (b + 1) * b // 2 <= p:
+            b += 1
+        return p - b * (b - 1) // 2, b
+
+    @cuda.jit(device=True)
+    def band_partial(rho, h0, n_orb, worker, n_workers):
+        """This worker's rows of ``Tr(rho H0)``."""
+
+        total = 0.0
+        for mu in range(worker, n_orb, n_workers):
+            total += band_energy_row(rho, h0, mu, n_orb)
+        return total
+
+    @cuda.jit
+    def k_scc_rows(st, sh, gm):
+        """The ``n_shell^2`` gamma contraction, its rows over ALL the workers."""
+
+        i = cuda.blockIdx.x
+        worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+        n_workers = cuda.gridDim.y * cuda.blockDim.x
+        n_shell = st.dq_shell.shape[1]
+        for row in range(worker, n_shell, n_workers):
+            scc_potential_row(gm.gamma[i], st.dq_shell[i], st.v_scc_shell[i], row)
+
+    @cuda.jit
+    def k_finish_potentials(st, sh, gm, field):
+        """External potential and the orbital expansion; narrow, one block per system."""
+
+        i = cuda.blockIdx.x
+        tid = cuda.threadIdx.x
+        tpb = cuda.blockDim.x
+        n_orb = st.rho.shape[1]
+        n_shell = st.dq_shell.shape[1]
+        for s in range(tid, n_shell, tpb):
+            st.v_shell[i, s] = st.v_scc_shell[i, s]
+        cuda.syncthreads()
+        if tid == 0:
+            external_potential(
+                gm.coords[i], field[i], sh.shell_atom, st.v_shell[i], n_shell
+            )
+        cuda.syncthreads()
+        for mu in range(tid, n_orb, tpb):
+            st.v_orb[i, mu] = st.v_shell[i, sh.orb_shell[mu]]
+
+    @cuda.jit
+    def k_energy_start(st, sh, gm, field, acc):
+        """``E(t)`` from the accumulated band term; narrow."""
+
+        i = cuda.blockIdx.x
+        if cuda.threadIdx.x == 0:
+            n_shell = st.dq_shell.shape[1]
+            n_atom = st.dq_atom.shape[1]
+            st.energy_start[i] = acc[i] + (
+                scc_energy(st.v_scc_shell[i], st.dq_shell[i], n_shell)
+                + external_energy(st.dq_atom[i], gm.coords[i], field[i], n_atom)
+                + gm.e_repulsive[i]
+                + st.e_kin[i]
+            )
+
+    @cuda.jit
+    def k_post_charges(st, sh, gm, mu_out, rep_acc, adopt_rep):
+        """Charges and dipole at ``t + dt``; narrow serial bookkeeping."""
+
+        i = cuda.blockIdx.x
+        if cuda.threadIdx.x == 0:
+            n_orb = st.rho.shape[1]
+            n_shell = st.dq_shell.shape[1]
+            n_atom = st.dq_atom.shape[1]
+            if adopt_rep != 0:
+                gm.e_repulsive[i] = rep_acc[i]
+            atom_charges(
+                st.q_orb[i], sh.q0_orb, sh.orb_atom, st.dq_atom[i], n_orb, n_atom
+            )
+            shell_charges_from_orbital(
+                st.q_orb[i], sh.q0_orb, sh.orb_shell, st.dq_shell[i], n_orb, n_shell
+            )
+            for k in range(3):
+                mu_out[i, k] = 0.0
+            for a in range(n_atom):
+                for k in range(3):
+                    mu_out[i, k] -= st.dq_atom[i, a] * gm.coords[i, a, k]
+
+    @cuda.jit
+    def k_report(st, sh, gm, out, field, mu_in, acc, dt):
+        """``E(t+dt)`` and the reply to MaxwellLink; narrow."""
+
+        i = cuda.blockIdx.x
+        if cuda.threadIdx.x == 0:
+            n_shell = st.dq_shell.shape[1]
+            n_atom = st.dq_atom.shape[1]
+            energy_end = acc[i] + (
+                scc_energy(st.v_scc_shell[i], st.dq_shell[i], n_shell)
+                + external_energy(st.dq_atom[i], gm.coords[i], field[i], n_atom)
+                + gm.e_repulsive[i]
+                + st.e_kin[i]
+            )
+            for k in range(3):
+                end = mu_in[i, k] - st.mu_initial[i, k]
+                start = out.mu_end[i, k]
+                out.amp[i, k] = (end - start) / dt
+                out.mu_half[i, k] = 0.5 * (start + end)
+                out.mu_end[i, k] = end
+            out.energy[i] = 0.5 * (st.energy_start[i] + energy_end)
+
+    @cuda.jit
+    def k_geo_build(st, sh, gm, acc):
+        """``H0``, ``S``, gamma and the repulsive sum at the current coords; wide.
+
+        Shared by both families: the Ehrenfest step rebuilds the geometry every
+        step, and the fully-GPU initialization builds it once for frozen runs too.
+        """
+
+        i = cuda.blockIdx.x
+        worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+        n_workers = cuda.gridDim.y * cuda.blockDim.x
+        n_shell = st.dq_shell.shape[1]
+        n_atom = st.dq_atom.shape[1]
+        hs = H0Scratch(
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array((MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((5, 5), float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_DELTA, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+        )
+        pair = cuda.local.array(2, float64)
+
+        for atom in range(worker, n_atom, n_workers):
+            h0_overlap_onsite(
+                sh.sk, sh.atom_species, sh.atom_offset, atom, gm.h0[i], gm.overlap[i]
+            )
+        rep = 0.0
+        for p in range(worker, n_atom * (n_atom - 1) // 2, n_workers):
+            a, b = unordered_pair(p)
+            h0_overlap_pair(
+                sh.sk,
+                gm.coords[i],
+                sh.atom_species,
+                sh.atom_offset,
+                a,
+                b,
+                gm.h0[i],
+                gm.overlap[i],
+                hs,
+            )
+            e_pair, g_x, g_y, g_z = repulsive_pair(
+                sh.sk, gm.coords[i], sh.atom_species, a, b, pair
+            )
+            rep += e_pair
+        cuda.atomic.add(acc, i, rep)
+        for e in range(worker, n_shell * n_shell, n_workers):
+            row = e // n_shell
+            col = e - row * n_shell
+            gm.gamma[i, row, col] = gamma_element(
+                gm.coords[i], sh.shell_atom, sh.shell_u, row, col
+            )
+
+    if not ehrenfest:
+
+        @cuda.jit
+        def k_pre_work_frozen(st, sh, gm, acc):
+            """``H(t)`` rows and the band term of ``rho(t)``, over ALL the workers."""
+
+            i = cuda.blockIdx.x
+            worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+            n_workers = cuda.gridDim.y * cuda.blockDim.x
+            n_orb = st.rho.shape[1]
+            for mu in range(worker, n_orb, n_workers):
+                scc_hamiltonian_row(gm.h0[i], gm.overlap[i], st.v_orb[i], st.h[i], mu)
+            cuda.atomic.add(
+                acc, i, band_partial(st.rho[i], gm.h0[i], n_orb, worker, n_workers)
+            )
+
+        @cuda.jit
+        def k_post_prep_frozen(st, sh, gm):
+            """Orbital charges of ``rho(t+dt)``, its columns over ALL the workers."""
+
+            i = cuda.blockIdx.x
+            worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+            n_workers = cuda.gridDim.y * cuda.blockDim.x
+            n_orb = st.rho.shape[1]
+            for col in range(worker, n_orb, n_workers):
+                st.q_orb[i, col] = rt_orbital_charge(
+                    st.rho_old[i], gm.overlap[i], col, n_orb
+                )
+
+        @cuda.jit
+        def k_post_ham_frozen(st, sh, gm, acc):
+            """``H(t+dt)`` rows and the band term of ``rho(t+dt)``."""
+
+            i = cuda.blockIdx.x
+            worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+            n_workers = cuda.gridDim.y * cuda.blockDim.x
+            n_orb = st.rho.shape[1]
+            for mu in range(worker, n_orb, n_workers):
+                scc_hamiltonian_row(gm.h0[i], gm.overlap[i], st.v_orb[i], st.h[i], mu)
+            cuda.atomic.add(
+                acc, i, band_partial(st.rho_old[i], gm.h0[i], n_orb, worker, n_workers)
+            )
+
+        _WIDE_STEP_KERNELS[ehrenfest] = _WideStages(
+            k_scc_rows,
+            k_finish_potentials,
+            None,
+            k_pre_work_frozen,
+            k_energy_start,
+            None,
+            k_geo_build,
+            k_post_prep_frozen,
+            k_post_charges,
+            k_post_ham_frozen,
+            k_report,
+            None,
+            None,
+            None,
+        )
+        return _WIDE_STEP_KERNELS[ehrenfest]
+
+    @cuda.jit
+    def k_pre_start(st, sh, gm, nu, field, dt):
+        """Nuclear step, kinetic energy, gamma rows and a clean ``D``; wide."""
+
+        i = cuda.blockIdx.x
+        worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+        n_workers = cuda.gridDim.y * cuda.blockDim.x
+        n_orb = st.rho.shape[1]
+        n_shell = st.dq_shell.shape[1]
+        n_atom = st.dq_atom.shape[1]
+        if worker == 0:
+            nuclear_step(
+                nu.coords_next[i],
+                nu.half_velocity[i],
+                nu.accel[i],
+                dt,
+                n_atom,
+                nu.velocity[i],
+            )
+            st.e_kin[i] = kinetic_sum(sh.mass, nu.velocity[i], n_atom)
+        for row in range(worker, n_shell, n_workers):
+            scc_potential_row(gm.gamma[i], st.dq_shell[i], st.v_scc_shell[i], row)
+        for e in range(worker, n_orb * n_orb, n_workers):
+            row = e // n_orb
+            col = e - row * n_orb
+            st.coupling[i, row, col] = 0.0
+
+    @cuda.jit
+    def k_pre_work(st, sh, gm, nu, acc):
+        """``H(t)`` rows, the band term of ``rho(t)`` and ``D(t)``; wide."""
+
+        i = cuda.blockIdx.x
+        worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+        n_workers = cuda.gridDim.y * cuda.blockDim.x
+        n_orb = st.rho.shape[1]
+        n_atom = st.dq_atom.shape[1]
+        cs = CouplingScratch(
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array((MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((5, 5), float64),
+            cuda.local.array((3, 5, 5), float64),
+        )
+        for mu in range(worker, n_orb, n_workers):
+            scc_hamiltonian_row(gm.h0[i], gm.overlap[i], st.v_orb[i], st.h[i], mu)
+        cuda.atomic.add(
+            acc, i, band_partial(st.rho[i], gm.h0[i], n_orb, worker, n_workers)
+        )
+        for p in range(worker, n_atom * (n_atom - 1), n_workers):
+            a, b = ordered_pair(p, n_atom)
+            coupling_pair(
+                sh.sk,
+                gm.coords[i],
+                sh.atom_species,
+                sh.atom_offset,
+                a,
+                b,
+                nu.velocity[i],
+                st.coupling[i],
+                cs,
+            )
+
+    @cuda.jit
+    def k_geo_reset(st, gm, nu):
+        """Adopt ``r(t+dt)`` and clean ``H0`` and ``S``; wide."""
+
+        i = cuda.blockIdx.x
+        worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+        n_workers = cuda.gridDim.y * cuda.blockDim.x
+        n_orb = st.rho.shape[1]
+        n_atom = st.dq_atom.shape[1]
+        for a in range(worker, n_atom, n_workers):
+            for k in range(3):
+                gm.coords[i, a, k] = nu.coords_next[i, a, k]
+        for e in range(worker, n_orb * n_orb, n_workers):
+            row = e // n_orb
+            col = e - row * n_orb
+            gm.h0[i, row, col] = 0.0
+            gm.overlap[i, row, col] = 0.0
+
+    @cuda.jit
+    def k_post_prep(st, sh, gm, sc):
+        """Orbital charges and ``Re[rho(t+dt)]``; wide."""
+
+        i = cuda.blockIdx.x
+        worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+        n_workers = cuda.gridDim.y * cuda.blockDim.x
+        n_orb = st.rho.shape[1]
+        for col in range(worker, n_orb, n_workers):
+            st.q_orb[i, col] = rt_orbital_charge(
+                st.rho_old[i], gm.overlap[i], col, n_orb
+            )
+        for row in range(worker, n_orb, n_workers):
+            real_part_row(st.rho_old[i], sc.density[i], row, n_orb)
+
+    @cuda.jit
+    def k_post_ham(st, sh, gm, acc):
+        """``H(t+dt)`` rows and the band term of ``rho(t+dt)``; wide."""
+
+        i = cuda.blockIdx.x
+        worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+        n_workers = cuda.gridDim.y * cuda.blockDim.x
+        n_orb = st.rho.shape[1]
+        for mu in range(worker, n_orb, n_workers):
+            scc_hamiltonian_row(gm.h0[i], gm.overlap[i], st.v_orb[i], st.h[i], mu)
+        cuda.atomic.add(
+            acc, i, band_partial(st.rho_old[i], gm.h0[i], n_orb, worker, n_workers)
+        )
+
+    @cuda.jit
+    def k_force_weight(st, sc):
+        """The overlap-weighted density and a clean gradient; wide."""
+
+        i = cuda.blockIdx.x
+        worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+        n_workers = cuda.gridDim.y * cuda.blockDim.x
+        n_orb = st.rho.shape[1]
+        n_atom = st.dq_atom.shape[1]
+        for row in range(worker, n_orb, n_workers):
+            overlap_weight_row(
+                sc.density[i], sc.weight_e[i], st.v_orb[i], sc.weight[i], row
+            )
+        for a in range(worker, n_atom, n_workers):
+            for k in range(3):
+                sc.gradient[i, a, k] = 0.0
+
+    @cuda.jit
+    def k_force_pairs(st, sh, gm, sc):
+        """Band, gamma and repulsive gradient sums, atomically onto the atoms; wide."""
+
+        i = cuda.blockIdx.x
+        worker = cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+        n_workers = cuda.gridDim.y * cuda.blockDim.x
+        n_shell = st.dq_shell.shape[1]
+        n_atom = st.dq_atom.shape[1]
+        bs = BandScratch(
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array((MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((5, 5), float64),
+            cuda.local.array((3, 5, 5), float64),
+        )
+        pair = cuda.local.array(2, float64)
+
+        for p in range(worker, n_atom * (n_atom - 1), n_workers):
+            a, b = ordered_pair(p, n_atom)
+            g_x, g_y, g_z = band_gradient_pair(
+                sh.sk,
+                gm.coords[i],
+                sh.atom_species,
+                sh.atom_offset,
+                a,
+                b,
+                sc.density[i],
+                sc.weight[i],
+                bs,
+            )
+            cuda.atomic.add(sc.gradient, (i, a, 0), g_x)
+            cuda.atomic.add(sc.gradient, (i, a, 1), g_y)
+            cuda.atomic.add(sc.gradient, (i, a, 2), g_z)
+        for e in range(worker, n_shell * n_shell, n_workers):
+            row = e // n_shell
+            col = e - row * n_shell
+            atom_row = sh.shell_atom[row]
+            atom_col = sh.shell_atom[col]
+            if atom_row != atom_col:
+                f_x, f_y, f_z = gamma_gradient_pair(
+                    gm.coords[i], sh.shell_atom, sh.shell_u, st.dq_shell[i], row, col
+                )
+                cuda.atomic.add(sc.gradient, (i, atom_row, 0), f_x)
+                cuda.atomic.add(sc.gradient, (i, atom_row, 1), f_y)
+                cuda.atomic.add(sc.gradient, (i, atom_row, 2), f_z)
+                cuda.atomic.add(sc.gradient, (i, atom_col, 0), -f_x)
+                cuda.atomic.add(sc.gradient, (i, atom_col, 1), -f_y)
+                cuda.atomic.add(sc.gradient, (i, atom_col, 2), -f_z)
+        for p in range(worker, n_atom * (n_atom - 1) // 2, n_workers):
+            a, b = unordered_pair(p)
+            e_pair, g_x, g_y, g_z = repulsive_pair(
+                sh.sk, gm.coords[i], sh.atom_species, a, b, pair
+            )
+            cuda.atomic.add(sc.gradient, (i, a, 0), g_x)
+            cuda.atomic.add(sc.gradient, (i, a, 1), g_y)
+            cuda.atomic.add(sc.gradient, (i, a, 2), g_z)
+            cuda.atomic.add(sc.gradient, (i, b, 0), -g_x)
+            cuda.atomic.add(sc.gradient, (i, b, 1), -g_y)
+            cuda.atomic.add(sc.gradient, (i, b, 2), -g_z)
+
+    @cuda.jit
+    def k_force_finish(st, sh, nu, sc, field):
+        """Field force, then the total force and acceleration; narrow."""
+
+        i = cuda.blockIdx.x
+        tid = cuda.threadIdx.x
+        tpb = cuda.blockDim.x
+        n_atom = st.dq_atom.shape[1]
+        if tid == 0:
+            field_gradient(st.dq_atom[i], field[i], sc.gradient[i], n_atom)
+        cuda.syncthreads()
+        for a in range(tid, n_atom, tpb):
+            for k in range(3):
+                nu.force[i, a, k] = -sc.gradient[i, a, k]
+                nu.accel[i, a, k] = nu.force[i, a, k] / sh.mass[a]
+
+    _WIDE_STEP_KERNELS[ehrenfest] = _WideStages(
+        k_scc_rows,
+        k_finish_potentials,
+        k_pre_start,
+        k_pre_work,
+        k_energy_start,
+        k_geo_reset,
+        k_geo_build,
+        k_post_prep,
+        k_post_charges,
+        k_post_ham,
+        k_report,
+        k_force_weight,
+        k_force_pairs,
+        k_force_finish,
+    )
+    return _WIDE_STEP_KERNELS[ehrenfest]
+
+
 class RTDFTBGPUBatchModel(DummyBatchModel):
     """
     Vectorized real-time TD-DFTB batch model with or without Ehrenfest motion.
-
-    Notes
-    -----
-    Every system shares the parameter set and the basis layout, and starts as the
-    scalar driver of its molecule ID would. When the systems sit at one common frozen
-    geometry the geometry-dependent matrices are held once rather than ``num`` times;
-    once they differ -- ``batch_xyz``, ``pre_nvt``, or moving nuclei -- they are per
-    system, and with ``ehrenfest=True`` rebuilt every step.
     """
 
     def __init__(
@@ -638,12 +1171,10 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         xp,
         driver_args=None,
         store_additional_data=False,
+        blocks_per_system=None,
     ):
         """
         Build the batch model from one scalar-driver template.
-
-        One template validates the arguments, reads the .skf files and converges the
-        ground state; no per-system Python objects are ever created.
 
         Parameters
         ----------
@@ -655,6 +1186,12 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
             Array module: ``numpy`` for the CPU path, ``cupy`` for the GPU path.
         driver_args : tuple, optional
             Positional arguments of the template.
+        blocks_per_system : int, optional
+            CUDA blocks each system's stage kernels are spread over. ``None`` (the
+            default) resolves automatically: one block per system while the batch
+            alone fills the GPU (thousands of systems), and enough blocks to fill it
+            when ``num`` is small and the systems are large. Set explicitly
+            only for benchmarking or testing.
         store_additional_data : bool, default: False
             Accepted for parity with the other batch models. The extras are always
             built, because the cavity solvers read the dipole from them.
@@ -682,6 +1219,15 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self.ehrenfest = template.ehrenfest
         self.reset_dipole = template.reset_dipole
         self.hybrid_precision = template.hybrid_precision
+        self.gpu_init = template.gpu_init
+        if blocks_per_system is not None:
+            blocks_per_system = int(blocks_per_system)
+            if blocks_per_system < 1:
+                raise ValueError("blocks_per_system must be a positive integer.")
+        #: CUDA blocks per system for the stage kernels. ``None`` picks automatically:
+        #: one block per system when the batch alone fills the GPU, many otherwise
+        #: (a small batch of huge systems, e.g. one nanoparticle on one GPU).
+        self.blocks_per_system = blocks_per_system
         # run-time output, as the scalar driver configures it; one file for the whole
         # batch, opened in initialize()
         self.property_filename = template.property_filename
@@ -708,6 +1254,12 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._on_gpu = False
         self._hybrid = False  # hybrid_precision resolved against the backend
         self._fp32 = None  # the _FP32 mirrors, allocated only in hybrid mode
+        self._wide_bps = 1  # blocks per system resolved in initialize()
+        self._gpu_layout = None  # ShellLayout of the fully-GPU initialization
+        self._scf_iterations = None  # (n_fp32, n_fp64) of the last GPU ground state
+        self._wide_kernels = None
+        self._wide_acc = None  # (num,) reduction target of the wide phase kernels
+        self._wide_mu = None  # (num, 3) dipole hand-over between wide phases
         self._shared_geometry = True  # one geometry for all, until initialize() says
         self._kernels = None
         self._bundles = None
@@ -762,12 +1314,34 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         # conditions -- batch_xyz, pre_nvt, sampled velocities -- every molecule ID is
         # initialized on its own, so the batch is exact rather than merely similar.
         template = self._template
+        # None means "the driver decides": on for the CUDA backend, off elsewhere.
+        wanted = self.gpu_init if self.gpu_init is not None else self._on_gpu
+        gpu_boot = bool(
+            wanted and self._on_gpu and not (template.pre_nvt and not self.ehrenfest)
+        )
+        if wanted and not gpu_boot:
+            reason = (
+                "pre_nvt without ehrenfest keeps the CPU ground state"
+                if self._on_gpu
+                else "the backend is numpy"
+            )
+            print(
+                f"[RTDFTBGPUBatchModel] gpu_init requested, but {reason}; "
+                "using the CPU initialization."
+            )
         per_system = (
             template.batch_frames is not None
             or template.pre_nvt
             or (template.ehrenfest and template.init_velocities)
         )
-        if per_system:
+        if gpu_boot:
+            # topology and geometry only; the ground state, the kick and the
+            # bootstrap run on the device once the batch arrays exist
+            template._prepare(self.dt, self.molecule_ids[0])
+            self._gpu_layout = ShellLayout(template.system, shell_resolved=False)
+            source_ids = self.molecule_ids if per_system else (self.molecule_ids[0],)
+            rows = [self._topology_row(template, mid) for mid in source_ids]
+        elif per_system:
             rows = _initial_states(
                 self._driver_args, self._driver_kwargs, self.dt, self.molecule_ids
             )
@@ -893,8 +1467,24 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
             )
 
         if self._on_gpu:
-            self._kernels = _build_stage_kernels(self.ehrenfest)
+            # resolved here, where the system sizes of this batch are known
+            self._wide_bps = self._resolve_blocks_per_system()
+            if self._wide_bps > 1 or gpu_boot:
+                # the fully-GPU initialization always drives the wide phase kernels,
+                # whatever the step dispatch is
+                self._wide_kernels = _build_wide_stage_kernels(self.ehrenfest)
+                self._wide_acc = xp.zeros(num, dtype=xp.float64)
+                self._wide_mu = xp.zeros((num, 3), dtype=xp.float64)
+                if self._wide_bps > 1:
+                    print(
+                        f"[RTDFTBGPUBatchModel] wide launch: {self._wide_bps} blocks "
+                        f"per system for {num} system(s)."
+                    )
+            if self._wide_bps == 1:
+                self._kernels = _build_stage_kernels(self.ehrenfest)
         self._bundles = self._build_bundles()
+        if gpu_boot:
+            self._initialize_on_device(template, per_system)
 
     def _allocate_fp32(self):
         """The persistent FP32 mirrors of hybrid mode, see :data:`_FP32`."""
@@ -913,6 +1503,437 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
             else (None,) * 6
         )
         return _FP32(real(), real(), cplx(), cplx(), cplx(), cplx(), *ehrenfest_only)
+
+    def _topology_row(self, template, molecule_id):
+        """
+        Topology of one system for the GPU init.
+        """
+
+        system, layout, sk_set = template.system, self._gpu_layout, template.sk_set
+        n, n_atom, n_shell = system.n_orb, system.n_atom, layout.n_shell
+        coords = (
+            template.batch_frames[molecule_id].copy()
+            if template.batch_frames is not None
+            else np.array(system.coords, dtype=float)
+        )
+        mass = np.array([sk_set.mass[sp] for sp in system.atom_species], dtype=float)
+        row = dict(
+            n_orb=n,
+            n_atom=n_atom,
+            n_shell=n_shell,
+            atom_species=system.atom_species,
+            atom_offset=system.atom_offset,
+            orb_shell=layout.orb_shell,
+            orb_atom=layout.orb_atom,
+            shell_atom=layout.shell_atom,
+            shell_u=layout.shell_u,
+            q0_orb=layout.q0_orb,
+            mass=mass,
+            coords=coords,
+            h0=np.zeros((n, n)),
+            overlap=np.zeros((n, n)),
+            s_inv=np.zeros((n, n)),
+            gamma=np.zeros((n_shell, n_shell)),
+            e_repulsive=0.0,
+            rho=np.zeros((n, n), dtype=np.complex128),
+            rho_old=np.zeros((n, n), dtype=np.complex128),
+            coupling=np.zeros((n, n)),
+            q_orb=np.zeros(n),
+            dq_atom=np.zeros(n_atom),
+            dq_shell=np.zeros(n_shell),
+            mu_initial=np.zeros(3),
+            mu_end=np.zeros(3),
+        )
+        if template.ehrenfest:
+            velocity = np.zeros((n_atom, 3))
+            # with pre_nvt the BOMD both consumes the random stream and supplies the
+            # velocities, exactly as the scalar driver orders it
+            if template.init_velocities and not template.pre_nvt:
+                # the same draw the scalar driver makes, from the same stream
+                rng = np.random.default_rng(template.seed + molecule_id)
+                velocity = np.sqrt(template.kT / mass)[:, None] * rng.standard_normal(
+                    (n_atom, 3)
+                )
+                velocity -= (mass[:, None] * velocity).sum(axis=0) / mass.sum()
+            elif template.velocities is not None:
+                velocity = np.array(template.velocities, dtype=float)
+            row.update(
+                velocity=velocity,
+                half_velocity=velocity.copy(),
+                coords_next=coords.copy(),
+                accel=np.zeros((n_atom, 3)),
+                force=np.zeros((n_atom, 3)),
+            )
+        return row
+
+    def _eigh_general_on_device(self, h, overlap, dtype=None):
+        """
+        Solve the generalized eigenvalue problem ``H c = eps S c`` on the GPU device, 
+        the Cholesky route of ``solve_generalised``.
+        """
+
+        xp = self.xp
+        if dtype is not None and h.dtype != dtype:
+            h = h.astype(dtype)
+            overlap = overlap.astype(dtype)
+        chol = xp.linalg.cholesky(overlap)
+        inv_chol = xp.linalg.inv(chol)
+        transformed = inv_chol @ h @ inv_chol.T
+        transformed = 0.5 * (transformed + transformed.T)
+        eigenvalues, vectors = xp.linalg.eigh(transformed)
+        return eigenvalues, inv_chol.T @ vectors
+
+    def _scf_on_device(
+        self, i, template, dq_start=None, store_force_state=False, announce=True
+    ):
+        """
+        The SCC loop of ``scc.scf`` for system ``i`` with its dense algebra on the GPU device.
+
+        Parameters
+        ----------
+        dq_start : numpy.ndarray, optional
+            Warm-start shell charges, as ``scc.scf(dq_shell_start=...)``: the
+            pre-NVT BOMD passes the previous geometry's charges.
+        store_force_state : bool, default: False
+            Also seed everything the ground-state force kernels read: the orbital and
+            shell charges of row ``i`` and, with moving nuclei, the real density and
+            the energy-weighted density (``scc``'s ``edm``) in the force scratch.
+        announce : bool, default: True
+            Print the one-line convergence summary.
+
+        Returns
+        -------
+        numpy.ndarray
+            The converged shell charges, for warm-starting the next geometry.
+        """
+
+        xp, layout = self.xp, self._gpu_layout
+        n_shell = self.n_shell
+
+        def slice_of(array):
+            return array if array.ndim == 2 else array[i]
+
+        h0 = slice_of(self._h0)
+        overlap = slice_of(self._overlap)
+        gamma = slice_of(self._gamma)
+        orb_shell_dev = xp.asarray(layout.orb_shell)
+
+        n_electron = template.system.n_electrons() - template.charge
+        tolerance = template.scc_tolerance
+        mixing, history, max_iterations, temperature = 0.2, 8, 500, MIN_TEMP
+        dq_shell = np.zeros(n_shell)
+        if dq_start is not None:
+            dq_shell[:] = dq_start
+        dq_new = np.zeros(n_shell)
+        history_in = np.zeros((history, n_shell))
+        history_residual = np.zeros((history, n_shell))
+        filling = np.zeros(self.n_orb)
+        converged, n_filled, n_iteration = False, 0, 0
+
+        def hamiltonian_and_density(dtype):
+            v_shell = gamma @ xp.asarray(dq_shell)
+            h = h0 + 0.5 * overlap * (
+                v_shell[orb_shell_dev][:, None] + v_shell[orb_shell_dev][None, :]
+            )
+            eigenvalues, vectors = self._eigh_general_on_device(h, overlap, dtype)
+            eig_host = xp.asnumpy(eigenvalues).astype(np.float64)
+            fermi_filling(eig_host, n_electron, temperature, filling)
+            rho = (vectors * xp.asarray(filling).astype(vectors.dtype)) @ vectors.T
+            s_here = (
+                overlap if rho.dtype == overlap.dtype else overlap.astype(rho.dtype)
+            )
+            q_orb = xp.asnumpy(xp.einsum("ij,ji->i", rho, s_here)).astype(np.float64)
+            return v_shell, rho, q_orb, vectors, eig_host
+
+        # the two-phase schedule: with hybrid_precision the bulk of the iterations
+        # runs in FP32 and a short FP64 tail finishes to the requested tolerance,
+        # converging the same fixed point; without it, FP64 throughout (the default)
+        fp32_active = bool(self.hybrid_precision)
+        n_fp32 = 0
+        best_error = np.inf
+        stalled = 0
+        for iteration in range(max_iterations):
+            n_iteration = iteration + 1
+            dtype = xp.float32 if fp32_active else xp.float64
+            try:
+                v_shell, rho, q_orb, _, _ = hamiltonian_and_density(dtype)
+            except np.linalg.LinAlgError:
+                if not fp32_active:
+                    raise
+                # ill-conditioned in single precision: hand over to FP64 for good
+                fp32_active = False
+                n_filled = 0
+                v_shell, rho, q_orb, _, _ = hamiltonian_and_density(xp.float64)
+            shell_charges(q_orb, layout.q0_orb, layout.orb_shell, dq_new)
+            error = float(np.max(np.abs(dq_new - dq_shell)))
+            if fp32_active:
+                n_fp32 += 1
+                if error < 0.5 * best_error:
+                    best_error = error
+                    stalled = 0
+                else:
+                    stalled += 1
+                if error < _SCF_FP32_SWITCH or stalled >= _SCF_FP32_STALL:
+                    # switch to the FP64 tail; the single-precision noise correlated
+                    # across the FP32-era residuals misleads the DIIS least squares
+                    # (measured: keeping them costs more than the restart), so the
+                    # history starts clean
+                    fp32_active = False
+                    n_filled = 0
+            elif error < tolerance:
+                dq_shell[:] = dq_new
+                converged = True
+                break
+            # the DIIS history handling of scc.scf, verbatim
+            if n_filled < history:
+                slot = n_filled
+                n_filled += 1
+            else:
+                for j in range(history - 1):
+                    history_in[j] = history_in[j + 1]
+                    history_residual[j] = history_residual[j + 1]
+                slot = history - 1
+            history_in[slot] = dq_shell
+            history_residual[slot] = dq_new - dq_shell
+            diis_mix(history_in, history_residual, n_filled, mixing, dq_shell)
+        if not converged:
+            raise RuntimeError(
+                "[molecule ID %d] the SCC ground state did not converge."
+                % self.molecule_ids[i]
+            )
+
+        # one rebuild from the converged charges, as scc.scf reports it; FP64 always,
+        # so the seeded density and force state are full precision whatever the path
+        self._scf_iterations = (n_fp32, n_iteration - n_fp32)
+        v_shell, rho, q_orb, vectors, eig_host = hamiltonian_and_density(xp.float64)
+        self._rho[i] = rho.astype(xp.complex128)
+        if store_force_state:
+            # what forces.total_gradient reads: charges for the gamma term, the real
+            # density and the energy-weighted density for the band and Pulay terms
+            self._q_orb[i] = xp.asarray(q_orb)
+            self._dq_shell[i] = xp.asarray(dq_shell)
+            if self.ehrenfest:
+                sc = self._scratch
+                sc.density[i] = rho
+                sc.weight_e[i] = (vectors * xp.asarray(filling * eig_host)) @ vectors.T
+        if announce:
+            energy_h0 = float(xp.sum(rho * h0))
+            energy_scc = 0.5 * float(xp.asnumpy(v_shell) @ dq_shell)
+            energy_total = energy_h0 + energy_scc + float(self._e_repulsive[i])
+            phases = (
+                f"{n_fp32} FP32 + {n_iteration - n_fp32} FP64"
+                if n_fp32
+                else f"{n_iteration} FP64"
+            )
+            print(
+                f"[RTDFTBGPUBatchModel] GPU ground state of molecule "
+                f"{self.molecule_ids[i]}: {phases} iterations, "
+                f"E = {energy_total:.10f} Ha."
+            )
+        return dq_shell
+
+    def _start_on_device(self, template):
+        """``RTDynamics.start`` for the whole batch on the GPU device.
+
+        Charges and Hamiltonian of the unkicked ground state, the Ehrenfest force and
+        the first nuclear half-move, the delta kick, the coupling at ``(r(0), v(0))``,
+        the Euler bootstrap into the first leapfrog interval, and the observation at
+        ``t = dt`` -- the exact sequence of the CPU bootstrap, through the wide phase
+        kernels and the dense operations of the step path (FP64 here; the caller holds
+        ``hybrid_precision`` off during initialization).
+        """
+
+        from numba import cuda
+
+        xp, dt = self.xp, self.dt
+        state, shared, geometry, nuclear, scratch, out, field = self._bundles
+        wide = ((self.num, self._wide_bps), _THREADS_PER_BLOCK)
+        narrow = (self.num, _THREADS_PER_BLOCK)
+        k, acc, mu = self._wide_kernels, self._wide_acc, self._wide_mu
+
+        def observe(adopt_rep):
+            """Charges, potentials and H of rho held in ``rho_old`` (t = 0 and t = dt)."""
+
+            if self.ehrenfest:
+                k.post_prep[wide](state, shared, geometry, scratch)
+            else:
+                k.post_prep[wide](state, shared, geometry)
+            k.post_charges[narrow](state, shared, geometry, mu, acc, adopt_rep)
+            k.scc_rows[wide](state, shared, geometry)
+            k.finish_potentials[narrow](state, shared, geometry, field)
+            acc[...] = 0.0
+            k.post_ham[wide](state, shared, geometry, acc)
+
+        def forces():
+            self._energy_weighted_density_on_device()
+            k.force_weight[wide](state, scratch)
+            k.force_pairs[wide](state, shared, geometry, scratch)
+            k.force_finish[narrow](state, shared, nuclear, scratch, field)
+
+        # charges, H and (Ehrenfest) force of the unkicked ground state
+        self._rho_old[...] = self._rho
+        observe(0)
+        if self.ehrenfest:
+            self._half_velocity[...] = self._velocity
+            self._coords_next[...] = self._coords + self._velocity * dt
+            forces()
+
+        # the delta kick, timeprop.F90:1861-1876 through cuBLAS
+        if template.delta_kick_au != 0.0:
+            orb_atom = self._gpu_layout.orb_atom
+            if self._coords.ndim == 2:
+                phase = (
+                    template.delta_kick_au
+                    * self._coords[orb_atom, template.kick_direction]
+                )
+            else:
+                phase = (
+                    template.delta_kick_au
+                    * self._coords[:, orb_atom, template.kick_direction]
+                )
+            work = (xp.exp(-1j * phase)[..., :, None] * self._rho) @ self._overlap
+            work = (work * xp.exp(1j * phase)[..., None, :]) @ self._s_inv
+            self._rho[...] = 0.5 * (work + xp.conj(work.swapaxes(-1, -2)))
+
+        # D(r(0), v(0)); the Hamiltonian rows it re-runs are unchanged
+        if self.ehrenfest:
+            self._coupling[...] = 0.0
+            acc[...] = 0.0
+            k.pre_work[wide](state, shared, geometry, nuclear, acc)
+
+        # the Euler bootstrap: rho(dt) lands in rho_old, as one step leaves it
+        self._rho_old[...] = self._rho
+        self._leapfrog_on_device(dt)
+
+        if self.ehrenfest:
+            k.geo_reset[wide](state, geometry, nuclear)
+            acc[...] = 0.0
+            k.geo_build[wide](state, shared, geometry, acc)
+            self._invert_overlap_on_device()
+        observe(1 if self.ehrenfest else 0)
+
+        cuda.synchronize()
+        if self.reset_dipole:
+            self._mu_initial[...] = mu
+        else:
+            self._mu_initial[...] = 0.0
+        self._mu_end[...] = mu - self._mu_initial
+        if self.ehrenfest:
+            forces()
+        self._swap_density()
+        cuda.synchronize()
+
+    def _prenvt_on_device(self, template):
+        """
+        ``dynamics.bomd_equilibrate`` for the whole batch on the GPU device.
+        """
+
+        xp = self.xp
+        state, shared, geometry, nuclear, scratch, out, field = self._bundles
+        wide = ((self.num, self._wide_bps), _THREADS_PER_BLOCK)
+        narrow = (self.num, _THREADS_PER_BLOCK)
+        k, acc, mu = self._wide_kernels, self._wide_acc, self._wide_mu
+
+        dt = _PRE_NVT_DT_FS * FS_TO_AU
+        n_steps = int(round(template.pre_nvt_duration_ps * 1000.0 * FS_TO_AU / dt))
+        friction = template.friction_fs * FS_TO_AU
+        mass = self._mass_host[:, None]
+        c1h = float(np.exp(-0.5 * dt / friction))
+        noise = np.sqrt(template.kT / mass * (1.0 - c1h**2))
+        rngs = [np.random.default_rng(template.seed + mid) for mid in self.molecule_ids]
+        velocity = np.stack(
+            [
+                np.sqrt(template.kT / mass) * rng.standard_normal((self.n_atom, 3))
+                for rng in rngs
+            ]
+        )
+        velocity -= (mass * velocity).sum(axis=1, keepdims=True) / mass.sum()
+        velocity_dev = xp.asarray(velocity)
+        warm = [None] * self.num
+
+        def acceleration():
+            """Geometry, warm-started SCC and the ground-state force of every system."""
+
+            self._h0[...] = 0.0
+            self._overlap[...] = 0.0
+            acc[...] = 0.0
+            k.geo_build[wide](state, shared, geometry, acc)
+            for i in range(self.num):
+                warm[i] = self._scf_on_device(
+                    i,
+                    template,
+                    dq_start=warm[i],
+                    store_force_state=True,
+                    announce=False,
+                )
+            k.post_charges[narrow](state, shared, geometry, mu, acc, 0)
+            k.scc_rows[wide](state, shared, geometry)
+            k.finish_potentials[narrow](state, shared, geometry, field)
+            k.force_weight[wide](state, scratch)
+            k.force_pairs[wide](state, shared, geometry, scratch)
+            k.force_finish[narrow](state, shared, nuclear, scratch, field)
+
+        acceleration()
+        for _ in range(n_steps):
+            xi = np.stack([rng.standard_normal((self.n_atom, 3)) for rng in rngs])
+            velocity_dev = c1h * velocity_dev + xp.asarray(noise * xi)  # O
+            velocity_dev += (0.5 * dt) * self._accel  # B
+            self._coords += dt * velocity_dev  # A
+            acceleration()
+            velocity_dev += (0.5 * dt) * self._accel  # B
+            xi = np.stack([rng.standard_normal((self.n_atom, 3)) for rng in rngs])
+            velocity_dev = c1h * velocity_dev + xp.asarray(noise * xi)  # O
+        self._velocity[...] = velocity_dev
+        print(
+            f"[RTDFTBGPUBatchModel] GPU pre-NVT: {n_steps} BOMD steps of "
+            f"{_PRE_NVT_DT_FS} fs for {self.num} system(s)."
+        )
+
+    def _initialize_on_device(self, template, per_system):
+        """Geometry, ground state, kick and bootstrap of every system on the GPU."""
+
+        from numba import cuda
+
+        xp = self.xp
+        hybrid_saved, self._hybrid = self._hybrid, False  # FP64 init, always
+        state, shared, geometry, nuclear, scratch, out, field = self._bundles
+        k, acc = self._wide_kernels, self._wide_acc
+
+        # thermalize first, so r(0) and v(0) below are the pre-NVT endpoint
+        if template.pre_nvt:
+            self._prenvt_on_device(template)
+
+        # H0, S, gamma and the repulsive energy at r(0)
+        n_geo = 1 if self._shared_geometry else self.num
+        self._h0[...] = 0.0
+        self._overlap[...] = 0.0
+        acc[...] = 0.0
+        k.geo_build[(n_geo, self._wide_bps), _THREADS_PER_BLOCK](
+            state, shared, geometry, acc
+        )
+        cuda.synchronize()
+        if self._shared_geometry:
+            self._e_repulsive[...] = acc[0]
+        else:
+            self._e_repulsive[...] = acc
+
+        # S^-1 at r(0), FP64
+        if self._shared_geometry:
+            self._s_inv[...] = xp.linalg.inv(self._overlap)
+        else:
+            self._invert_overlap_on_device()
+
+        # one SCC ground state per distinct starting point
+        if per_system:
+            for i in range(self.num):
+                self._scf_on_device(i, template)
+        else:
+            self._scf_on_device(0, template)
+            if self.num > 1:
+                self._rho[...] = self._rho[0:1]
+
+        self._start_on_device(template)
+        self._hybrid = hybrid_saved
 
     def _allocate_scratch(self):
         """Per-system working storage, see :data:`_Scratch`."""
@@ -962,7 +1983,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         )
 
     def _build_bundles(self):
-        """Wrap the state in the kernel's argument bundles, once.
+        """Wrap the state in the kernel's argument bundles once.
 
         A raw CuPy array inside a namedtuple is untypeable by numba, so on the GPU every
         field goes through ``cuda.as_cuda_array``, which is a zero-copy view.
@@ -1100,6 +2121,90 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         bundles[0] = state._replace(rho=state.rho_old, rho_old=state.rho)
         self._bundles = tuple(bundles)
 
+    def _resolve_blocks_per_system(self):
+        """How many CUDA blocks each system's stage work is spread over.
+
+        One block per system (the narrow path) once the batch alone oversubscribes
+        every SM; otherwise enough blocks to fill the device ~4 deep, capped by the
+        largest strided loop so no block is left without work. An explicit
+        ``blocks_per_system`` from the constructor wins.
+
+        Returns
+        -------
+        int
+            ``1`` selects the narrow block-per-system kernels.
+        """
+
+        if self.blocks_per_system is not None:
+            return self.blocks_per_system
+        from numba import cuda
+
+        sm_count = cuda.get_current_device().MULTIPROCESSOR_COUNT
+        want = -(-4 * sm_count // max(self.num, 1))  # ceil: blocks to fill the GPU
+        max_work = max(
+            self.n_orb,
+            self.n_atom * max(self.n_atom - 1, 1),
+            self.n_shell * self.n_shell,
+        )
+        cap = -(-max_work // _THREADS_PER_BLOCK)
+        return max(1, min(want, cap))
+
+    def _step_on_gpu_wide(self):
+        """One step of a SMALL batch of LARGE systems: the phase-split kernels.
+
+        The same physics as :meth:`_step_on_gpu`, with each stage's parallel sections
+        launched on a ``(num, blocks_per_system)`` grid and its serial bookkeeping in
+        narrow ``(num,)`` kernels between them; the kernel boundaries provide the
+        grid-wide ordering that ``syncthreads`` provides inside one block. All the
+        launches and the CuPy zero-fills queue on the default stream, so the one
+        synchronization at the end is for the device->host copies of the results.
+        """
+
+        from numba import cuda
+
+        state, shared, geometry, nuclear, scratch, out, field = self._bundles
+        wide = ((self.num, self._wide_bps), _THREADS_PER_BLOCK)
+        narrow = (self.num, _THREADS_PER_BLOCK)
+        k, dt = self._wide_kernels, self.dt
+        acc, mu = self._wide_acc, self._wide_mu
+
+        acc[...] = 0.0
+        if self.ehrenfest:
+            k.pre_start[wide](state, shared, geometry, nuclear, field, dt)
+            k.finish_potentials[narrow](state, shared, geometry, field)
+            k.pre_work[wide](state, shared, geometry, nuclear, acc)
+            k.energy_start[narrow](state, shared, geometry, field, acc)
+            self._leapfrog_on_device(2.0 * dt)
+            acc[...] = 0.0
+            k.geo_reset[wide](state, geometry, nuclear)
+            k.geo_build[wide](state, shared, geometry, acc)
+            self._invert_overlap_on_device()
+            k.post_prep[wide](state, shared, geometry, scratch)
+            k.post_charges[narrow](state, shared, geometry, mu, acc, 1)
+            acc[...] = 0.0
+            k.scc_rows[wide](state, shared, geometry)
+            k.finish_potentials[narrow](state, shared, geometry, field)
+            k.post_ham[wide](state, shared, geometry, acc)
+            k.report[narrow](state, shared, geometry, out, field, mu, acc, dt)
+            self._energy_weighted_density_on_device()
+            k.force_weight[wide](state, scratch)
+            k.force_pairs[wide](state, shared, geometry, scratch)
+            k.force_finish[narrow](state, shared, nuclear, scratch, field)
+        else:
+            k.scc_rows[wide](state, shared, geometry)
+            k.finish_potentials[narrow](state, shared, geometry, field)
+            k.pre_work[wide](state, shared, geometry, acc)
+            k.energy_start[narrow](state, shared, geometry, field, acc)
+            self._leapfrog_on_device(2.0 * dt)
+            k.post_prep[wide](state, shared, geometry)
+            k.post_charges[narrow](state, shared, geometry, mu, acc, 0)
+            acc[...] = 0.0
+            k.scc_rows[wide](state, shared, geometry)
+            k.finish_potentials[narrow](state, shared, geometry, field)
+            k.post_ham[wide](state, shared, geometry, acc)
+            k.report[narrow](state, shared, geometry, out, field, mu, acc, dt)
+        cuda.synchronize()
+
     def _step_on_gpu(self):
         """One step of the whole batch: stage kernels around the dense linear algebra.
 
@@ -1110,6 +2215,8 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         device->host copies of the results.
         """
 
+        if self._wide_bps > 1:
+            return self._step_on_gpu_wide()
         from numba import cuda
 
         state, shared, geometry, nuclear, scratch, out, field = self._bundles

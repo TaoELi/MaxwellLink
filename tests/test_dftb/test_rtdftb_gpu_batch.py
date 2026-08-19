@@ -45,7 +45,12 @@ def _kwargs(**overrides):
     """Scalar-driver keyword arguments shared by the batch and the reference."""
 
     kwargs = dict(
-        sk_path=sk_path(skip=pytest.skip), elements=_ELEMENTS, positions=_POSITIONS
+        sk_path=sk_path(skip=pytest.skip),
+        elements=_ELEMENTS,
+        positions=_POSITIONS,
+        # the CUDA backend defaults gpu_init on; the reference suite pins the CPU
+        # initialization so batch-vs-scalar stays bitwise-comparable
+        gpu_init=False,
     )
     kwargs.update(overrides)
     return kwargs
@@ -93,12 +98,15 @@ def _scalar_reference(fields, **overrides):
     return dipole, amplitude, energy
 
 
-def _run_batch(xp, fields, **overrides):
+def _run_batch(xp, fields, blocks_per_system=None, **overrides):
     """Drive the batch model over the same fields and collect the same quantities."""
 
     n_steps, num = fields.shape[0], fields.shape[1]
     model = batch_mod.get_batch_model("gpu", "rtdftb")(
-        num=num, driver_kwargs=_kwargs(**overrides), xp=xp
+        num=num,
+        driver_kwargs=_kwargs(**overrides),
+        xp=xp,
+        blocks_per_system=blocks_per_system,
     )
     model.initialize(_DT, list(range(num)))
     dipole = np.zeros((n_steps, num, 3))
@@ -559,6 +567,147 @@ def test_hybrid_precision_tracks_fp64_and_is_ignored_on_cpu(ehrenfest):
     assert np.abs(on_gpu_hybrid[0] - on_gpu[0]).max() < 5e-6  # dipole
     assert np.abs(on_gpu_hybrid[2] - on_gpu[2]).max() < 5e-6  # energy
     assert np.abs(on_gpu_hybrid[0] - on_gpu[0]).max() > 0.0  # FP32 really ran
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("ehrenfest", [False, True])
+def test_wide_launch_matches_the_narrow_kernels(ehrenfest):
+    """``blocks_per_system > 1`` spreads one system over many blocks, same physics.
+
+    The auto rule keeps these tiny systems on the narrow block-per-system path, so the
+    wide phase kernels are forced explicitly; only reduction order may differ, so the
+    agreement bound is round-off, not exactness.
+    """
+
+    cupy = _array_module("cupy")
+    fields = _fields()
+    overrides = dict(ehrenfest=ehrenfest)
+    if ehrenfest:
+        overrides["velocities"] = _VELOCITIES
+
+    narrow = _run_batch(cupy, fields, **overrides)
+    wide = _run_batch(cupy, fields, blocks_per_system=4, **overrides)
+    assert narrow[3]._wide_bps == 1 and wide[3]._wide_bps == 4
+    if ehrenfest:
+        coords_gap = np.abs(wide[3].coordinates() - narrow[3].coordinates()).max()
+        assert coords_gap < 1e-12
+    narrow[3].close(), wide[3].close()
+
+    assert np.abs(wide[0] - narrow[0]).max() < 1e-12  # dipole
+    assert (
+        np.abs(wide[1] - narrow[1]).max() < 1e-11
+    )  # amplitude (dipole difference / dt)
+    assert np.abs(wide[2] - narrow[2]).max() < 1e-11  # energy
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("ehrenfest", [False, True])
+def test_full_gpu_path_reproduces_the_cpu_path_after_a_kick(ehrenfest):
+    """End to end: GPU ground state + GPU bootstrap + GPU dynamics == pure CPU.
+
+    With ``gpu_init=True`` no dense matrix is ever built or multiplied on the CPU --
+    the SCC ground state, the strong delta kick and the Euler bootstrap all run on
+    the device -- yet the trajectory must match independent scalar CPU drivers (CPU
+    SCF + CPU real-time propagation) to round-off: the SCC fixed point is backend
+    independent, so only summation-order noise may remain.
+    """
+
+    cupy = _array_module("cupy")
+    fields = _fields()
+    overrides = dict(ehrenfest=ehrenfest, delta_kick_au=0.2, kick_direction="z")
+    if ehrenfest:
+        overrides["velocities"] = _VELOCITIES
+
+    reference = _scalar_reference(fields, **overrides)  # pure CPU, scalar drivers
+    mine = _run_batch(cupy, fields, gpu_init=True, **overrides)
+
+    # the kick must actually have rung the system, or the comparison is empty
+    assert np.abs(reference[0]).max() > 1e-2
+    assert np.abs(mine[0] - reference[0]).max() < 5e-12  # dipole
+    assert np.abs(mine[1] - reference[1]).max() < 5e-11  # amplitude (finite diff / dt)
+    assert np.abs(mine[2] - reference[2]).max() < 1e-11  # energy
+    if ehrenfest:
+        # the nuclei moved, and moved identically
+        start = np.asarray(_POSITIONS) * 1.8897261254535
+        assert np.abs(mine[3].coordinates()[0] - start).max() > 1e-6
+    mine[3].close()
+
+    # on the numpy backend the flag is ignored and the CPU initialization runs
+    plain = _run_batch(np, fields, **overrides)
+    ignored = _run_batch(np, fields, gpu_init=True, **overrides)
+    plain[3].close(), ignored[3].close()
+    for a, b in zip(plain[:3], ignored[:3]):
+        assert np.array_equal(a, b)
+
+
+@pytest.mark.core
+def test_gpu_init_defaults_on_for_cuda_and_off_for_numpy():
+    """With ``gpu_init`` unset the CUDA backend initializes on the device."""
+
+    cupy = _array_module("cupy")
+    fields = _fields(n_steps=2)
+    auto = _run_batch(cupy, fields, gpu_init=None)
+    assert auto[3]._gpu_layout is not None  # the GPU initialization ran
+    auto[3].close()
+    plain = _run_batch(np, fields, gpu_init=None)
+    assert plain[3]._gpu_layout is None  # the numpy backend never uses it
+    plain[3].close()
+
+
+@pytest.mark.core
+def test_pre_nvt_runs_on_the_gpu_and_matches_the_cpu_thermalization():
+    """GPU pre-NVT: the same OBABO draws, charges and forces as the CPU BOMD.
+
+    The random streams are identical by construction, so over a short
+    thermalization the two initializations may differ only by the SCF/force
+    round-off between the eigensolver backends; every system must also end up
+    somewhere of its own.
+    """
+
+    cupy = _array_module("cupy")
+    fields = _fields(n_steps=3)
+    overrides = dict(ehrenfest=True, pre_nvt=True, pre_nvt_duration_ps=0.005, seed=7)
+
+    on_cpu = _run_batch(cupy, fields, gpu_init=False, **overrides)
+    on_gpu = _run_batch(cupy, fields, gpu_init=True, **overrides)
+
+    coords_cpu, coords_gpu = on_cpu[3].coordinates(), on_gpu[3].coordinates()
+    velocity_cpu, velocity_gpu = on_cpu[3].velocities(), on_gpu[3].velocities()
+    on_cpu[3].close(), on_gpu[3].close()
+
+    assert np.abs(coords_gpu - coords_cpu).max() < 1e-6
+    assert np.abs(velocity_gpu - velocity_cpu).max() < 1e-6
+    assert np.abs(on_gpu[0] - on_cpu[0]).max() < 1e-6  # dipole after 3 steps
+    # the thermalization really happened, and differently per system
+    start = np.asarray(_POSITIONS) * 1.8897261254535
+    assert np.abs(coords_gpu[0] - start).max() > 1e-4
+    assert np.abs(coords_gpu[0] - coords_gpu[1]).max() > 1e-4
+
+
+@pytest.mark.core
+def test_two_phase_scf_converges_the_same_ground_state():
+    """``hybrid_precision`` + ``gpu_init``: FP32 SCF bulk, FP64 tail, same physics.
+
+    Both runs must reach the same converged charges within ``scc_tolerance``, so
+    after a strong kick the trajectories may differ only at the tolerance level
+    (plus the hybrid stepping's own FP32 round-off); the FP32 phase must actually
+    have run, and the FP64 tail must have finished the job.
+    """
+
+    cupy = _array_module("cupy")
+    fields = _fields(n_steps=3)
+    base = dict(
+        ehrenfest=True, delta_kick_au=0.2, velocities=_VELOCITIES, gpu_init=True
+    )
+
+    fp64 = _run_batch(cupy, fields, **base)
+    hybrid = _run_batch(cupy, fields, hybrid_precision=True, **base)
+    n_fp32, n_fp64 = hybrid[3]._scf_iterations
+    assert n_fp32 > 0 and n_fp64 > 0
+    fp64[3].close(), hybrid[3].close()
+
+    assert np.abs(hybrid[0] - fp64[0]).max() < 1e-6  # dipole, tolerance-limited
+    assert np.abs(hybrid[2] - fp64[2]).max() < 1e-6  # energy
 
 
 if __name__ == "__main__":

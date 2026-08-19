@@ -306,13 +306,6 @@ class MDGPUBatchModel(DummyBatchModel):
         """
         Allocate the batch state and optionally pre-equilibrate.
 
-        Every system starts from the force field's geometry -- or, with ``batch_xyz``,
-        from its molecule ID's frame -- and owns one random stream keyed on
-        ``seed + molecule_id``, as in the scalar ``MDModel``, for both its
-        initial momenta and its Langevin noise. A molecule's trajectory therefore does
-        not depend on which batch, or how many drivers, it is run in; on the CPU backend
-        it is the scalar driver's trajectory bit for bit.
-
         Parameters
         ----------
         dt_au : float
@@ -484,7 +477,7 @@ class MDGPUBatchModel(DummyBatchModel):
 
     def _step_on_cpu(self, efield, c1h, noise):
         """
-        Advance every system by one OBABO step, vectorized over the batch.
+        Advance every system by one OBABO step vectorized over the batch.
 
         Mirrors ``MDModel.propagate``.
 
@@ -495,7 +488,7 @@ class MDGPUBatchModel(DummyBatchModel):
         c1h : float
             Langevin O half-step scaling; ``1.0`` disables the thermostat.
         noise : numpy.ndarray of float, shape (na, 1)
-            Momentum noise amplitude of the Langevin half-step, per atom.
+            Momentum noise amplitude of the Langevin half-step per atom.
         """
 
         dt, mass = self.dt, self.mass
@@ -550,7 +543,7 @@ class MDGPUBatchModel(DummyBatchModel):
         c1h : float
             Langevin O half-step scaling; ``1.0`` disables the thermostat.
         noise : numpy.ndarray of float, shape (na, 1)
-            Momentum noise amplitude of the Langevin half-step, per atom.
+            Momentum noise amplitude of the Langevin half-step per atom.
         """
 
         noise_dev = self.xp.asarray(noise.ravel())
@@ -653,8 +646,7 @@ class MDGPUBatchModel(DummyBatchModel):
         """
         Run a field-free Langevin trajectory to thermalize every system.
 
-        Each system carries its own random stream, so this is what decorrelates systems
-        that all started from the same geometry, within a batch and across batches.
+        Each system carries its own random stream and remains uncorrelated with other systems.
 
         Parameters
         ----------

@@ -265,15 +265,22 @@ def shell_charges(q, q0_orb, orb_shell, dq_shell):
 
 
 @kernel
+def scc_potential_row(gamma, dq_shell, v_shell, i):
+    """Row ``i`` of the shell potential ``V = gamma . dq``."""
+
+    total = 0.0
+    for j in range(dq_shell.shape[0]):
+        total += gamma[i, j] * dq_shell[j]
+    v_shell[i] = total
+
+
+@kernel
 def scc_potential(gamma, dq_shell, orb_shell, v_shell, v_orb):
     """Electrostatic potential per shell and per orbital, ``V = gamma . dq``."""
 
     n_shell = dq_shell.shape[0]
     for i in range(n_shell):
-        total = 0.0
-        for j in range(n_shell):
-            total += gamma[i, j] * dq_shell[j]
-        v_shell[i] = total
+        scc_potential_row(gamma, dq_shell, v_shell, i)
     for mu in range(orb_shell.shape[0]):
         v_orb[mu] = v_shell[orb_shell[mu]]
 

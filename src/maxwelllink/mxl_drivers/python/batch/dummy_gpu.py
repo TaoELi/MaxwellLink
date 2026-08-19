@@ -116,10 +116,10 @@ class DummyBatchModel:
         -----
         This method can be *optionally* overridden by subclasses to send
         additional data to MaxwellLink. We recommend including
-        "time_au", "energy_au",
-        dipole components at half-step time: "mux_au", "muy_au", "muz_au"
-        and the force-time dipole (``mux_m_au``/``muy_m_au``/``muz_m_au``)
-        in each dictionary, matching the scalar-driver format.
+        "time_au", "energy_au", and the dipole components at half-step time: 
+        "mux_au", "muy_au", "muz_au", and the force-time dipole 
+        (``mux_m_au``/``muy_m_au``/``muz_m_au``) in each dictionary, 
+        matching the scalar-driver format.
 
         Returns
         -------

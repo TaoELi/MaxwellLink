@@ -7,14 +7,6 @@
 
 """
 Real-time TD-DFTB driver for MaxwellLink, with or without moving nuclei.
-
-``RTDFTBModel`` runs the same physics as an external DFTB+ ``ElectronDynamics`` block
-driven over the socket, but in process: the .skf files are read directly, the SCC ground
-state is converged here, and one EM step drives one ``doTdStep``. Setting
-``ehrenfest=True`` lets the nuclei move, which is RT-TDDFTB-Ehrenfest dynamics.
-
-This built-in feature avoids calling external DFTB+ and, like ``MDModel``, keeps the
-per-driver memory small enough that many drivers can share one cavity.
 """
 
 import os
@@ -87,6 +79,7 @@ class RTDFTBModel(DummyModel):
         ehrenfest: bool = False,
         propagator: str = "leapfrog",
         hybrid_precision: bool = False,
+        gpu_init=None,
         dt_rtdftb_au=None,
         delta_kick_au: float = 0.0,
         kick_direction: str = "z",
@@ -115,11 +108,8 @@ class RTDFTBModel(DummyModel):
         sk_path : str, default: '3ob'
             Either a directory holding the ``<A>-<B>.skf`` files of a Slater-Koster
             parameter set, or the name of one of the sets published at
-            ``github.com/dftbparams`` -- ``'3ob'``, ``'mio'``, ``'auorg'``, ``'znorg'``
-            and twenty more, listed by
-            :func:`maxwelllink.tools.slko.available_sets`. A name that is not already
-            installed is downloaded once, beside the installed package, and reused by
-            every later run.
+            ``github.com/dftbparams``: ``'3ob'``, ``'mio'``, ``'auorg'``, ``'znorg'``,
+            etc.
         elements : sequence of str, optional
             Element symbol of every atom, in input order. Required unless ``xyz`` is
             given.
@@ -143,18 +133,24 @@ class RTDFTBModel(DummyModel):
             Electronic propagator. The default is what DFTB+ itself runs, so it is the
             one that reproduces an external DFTB+ driver step for step.
         hybrid_precision : bool, default: False
-            Opt-in hybrid FP32/FP64 arithmetic of the GPU batch driver: the dense
-            linear algebra of every step, including the leapfrog products, ``S^-1`` and the
-            energy-weighted density, runs in single precision through cuBLAS/
-            cuSOLVER, while the density matrix, every accumulator and all assembly
-            kernels stay in double precision. Roughly halves the step time of large
-            batches on consumer GPUs (whose FP64 rate is 1/64 of FP32) and keeps the
-            conservation laws at FP64 quality.
+            Opt-in hybrid FP32/FP64 arithmetic of the GPU batch driver for improved speed.
+        gpu_init : bool, optional
+            Fully-GPU initialization of the GPU batch driver: the SCC ground state,
+            the ``pre_nvt`` Langevin BOMD, the delta kick and the Euler bootstrap all
+            run on the device. ``None`` (the default) lets the driver decide: this
+            scalar CPU driver and the numpy batch backend never use it, while
+            ``RTDFTBGPUBatchModel`` on a CUDA device turns it on. ``False`` forces
+            the CPU initialization even there; ``True`` demands the GPU one.
+            Initialization agrees with the CPU path to eigensolver round-off, not
+            bitwise, and runs in FP64 -- except that with ``hybrid_precision`` the
+            SCC ground state uses a two-phase schedule (the bulk of the iterations
+            in FP32, the final stretch and the reported state in FP64), converging
+            the same charges to the same tolerance. ``pre_nvt``
+            with ``ehrenfest=False`` still falls back to the CPU initialization.
         dt_rtdftb_au : float, optional
             Electronic time step in atomic units. ``None`` (the default) takes one RT
-            step per EM step, as the external DFTB+ driver does. A smaller value makes
-            the driver sub-step internally; it is rounded so that an integer number of
-            sub-steps fills one EM step exactly.
+            step per EM step. A smaller value makes the driver sub-step internally;
+            it is rounded so that an integer number of sub-steps fills one EM step exactly.
         delta_kick_au : float, default: 0.0
             Strength of a delta kick applied once during :meth:`initialize`, in atomic
             units. Zero (the default) starts from the unperturbed ground state, which is
@@ -172,19 +168,11 @@ class RTDFTBModel(DummyModel):
             Kelvin.
         batch_xyz : str, optional
             Path to a multi-frame XYZ file (Angstrom) that gives every molecule its own
-            starting geometry: molecule ``m`` starts from frame ``m``, so a batch of
-            drivers, or several batches, read consecutive frames and the same molecule
-            ID always gets the same frame. Every frame must list the same atoms; there
-            must be more frames than the largest molecule ID. Frame 0 doubles as the
-            template geometry when neither ``xyz`` nor ``positions`` is given.
+            starting geometry, with molecule ``m`` starting from frame ``m``.
         pre_nvt : bool, default: False
             Whether to thermalize the geometry (and, with ``ehrenfest``, the velocities)
-            before the real-time dynamics with Langevin Born-Oppenheimer MD at
-            ``temperature_K`` -- SCC ground state and forces at every step, a
-            classical time step of 0.5 fs -- for ``pre_nvt_duration_ps``. Every
-            molecule follows its own random stream (``seed + molecule_id``), so a batch
-            of drivers starts from as many different geometries. Skipped on a restart
-            from a checkpoint.
+            before the real-time dynamics with Langevin Born-Oppenheimer MD. Skipped on
+            a restart from a checkpoint.
         pre_nvt_duration_ps : float, default: 1.0
             Length of that pre-equilibration in picoseconds.
         friction_fs : float, default: 100.0
@@ -194,20 +182,11 @@ class RTDFTBModel(DummyModel):
         seed : int, default: 0
             Seed for the random-number generator.
         property_filename : str, optional
-            Turns on a run-time record of per-molecule properties -- the nuclear
-            temperature (zero with frozen nuclei), the total and the nuclear kinetic
-            energy and the dipole, i.e. what the driver reports to MaxwellLink --
-            written to this file every ``record_every_steps`` steps: HDF5, streamed
-            while the run goes, unless the name ends in ``.npz`` or ``h5py`` is
-            missing. ``_id_<molecule ID>`` is inserted before the extension, so each
-            driver process writes its own file; a batch writes one file with one column
-            per molecule. A restart appends.
+            Turns on a run-time record of per-molecule properties.
         traj_filename : str, optional
             Turns on a geometry trajectory in extended XYZ (Angstrom) with the Mulliken
             charge deviation ``dq`` of every atom as an extra column, one frame per
-            molecule every ``record_every_steps`` steps, with the same ``_id_`` suffix;
-            see :class:`maxwelllink.tools.XYZTrajectoryWriter` for the frame order of a
-            batch and :func:`maxwelllink.tools.read_xyz_trajectory` to read it back.
+            molecule every ``record_every_steps`` steps.
         record_every_steps : int, default: 10
             Record every this many steps, for both files.
         record_max_steps : int, optional
@@ -258,6 +237,7 @@ class RTDFTBModel(DummyModel):
         self.ehrenfest = bool(ehrenfest)
         self.propagator = propagator
         self.hybrid_precision = bool(hybrid_precision)
+        self.gpu_init = None if gpu_init is None else bool(gpu_init)
         self.dt_rtdftb_au = None if dt_rtdftb_au is None else float(dt_rtdftb_au)
         self.delta_kick_au = float(delta_kick_au)
         self.kick_direction = _DIRECTIONS[str(kick_direction).lower()]
@@ -305,22 +285,12 @@ class RTDFTBModel(DummyModel):
         self.energy_kin = 0.0  # nuclear kinetic energy
 
     # ----------------------- heavy-load initialization ------------------------------
-    def initialize(self, dt_new, molecule_id):
-        """
-        Read the parameter set, converge the SCC ground state and take the bootstrap.
+    def _prepare(self, dt_new, molecule_id):
+        """The cheap prefix of :meth:`initialize`: parameters, tables and geometry.
 
-        This is called during the INIT stage of the socket communication, once the
-        molecule ID has been assigned. It mirrors ``initializeDynamics``: the ground
-        state is converged, the optional delta kick is applied, and one Euler step of
-        the electronic time step carries the density into the first leapfrog interval,
-        all before any field is received.
-
-        Parameters
-        ----------
-        dt_new : float
-            The new time step in atomic units (a.u.).
-        molecule_id : int
-            The ID of the molecule assigned by SocketHub.
+        Everything up to (and excluding) the ground state; no dense matrix is built.
+        The GPU batch driver calls this alone when ``gpu_init`` is on and runs the
+        ground state and the bootstrap on the device itself.
         """
 
         self.dt = float(dt_new)
@@ -344,6 +314,26 @@ class RTDFTBModel(DummyModel):
         self.system = DFTBSystem(
             self.elements, self.positions, self.sk_set, units="bohr"
         )
+
+    def initialize(self, dt_new, molecule_id):
+        """
+        Read the parameter set, converge the SCC ground state and take the bootstrap.
+
+        This is called during the INIT stage of the socket communication, once the
+        molecule ID has been assigned. It mirrors ``initializeDynamics``: the ground
+        state is converged, the optional delta kick is applied, and one Euler step of
+        the electronic time step carries the density into the first leapfrog interval,
+        all before any field is received.
+
+        Parameters
+        ----------
+        dt_new : float
+            The new time step in atomic units (a.u.).
+        molecule_id : int
+            The ID of the molecule assigned by SocketHub.
+        """
+
+        self._prepare(dt_new, molecule_id)
 
         # thermalize the geometry on the ground-state surface before the real-time run;
         # the velocities it ends with are the ones an Ehrenfest run continues from
