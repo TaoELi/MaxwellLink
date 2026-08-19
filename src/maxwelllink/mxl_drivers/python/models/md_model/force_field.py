@@ -126,6 +126,10 @@ class DummyForceField:
     #: whether this force field provides compiled (numba) kernels
     has_compiled_kernels = False
 
+    #: element symbols of one molecule in the order the force field expects them,
+    #: e.g. ``("C", "O", "O")``; empty when the force field does not fix them
+    molecule_symbols = ()
+
     #: names of the per-system energy terms the force field reports next to the
     #: potential, e.g. ``("stretch_au", "bend_au")``; empty when it reports none
     term_names = ()

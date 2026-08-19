@@ -9,8 +9,10 @@
 GPU-batched real-time TDDFTB Ehrenfest dynamics.
 
 Many independent DFTB systems are advanced together, sharing the parameter set and
-the initial conditions (geometry and density matrix); only the field, and with
-``ehrenfest=True`` the trajectory, differ between them.
+the basis layout. Every system starts as the scalar driver of its molecule ID would --
+from one common geometry, or from its own frame of a ``batch_xyz`` file, its own
+Born-Oppenheimer pre-equilibration and its own thermal velocities -- and then feels its
+own field.
 
 This driver runs one execution path on each backend:
 
@@ -19,14 +21,16 @@ This driver runs one execution path on each backend:
 """
 
 import math
+import multiprocessing
+import os
 from collections import namedtuple
 
 import numpy as np
 
-from ..models.rtdftb_model.dftb_params import DFTBSystem, load_sk_set
-from ..models.rtdftb_model.h0_overlap import MAX_INTEGRAL, MAX_ORB, build_h0_overlap
+from ..models.rtdftb_model.dftb_params import load_sk_set
+from ..models.rtdftb_model.h0_overlap import MAX_INTEGRAL, MAX_ORB
 from ..models.rtdftb_model.rtdftb_model import RTDFTBModel
-from ..models.rtdftb_model.scc import scf
+from ..models.rtdftb_model.scc import limit_blas_threads
 from .dummy_gpu import BatchStepResult, DummyBatchModel
 
 # Threads per block for the CUDA launches. A multiple of the warp size (32).
@@ -56,15 +60,15 @@ _N_DELTA = _N_INTERPOLATION - 1
 _State = namedtuple(
     "_State",
     "rho rho_old coupling q_orb dq_atom dq_shell v_scc_shell v_shell v_orb h "
-    "work_a work_b work_c energy_start e_kin",
+    "work_a work_b work_c energy_start e_kin mu_initial",
 )
 _Shared = namedtuple(
     "_Shared",
-    "sk atom_species atom_offset orb_shell orb_atom shell_atom shell_u q0_orb mass "
-    "mu_initial",
+    "sk atom_species atom_offset orb_shell orb_atom shell_atom shell_u q0_orb mass",
 )
-#: Geometry-dependent matrices. Shared (2-D) with the nuclei frozen, per system (3-D)
-#: once they move; the device functions take the per-system view either way.
+#: Geometry-dependent matrices, indexed per system by the kernels. One shared copy is
+#: held while every system sits at the same frozen geometry, and the kernels then read
+#: zero-stride views of it; otherwise one copy per system.
 _Geometry = namedtuple("_Geometry", "coords h0 overlap s_inv gamma e_repulsive")
 _Nuclear = namedtuple("_Nuclear", "velocity half_velocity coords_next accel force")
 _Out = namedtuple("_Out", "amp mu_end mu_half energy")
@@ -235,7 +239,7 @@ def _build_stage_kernels(ehrenfest):
                 mu[k] -= coords[a, k] * st.dq_atom[i, a]
 
     @cuda.jit(device=True)
-    def report(i, out, sh, energy_start, energy_end, mu, dt):
+    def report(i, out, st, energy_start, energy_end, mu, dt):
         """Fill the reply the way the external DFTB+ driver builds it.
 
         Midpoint averages of the dipole and the energy, a finite-difference amplitude,
@@ -243,7 +247,7 @@ def _build_stage_kernels(ehrenfest):
         """
 
         for k in range(3):
-            end = mu[k] - sh.mu_initial[k]
+            end = mu[k] - st.mu_initial[i, k]
             start = out.mu_end[i, k]
             out.amp[i, k] = (end - start) / dt
             out.mu_half[i, k] = 0.5 * (start + end)
@@ -266,14 +270,14 @@ def _build_stage_kernels(ehrenfest):
 
             if tid == 0:
                 acc[0] = 0.0
-                potentials(i, st, sh, gm.coords, gm.gamma, field, n_orb, n_shell)
+                potentials(i, st, sh, gm.coords[i], gm.gamma[i], field, n_orb, n_shell)
             cuda.syncthreads()
-            hamiltonian_rows(i, st, gm.h0, gm.overlap, n_orb, tid, tpb)
-            cuda.atomic.add(acc, 0, band_partial(st.rho[i], gm.h0, n_orb, tid, tpb))
+            hamiltonian_rows(i, st, gm.h0[i], gm.overlap[i], n_orb, tid, tpb)
+            cuda.atomic.add(acc, 0, band_partial(st.rho[i], gm.h0[i], n_orb, tid, tpb))
             cuda.syncthreads()
             if tid == 0:
                 st.energy_start[i] = acc[0] + energy_rest(
-                    i, st, gm.coords, field, gm.e_repulsive, 0.0, n_shell, n_atom
+                    i, st, gm.coords[i], field, gm.e_repulsive[i], 0.0, n_shell, n_atom
                 )
 
         @cuda.jit
@@ -292,23 +296,25 @@ def _build_stage_kernels(ehrenfest):
             # rho(t+dt) is in rho_old, where the leapfrog products left it
             for col in range(tid, n_orb, tpb):
                 st.q_orb[i, col] = rt_orbital_charge(
-                    st.rho_old[i], gm.overlap, col, n_orb
+                    st.rho_old[i], gm.overlap[i], col, n_orb
                 )
             if tid == 0:
                 acc[0] = 0.0
             cuda.syncthreads()
             if tid == 0:
-                charges(i, st, sh, gm.coords, mu, n_orb, n_shell, n_atom)
-                potentials(i, st, sh, gm.coords, gm.gamma, field, n_orb, n_shell)
+                charges(i, st, sh, gm.coords[i], mu, n_orb, n_shell, n_atom)
+                potentials(i, st, sh, gm.coords[i], gm.gamma[i], field, n_orb, n_shell)
             cuda.syncthreads()
-            hamiltonian_rows(i, st, gm.h0, gm.overlap, n_orb, tid, tpb)
-            cuda.atomic.add(acc, 0, band_partial(st.rho_old[i], gm.h0, n_orb, tid, tpb))
+            hamiltonian_rows(i, st, gm.h0[i], gm.overlap[i], n_orb, tid, tpb)
+            cuda.atomic.add(
+                acc, 0, band_partial(st.rho_old[i], gm.h0[i], n_orb, tid, tpb)
+            )
             cuda.syncthreads()
             if tid == 0:
                 energy_end = acc[0] + energy_rest(
-                    i, st, gm.coords, field, gm.e_repulsive, 0.0, n_shell, n_atom
+                    i, st, gm.coords[i], field, gm.e_repulsive[i], 0.0, n_shell, n_atom
                 )
-                report(i, out, sh, st.energy_start[i], energy_end, mu, dt)
+                report(i, out, st, st.energy_start[i], energy_end, mu, dt)
 
         _STEP_KERNELS[ehrenfest] = _Stages(k_pre, None, k_post, None)
         return _STEP_KERNELS[ehrenfest]
@@ -499,7 +505,7 @@ def _build_stage_kernels(ehrenfest):
                 n_shell,
                 n_atom,
             )
-            report(i, out, sh, st.energy_start[i], energy_end, mu, dt)
+            report(i, out, st, st.energy_start[i], energy_end, mu, dt)
 
     @cuda.jit
     def k_force(st, sh, gm, nu, sc, field):
@@ -601,10 +607,11 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
 
     Notes
     -----
-    Every system shares the parameter set, the basis layout and the starting geometry.
-    With the nuclei frozen the geometry-dependent matrices follow from that geometry and
-    are held once rather than ``num`` times; with ``ehrenfest=True`` the trajectories
-    diverge from the first step, so they become per system and are rebuilt every step.
+    Every system shares the parameter set and the basis layout, and starts as the
+    scalar driver of its molecule ID would. When the systems sit at one common frozen
+    geometry the geometry-dependent matrices are held once rather than ``num`` times;
+    once they differ -- ``batch_xyz``, ``pre_nvt``, or moving nuclei -- they are per
+    system, and with ``ehrenfest=True`` rebuilt every step.
     """
 
     def __init__(
@@ -642,7 +649,9 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self.xp = xp
         self.num = int(num)
 
-        template = RTDFTBModel(*tuple(driver_args or ()), **dict(driver_kwargs or {}))
+        self._driver_args = tuple(driver_args or ())
+        self._driver_kwargs = dict(driver_kwargs or {})
+        template = RTDFTBModel(*self._driver_args, **self._driver_kwargs)
         for flag in _UNSUPPORTED_GPU_FLAGS:
             if getattr(template, flag, False):
                 raise ValueError(
@@ -665,6 +674,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self.n_atom = 0
         self.n_shell = 0
         self._on_gpu = False
+        self._shared_geometry = True  # one geometry for all, until initialize() says
         self._kernels = None
         self._bundles = None
         self._field = None
@@ -681,7 +691,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
     # ----------------------- heavy-load initialization ------------------------------
     def initialize(self, dt_au, molecule_ids):
         """
-        Converge the shared ground state and allocate the contiguous batch state.
+        Initialize every system as its scalar driver would and allocate the batch state.
 
         Parameters
         ----------
@@ -701,85 +711,75 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self.t = 0.0
         self._on_gpu = getattr(xp, "__name__", "") == "cupy"
 
-        # One scalar driver reproduces the reference trajectory. Run its whole
-        # initialization once -- ground state, kick, bootstrap step -- and copy the
-        # resulting state into every system, which is what makes the batch exact rather
-        # than merely similar.
+        # Every system starts as the scalar driver of its molecule ID would: ground
+        # state, pre-NVT, velocities, kick and bootstrap all come from
+        # RTDFTBModel.initialize(). With identical initial conditions one template is
+        # run and copied into every row; when the template declares per-molecule
+        # conditions -- batch_xyz, pre_nvt, sampled velocities -- every molecule ID is
+        # initialized on its own, so the batch is exact rather than merely similar.
         template = self._template
-        sk_set = load_sk_set(
+        per_system = (
+            template.batch_frames is not None
+            or template.pre_nvt
+            or (template.ehrenfest and template.init_velocities)
+        )
+        if per_system:
+            rows = _initial_states(
+                self._driver_args, self._driver_kwargs, self.dt, self.molecule_ids
+            )
+        else:
+            template.initialize(self.dt, self.molecule_ids[0])
+            rows = [_scalar_state(template)]
+        first = rows[0]
+
+        self.n_orb = n = first["n_orb"]
+        self.n_atom = first["n_atom"]
+        self.n_shell = n_shell = first["n_shell"]
+        self._sk_set = load_sk_set(
             template.sk_path,
             sorted(set(template.elements)),
             template.max_angular_momentum,
         )
-        system = DFTBSystem(template.elements, template.positions, sk_set, units="bohr")
-        h0, overlap = build_h0_overlap(system)
-        ground = scf(
-            system,
-            h0,
-            overlap,
-            tolerance=template.scc_tolerance,
-            charge=template.charge,
-        )
-        if not ground.converged:
-            raise RuntimeError("the shared SCC ground state did not converge.")
-
-        self.n_orb = n = system.n_orb
-        self.n_atom = system.n_atom
-        self.n_shell = n_shell = ground.layout.n_shell
-        self._sk_set = sk_set
-
-        template.initialize(self.dt, self.molecule_ids[0])
-        dynamics = template.dynamics
-        state = dynamics.state
-        self._mu_initial_host = np.array(template.mu_initial, dtype=float)
-        self._mass_host = np.array(dynamics.mass, dtype=float)
-
+        self._mass_host = first["mass"]
         # topology, shared by construction
-        layout = ground.layout
-        self._shared_host = dict(
-            atom_species=system.atom_species,
-            atom_offset=system.atom_offset,
-            orb_shell=layout.orb_shell,
-            orb_atom=layout.orb_atom,
-            shell_atom=layout.shell_atom,
-            shell_u=layout.shell_u,
-            q0_orb=layout.q0_orb,
-            mass=self._mass_host,
-            mu_initial=self._mu_initial_host,
-        )
+        self._shared_host = {name: first[name] for name in _Shared._fields[1:]}
 
-        def spread(array, dtype=None):
-            """Copy one system's array into every row of a contiguous batch array."""
+        def batched(key, dtype=None):
+            """The batch array of one state field: stacked rows, or one row spread."""
 
-            batched = np.broadcast_to(np.asarray(array), (num,) + np.shape(array))
+            if per_system:
+                return xp.asarray(np.stack([row[key] for row in rows]), dtype=dtype)
+            one = np.asarray(first[key])
             # np.array, not np.ascontiguousarray: for num == 1 the broadcast view is
             # already contiguous and would be handed on read-only
-            return xp.asarray(np.array(batched, order="C"), dtype=dtype)
+            spread = np.broadcast_to(one, (num,) + one.shape)
+            return xp.asarray(np.array(spread, order="C"), dtype=dtype)
 
-        # geometry-dependent matrices: one copy while the nuclei are frozen, one per
-        # system once they move and the trajectories diverge
-        if self.ehrenfest:
-            self._coords = spread(system.coords, xp.float64)
-            self._h0 = spread(state.h0, xp.float64)
-            self._overlap = spread(state.overlap, xp.float64)
-            self._s_inv = spread(state.s_inv, xp.float64)
-            self._gamma = spread(state.gamma, xp.float64)
-            self._e_repulsive = xp.full(num, float(state.energies()[3]))
+        # geometry-dependent matrices: one shared copy while every system sits at the
+        # same frozen geometry (the kernels then read zero-stride views of it), one per
+        # system otherwise
+        self._shared_geometry = not per_system and not self.ehrenfest
+        if self._shared_geometry:
+            self._coords = xp.asarray(first["coords"], dtype=xp.float64)
+            self._h0 = xp.asarray(first["h0"], dtype=xp.float64)
+            self._overlap = xp.asarray(first["overlap"], dtype=xp.float64)
+            self._s_inv = xp.asarray(first["s_inv"], dtype=xp.float64)
+            self._gamma = xp.asarray(first["gamma"], dtype=xp.float64)
         else:
-            self._coords = xp.asarray(system.coords, dtype=xp.float64)
-            self._h0 = xp.asarray(state.h0, dtype=xp.float64)
-            self._overlap = xp.asarray(state.overlap, dtype=xp.float64)
-            self._s_inv = xp.asarray(state.s_inv, dtype=xp.float64)
-            self._gamma = xp.asarray(state.gamma, dtype=xp.float64)
-            self._e_repulsive = float(state.energies()[3])
+            self._coords = batched("coords", xp.float64)
+            self._h0 = batched("h0", xp.float64)
+            self._overlap = batched("overlap", xp.float64)
+            self._s_inv = batched("s_inv", xp.float64)
+            self._gamma = batched("gamma", xp.float64)
+        self._e_repulsive = batched("e_repulsive", xp.float64)
 
-        # per-system electronic state, seeded from the template's post-bootstrap values
-        self._rho = spread(state.rho, xp.complex128)
-        self._rho_old = spread(state.rho_old, xp.complex128)
-        self._coupling = spread(state.coupling, xp.float64)
-        self._q_orb = spread(state.q_orb, xp.float64)
-        self._dq_atom = spread(state.dq_atom, xp.float64)
-        self._dq_shell = spread(state.dq_shell, xp.float64)
+        # per-system electronic state, from the post-bootstrap values
+        self._rho = batched("rho", xp.complex128)
+        self._rho_old = batched("rho_old", xp.complex128)
+        self._coupling = batched("coupling", xp.float64)
+        self._q_orb = batched("q_orb", xp.float64)
+        self._dq_atom = batched("dq_atom", xp.float64)
+        self._dq_shell = batched("dq_shell", xp.float64)
         self._v_scc_shell = xp.zeros((num, n_shell), dtype=xp.float64)
         self._v_shell = xp.zeros((num, n_shell), dtype=xp.float64)
         self._v_orb = xp.zeros((num, n), dtype=xp.float64)
@@ -791,24 +791,26 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._energy_start = xp.zeros(num, dtype=xp.float64)
         self._e_kin = xp.zeros(num, dtype=xp.float64)
 
-        # nuclear integrator state, also seeded from the template's bootstrap
+        # nuclear integrator state, also from the bootstrap
         if self.ehrenfest:
-            self._velocity = spread(dynamics.velocity, xp.float64)
-            self._half_velocity = spread(dynamics.half_velocity, xp.float64)
-            self._coords_next = spread(dynamics.coords_next, xp.float64)
-            self._accel = spread(dynamics.accel, xp.float64)
-            self._force = spread(dynamics.force_end, xp.float64)
+            self._velocity = batched("velocity", xp.float64)
+            self._half_velocity = batched("half_velocity", xp.float64)
+            self._coords_next = batched("coords_next", xp.float64)
+            self._accel = batched("accel", xp.float64)
+            self._force = batched("force", xp.float64)
             self._scratch = self._allocate_scratch()
         else:
             self._velocity = self._half_velocity = self._coords_next = None
             self._accel = self._force = self._scratch = None
 
         # reusable output buffers. _mu_end carries the end-of-step dipole into the next
-        # step as its start, seeded with the template's post-bootstrap value; _mu_half
-        # is the midpoint average that is reported, and the force-time dipole is the
-        # same value again, because that is what the external DFTB+ driver sends.
+        # step as its start, seeded with the post-bootstrap value; _mu_half is the
+        # midpoint average that is reported, and the force-time dipole is the same value
+        # again, because that is what the external DFTB+ driver sends. _mu_initial is
+        # every system's own baseline.
+        self._mu_initial = batched("mu_initial", xp.float64)
         self._amp = xp.zeros((num, 3), dtype=xp.float64)
-        self._mu_end = spread(state.dipole - self._mu_initial_host, xp.float64)
+        self._mu_end = batched("mu_end", xp.float64)
         self._mu_half = xp.zeros((num, 3), dtype=xp.float64)
         self._energy = xp.zeros(num, dtype=xp.float64)
         self._field = xp.zeros((num, 3), dtype=xp.float64)
@@ -897,13 +899,21 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
             *[upload(self._shared_host[name]) for name in _Shared._fields[1:]],
         )
         state = _State(*[wrap(getattr(self, "_" + name)) for name in _State._fields])
+        if self._shared_geometry:
+            # one geometry for all: the kernels index per system, so hand them views
+            # that repeat the shared arrays along the batch axis without copying them
+            def view(array):
+                return wrap(self.xp.broadcast_to(array, (self.num,) + array.shape))
+
+        else:
+            view = wrap
         geometry = _Geometry(
-            wrap(self._coords),
-            wrap(self._h0),
-            wrap(self._overlap),
-            wrap(self._s_inv),
-            wrap(self._gamma),
-            wrap(self._e_repulsive) if self.ehrenfest else self._e_repulsive,
+            view(self._coords),
+            view(self._h0),
+            view(self._overlap),
+            view(self._s_inv),
+            view(self._gamma),
+            wrap(self._e_repulsive),
         )
         out = _Out(
             wrap(self._amp),
@@ -1168,13 +1178,14 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         Returns
         -------
         numpy.ndarray of float, shape (num, n_atom, 3)
-            With the nuclei frozen every row is the shared starting geometry.
+            With the nuclei frozen and one shared starting geometry every row is that
+            geometry.
         """
 
         if self._coords is None:
             raise RuntimeError("RTDFTBGPUBatchModel.coordinates() before initialize().")
         coords = self._to_host(self._coords)
-        if self.ehrenfest:
+        if not self._shared_geometry:
             return coords
         return np.ascontiguousarray(np.broadcast_to(coords, (self.num,) + coords.shape))
 
@@ -1220,6 +1231,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
             "_energy",
             "_energy_start",
             "_e_kin",
+            "_mu_initial",
             "_kernels",
             "_field",
             "_bundles",
@@ -1231,6 +1243,94 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
             "_scratch",
         ):
             setattr(self, name, None)
+
+
+# ---------------------------------------------------------------------------- #
+# the starting state of every system, from the scalar driver                   #
+# ---------------------------------------------------------------------------- #
+def _scalar_state(model):
+    """The batch-relevant state of one initialized scalar driver, as host arrays."""
+
+    dynamics = model.dynamics
+    state = dynamics.state
+    system = model.system
+    layout = model.ground.layout
+    row = dict(
+        n_orb=system.n_orb,
+        n_atom=system.n_atom,
+        n_shell=layout.n_shell,
+        atom_species=system.atom_species,
+        atom_offset=system.atom_offset,
+        orb_shell=layout.orb_shell,
+        orb_atom=layout.orb_atom,
+        shell_atom=layout.shell_atom,
+        shell_u=layout.shell_u,
+        q0_orb=layout.q0_orb,
+        mass=np.array(dynamics.mass, dtype=float),
+        coords=np.array(system.coords, dtype=float),
+        h0=state.h0,
+        overlap=state.overlap,
+        s_inv=state.s_inv,
+        gamma=state.gamma,
+        e_repulsive=float(state.energies()[3]),
+        rho=state.rho,
+        rho_old=state.rho_old,
+        coupling=state.coupling,
+        q_orb=state.q_orb,
+        dq_atom=state.dq_atom,
+        dq_shell=state.dq_shell,
+        mu_initial=np.array(model.mu_initial, dtype=float),
+        mu_end=np.array(state.dipole - model.mu_initial, dtype=float),
+    )
+    if model.ehrenfest:
+        row.update(
+            velocity=dynamics.velocity,
+            half_velocity=dynamics.half_velocity,
+            coords_next=dynamics.coords_next,
+            accel=dynamics.accel,
+            force=dynamics.force_end,
+        )
+    return row
+
+
+def _initial_state(driver_args, driver_kwargs, dt_au, molecule_id):
+    """Initialize the scalar driver of one molecule ID and return its state."""
+
+    limit_blas_threads(1)  # many of these may run side by side
+    model = RTDFTBModel(*driver_args, **driver_kwargs)
+    model.initialize(dt_au, molecule_id)
+    return _scalar_state(model)
+
+
+def _initial_states(driver_args, driver_kwargs, dt_au, molecule_ids):
+    """
+    One starting state per molecule ID, over the CPU cores when that pays.
+
+    A pre-NVT equilibration is seconds to minutes per molecule, so it is spread over
+    forked workers, one per core the process may use; the plain SCC ground state is
+    milliseconds and runs in place. The workers do CPU work only, so forking after the
+    device was set up is safe.
+    """
+
+    jobs = [(driver_args, driver_kwargs, dt_au, mid) for mid in molecule_ids]
+    workers = min(len(jobs) - 1, _cpu_count())
+    if driver_kwargs.get("pre_nvt", False) and workers > 1:
+        # the first molecule runs here, which compiles every kernel once; the forked
+        # workers inherit the compiled code instead of each compiling it again
+        rows = [_initial_state(*jobs[0])]
+        with multiprocessing.get_context("fork").Pool(workers) as pool:
+            rows.extend(pool.starmap(_initial_state, jobs[1:]))
+        return rows
+    return [_initial_state(*job) for job in jobs]
+
+
+def _cpu_count():
+    """CPU cores this process may run on (the SLURM allocation, not the whole node)."""
+
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
 
 
 # ---------------------------------------------------------------------------- #
@@ -1278,10 +1378,10 @@ def _recharge(i, st, sh, rho, overlap, coords, mu, n_orb, n_shell, n_atom):
     rt.rt_dipole(st.dq_atom[i], coords, mu, n_atom)
 
 
-def _report(i, out, sh, energy_start, energy_end, mu, dt):
+def _report(i, out, st, energy_start, energy_end, mu, dt):
     """Fill the reply the way the external DFTB+ driver builds it."""
 
-    end = mu - sh.mu_initial
+    end = mu - st.mu_initial[i]
     start = out.mu_end[i].copy()
     out.amp[i] = (end - start) / dt
     out.mu_half[i] = 0.5 * (start + end)
@@ -1298,15 +1398,26 @@ def _cpu_step_frozen(i, st, sh, gm, out, field, step, dt):
     n_atom = st.dq_atom.shape[1]
     mu = np.zeros(3)
 
-    _rebuild_h(i, st, sh, gm.coords, gm.h0, gm.overlap, gm.gamma, field, n_orb, n_shell)
+    _rebuild_h(
+        i,
+        st,
+        sh,
+        gm.coords[i],
+        gm.h0[i],
+        gm.overlap[i],
+        gm.gamma[i],
+        field,
+        n_orb,
+        n_shell,
+    )
     energy_start = _total_energy(
         i,
         st,
         st.rho,
-        gm.coords,
-        gm.h0,
+        gm.coords[i],
+        gm.h0[i],
         field,
-        gm.e_repulsive,
+        gm.e_repulsive[i],
         0.0,
         n_orb,
         n_shell,
@@ -1316,7 +1427,7 @@ def _cpu_step_frozen(i, st, sh, gm, out, field, step, dt):
         st.rho_old[i],
         st.rho[i],
         st.h[i],
-        gm.s_inv,
+        gm.s_inv[i],
         st.coupling[i],
         step,
         st.work_a[i],
@@ -1324,22 +1435,35 @@ def _cpu_step_frozen(i, st, sh, gm, out, field, step, dt):
         st.work_c[i],
         n_orb,
     )
-    _recharge(i, st, sh, st.rho_old, gm.overlap, gm.coords, mu, n_orb, n_shell, n_atom)
-    _rebuild_h(i, st, sh, gm.coords, gm.h0, gm.overlap, gm.gamma, field, n_orb, n_shell)
+    _recharge(
+        i, st, sh, st.rho_old, gm.overlap[i], gm.coords[i], mu, n_orb, n_shell, n_atom
+    )
+    _rebuild_h(
+        i,
+        st,
+        sh,
+        gm.coords[i],
+        gm.h0[i],
+        gm.overlap[i],
+        gm.gamma[i],
+        field,
+        n_orb,
+        n_shell,
+    )
     energy_end = _total_energy(
         i,
         st,
         st.rho_old,
-        gm.coords,
-        gm.h0,
+        gm.coords[i],
+        gm.h0[i],
         field,
-        gm.e_repulsive,
+        gm.e_repulsive[i],
         0.0,
         n_orb,
         n_shell,
         n_atom,
     )
-    _report(i, out, sh, energy_start, energy_end, mu, dt)
+    _report(i, out, st, energy_start, energy_end, mu, dt)
 
 
 def _cpu_step_ehrenfest(i, st, sh, gm, nu, sc, out, field, step, dt):
@@ -1450,7 +1574,7 @@ def _cpu_step_ehrenfest(i, st, sh, gm, nu, sc, out, field, step, dt):
         n_shell,
         n_atom,
     )
-    _report(i, out, sh, energy_start, energy_end, mu, dt)
+    _report(i, out, st, energy_start, energy_end, mu, dt)
 
     ehr.real_part(st.rho_old[i], sc.density[i], n_orb)
     ehr.energy_weighted_density(

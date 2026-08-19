@@ -22,37 +22,28 @@ import os
 import numpy as np
 
 from maxwelllink.tools.slko import resolve as resolve_slko
-from maxwelllink.units import K_TO_AU
+from maxwelllink.tools.xyz_helper import read_xyz, read_xyz_frames
+from maxwelllink.units import FS_TO_AU, K_TO_AU
 
 try:
     from ..dummy_model import DummyModel
     from .dftb_params import AA_TO_BOHR, DFTBSystem, load_sk_set
-    from .dynamics import PROPAGATORS, RTDynamics
+    from .dynamics import PROPAGATORS, RTDynamics, bomd_equilibrate
     from .h0_overlap import build_h0_overlap
-    from .scc import scf
+    from .scc import limit_blas_threads, scf
 except (ImportError, ValueError):  # allow running as a stand-alone script
     from dummy_model import DummyModel
     from dftb_params import AA_TO_BOHR, DFTBSystem, load_sk_set
-    from dynamics import PROPAGATORS, RTDynamics
+    from dynamics import PROPAGATORS, RTDynamics, bomd_equilibrate
     from h0_overlap import build_h0_overlap
-    from scc import scf
+    from scc import limit_blas_threads, scf
 
 # kick and field polarisations, as the DFTB+ input names them
 _DIRECTIONS = {"x": 0, "y": 1, "z": 2}
 
-
-def read_xyz(path):
-    """Read an XYZ file and return its element symbols and Angstrom coordinates."""
-
-    with open(path) as handle:
-        lines = handle.read().split("\n")
-    n_atom = int(lines[0].split()[0])
-    elements, positions = [], []
-    for line in lines[2 : 2 + n_atom]:
-        fields = line.split()
-        elements.append(fields[0])
-        positions.append([float(v) for v in fields[1:4]])
-    return elements, np.array(positions)
+# Time step of the Born-Oppenheimer pre-equilibration in fs: a classical MD step, not
+# the electronic one, which is what makes the thermalization affordable.
+_PRE_NVT_DT_FS = 0.5
 
 
 class RTDFTBModel(DummyModel):
@@ -85,6 +76,10 @@ class RTDFTBModel(DummyModel):
         velocities=None,
         init_velocities: bool = False,
         temperature_K: float = 300.0,
+        batch_xyz=None,
+        pre_nvt: bool = False,
+        pre_nvt_duration_ps: float = 1.0,
+        friction_fs: float = 100.0,
         reset_dipole: bool = True,
         seed: int = 0,
         checkpoint: bool = False,
@@ -144,7 +139,27 @@ class RTDFTBModel(DummyModel):
             distribution at ``temperature_K`` instead. The random seed is offset by
             ``molecule_id`` so that different molecules are decorrelated.
         temperature_K : float, default: 300.0
-            Temperature of those initial velocities, in Kelvin.
+            Temperature of those initial velocities and of the pre-NVT thermostat, in
+            Kelvin.
+        batch_xyz : str, optional
+            Path to a multi-frame XYZ file (Angstrom) that gives every molecule its own
+            starting geometry: molecule ``m`` starts from frame ``m``, so a batch of
+            drivers, or several batches, read consecutive frames and the same molecule
+            ID always gets the same frame. Every frame must list the same atoms; there
+            must be more frames than the largest molecule ID. Frame 0 doubles as the
+            template geometry when neither ``xyz`` nor ``positions`` is given.
+        pre_nvt : bool, default: False
+            Whether to thermalize the geometry (and, with ``ehrenfest``, the velocities)
+            before the real-time dynamics with Langevin Born-Oppenheimer MD at
+            ``temperature_K`` -- SCC ground state and forces at every step, a
+            classical time step of 0.5 fs -- for ``pre_nvt_duration_ps``. Every
+            molecule follows its own random stream (``seed + molecule_id``), so a batch
+            of drivers starts from as many different geometries. Skipped on a restart
+            from a checkpoint.
+        pre_nvt_duration_ps : float, default: 1.0
+            Length of that pre-equilibration in picoseconds.
+        friction_fs : float, default: 100.0
+            Langevin relaxation time of the pre-equilibration in femtoseconds.
         reset_dipole : bool, default: True
             Whether to report the dipole moment relative to its value at time zero.
         seed : int, default: 0
@@ -159,11 +174,22 @@ class RTDFTBModel(DummyModel):
 
         super().__init__(verbose, checkpoint, restart)
 
+        # every molecule's own starting geometry, picked by molecule ID in initialize()
+        self.batch_frames = None
+        if batch_xyz is not None:
+            frame_elements, frames = read_xyz_frames(batch_xyz)
+            self.batch_frames = frames * AA_TO_BOHR
+            if xyz is None and (elements is None or positions is None):
+                elements, positions, units = frame_elements, frames[0], "angstrom"
         if xyz is not None:
             elements, positions = read_xyz(xyz)
             units = "angstrom"
         if elements is None or positions is None:
-            raise ValueError("provide either xyz=..., or both elements and positions.")
+            raise ValueError(
+                "provide xyz=..., batch_xyz=..., or both elements and positions."
+            )
+        if self.batch_frames is not None and list(elements) != list(frame_elements):
+            raise ValueError("batch_xyz lists other atoms than elements/xyz.")
         if propagator not in PROPAGATORS:
             raise ValueError("propagator must be one of %s" % (PROPAGATORS,))
         if str(kick_direction).lower() not in _DIRECTIONS:
@@ -190,8 +216,16 @@ class RTDFTBModel(DummyModel):
         self.init_velocities = bool(init_velocities)
         self.temperature_K = float(temperature_K)
         self.kT = K_TO_AU * self.temperature_K
+        self.pre_nvt = bool(pre_nvt)
+        self.pre_nvt_duration_ps = float(pre_nvt_duration_ps)
+        self.friction_fs = float(friction_fs)
+        if self.pre_nvt and (
+            self.pre_nvt_duration_ps <= 0.0 or self.friction_fs <= 0.0
+        ):
+            raise ValueError("pre_nvt_duration_ps and friction_fs must be positive.")
         self.reset_dipole = bool(reset_dipole)
         self.seed = int(seed)
+        self._rng = None  # this molecule's random stream, made in initialize()
 
         # built in initialize(), which is where the SCC ground state is converged
         self.sk_set = None
@@ -230,12 +264,42 @@ class RTDFTBModel(DummyModel):
         self.dt = float(dt_new)
         self.molecule_id = int(molecule_id)
         self.checkpoint_filename = "rtdftb_checkpoint_id_%d.npz" % self.molecule_id
+        # one random stream per molecule, for the pre-NVT noise and the velocity draw
+        self._rng = np.random.default_rng(self.seed + self.molecule_id)
+        # the SCC loop's LAPACK calls are small; a threaded BLAS only slows them down
+        limit_blas_threads(1)
+
+        if self.batch_frames is not None:
+            if self.molecule_id >= len(self.batch_frames):
+                raise ValueError(
+                    "[molecule ID %d] batch_xyz holds %d frames, so it has no frame "
+                    "for this molecule." % (self.molecule_id, len(self.batch_frames))
+                )
+            self.positions = self.batch_frames[self.molecule_id].copy()
 
         species = sorted(set(self.elements))
         self.sk_set = load_sk_set(self.sk_path, species, self.max_angular_momentum)
         self.system = DFTBSystem(
             self.elements, self.positions, self.sk_set, units="bohr"
         )
+
+        # thermalize the geometry on the ground-state surface before the real-time run;
+        # the velocities it ends with are the ones an Ehrenfest run continues from
+        equilibrated = None
+        if self.pre_nvt and not (self.restart and self.checkpoint):
+            dt_md = _PRE_NVT_DT_FS * FS_TO_AU
+            equilibrated = bomd_equilibrate(
+                self.system,
+                int(round(self.pre_nvt_duration_ps * 1000.0 * FS_TO_AU / dt_md)),
+                dt_md,
+                self.kT,
+                self.friction_fs * FS_TO_AU,
+                self._rng,
+                charge=self.charge,
+                tolerance=self.scc_tolerance,
+            )
+            self.positions = self.system.coords.copy()
+
         h0, overlap = build_h0_overlap(self.system)
         self.ground = scf(
             self.system,
@@ -268,7 +332,7 @@ class RTDFTBModel(DummyModel):
             dt_sub,
             propagator=self.propagator,
             ehrenfest=self.ehrenfest,
-            velocities=self._initial_velocities(),
+            velocities=self._initial_velocities(equilibrated),
         )
         self.dynamics.start(None, self.delta_kick_au, self.kick_direction)
 
@@ -284,16 +348,19 @@ class RTDFTBModel(DummyModel):
                 self.dynamics.dipole_end.copy() if self.reset_dipole else np.zeros(3)
             )
 
-    def _initial_velocities(self):
-        """Nuclear velocities to start from: given, sampled, or at rest."""
+    def _initial_velocities(self, equilibrated=None):
+        """Nuclear velocities to start from: thermalized, given, sampled, or at rest."""
 
-        if not self.ehrenfest or not self.init_velocities:
+        if not self.ehrenfest:
             return self.velocities
-        rng = np.random.default_rng(self.seed + self.molecule_id)
+        if equilibrated is not None:
+            return equilibrated
+        if not self.init_velocities:
+            return self.velocities
         mass = np.array(
             [self.sk_set.mass[sp] for sp in self.system.atom_species], dtype=float
         )
-        velocity = np.sqrt(self.kT / mass)[:, None] * rng.standard_normal(
+        velocity = np.sqrt(self.kT / mass)[:, None] * self._rng.standard_normal(
             (self.system.n_atom, 3)
         )
         velocity -= (mass[:, None] * velocity).sum(axis=0) / mass.sum()

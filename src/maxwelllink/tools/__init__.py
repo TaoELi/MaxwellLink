@@ -24,12 +24,15 @@ from .slko import (
     fetch_slko,
     resolve_slko,
 )
+from .xyz_helper import read_xyz, read_xyz_frames
 
 __all__ = [
     "json_loads",
     "available_sets",
     "fetch_slko",
     "resolve_slko",
+    "read_xyz",
+    "read_xyz_frames",
     "ir_spectrum",
     "rt_tddft_spectrum",
     "lr_tddft_spectrum",

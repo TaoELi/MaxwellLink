@@ -37,6 +37,7 @@ MDModel = md_mod.MDModel
 MDBatch = batch_mod.get_batch_model("gpu", "md")
 FS_TO_AU = units_mod.FS_TO_AU
 K_TO_AU = units_mod.K_TO_AU
+BOHR_PER_ANG = units_mod.BOHR_PER_ANG
 
 from test_co2jcp2021 import LAMMPS_FORCES  # noqa: E402
 
@@ -184,6 +185,68 @@ def test_noise_streams_are_keyed_per_molecule(backend):
     p_com_a = p_a[0].sum(axis=0)
     p_com_b = p_b[0].sum(axis=0)
     assert np.max(np.abs(p_com_a - p_com_b)) > 1e-3 * scale
+
+
+def _write_co2_frames(path, positions_bohr, scales, swap=False):
+    """Write the CO2 box at a few uniform scalings as a multi-frame XYZ, in Angstrom."""
+    symbols = ["C", "O", "O"] * (len(positions_bohr) // 3)
+    if swap:
+        symbols = ["O", "C", "O"] * (len(positions_bohr) // 3)
+    with open(path, "w") as handle:
+        for scale in scales:
+            handle.write(f"{len(symbols)}\nscale {scale}\n")
+            for symbol, (x, y, z) in zip(
+                symbols, positions_bohr * scale / BOHR_PER_ANG
+            ):
+                handle.write(f"{symbol} {x:.10f} {y:.10f} {z:.10f}\n")
+    return str(path)
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_xyz_and_batch_xyz_set_the_starting_geometries(tmp_path, backend):
+    """``xyz`` starts every system from one file geometry, ``batch_xyz`` starts molecule
+    ``m`` from frame ``m`` -- for the scalar driver and the batch alike."""
+    xp = np if backend == "numpy" else _cupy_or_skip()
+    reference = MDModel(ff="co2jcp2021").ff  # the bundled periodic box
+    frames_bohr = [reference.positions * scale for scale in (1.0, 1.001, 1.002)]
+    frames = _write_co2_frames(
+        tmp_path / "frames.xyz", reference.positions, (1.0, 1.001, 1.002)
+    )
+    one = _write_co2_frames(tmp_path / "one.xyz", reference.positions, (1.001,))
+    kwargs = dict(ff="co2jcp2021", box=reference.box, thermostat="nve", pre_nvt=False)
+
+    scalar = MDModel(batch_xyz=frames, **kwargs)
+    scalar.initialize(_DT_AU, 2)
+    np.testing.assert_allclose(scalar.x, frames_bohr[2], atol=1e-9)
+    scalar = MDModel(xyz=one, **kwargs)
+    scalar.initialize(_DT_AU, 2)
+    np.testing.assert_allclose(scalar.x, frames_bohr[1], atol=1e-9)
+
+    batch = MDBatch(num=3, driver_kwargs=dict(batch_xyz=frames, **kwargs), xp=xp)
+    batch.initialize(_DT_AU, [0, 1, 2])
+    for row in range(3):
+        np.testing.assert_allclose(
+            batch._to_host(batch.x)[row], frames_bohr[row], atol=1e-9
+        )
+    batch.close()
+    batch = MDBatch(num=3, driver_kwargs=dict(xyz=one, **kwargs), xp=xp)
+    batch.initialize(_DT_AU, [0, 1, 2])
+    x = batch._to_host(batch.x)
+    assert np.abs(x - x[0]).max() == 0.0 and np.allclose(
+        x[0], frames_bohr[1], atol=1e-9
+    )
+    batch.close()
+
+    with pytest.raises(ValueError):  # atoms in the wrong order for the force field
+        MDModel(
+            xyz=_write_co2_frames(
+                tmp_path / "bad.xyz", reference.positions, (1.0,), swap=True
+            ),
+            **kwargs,
+        )
+    with pytest.raises(ValueError):  # frame 5 does not exist
+        MDModel(batch_xyz=frames, **kwargs).initialize(_DT_AU, 5)
 
 
 @pytest.mark.core

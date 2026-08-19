@@ -29,7 +29,10 @@ try:  # inside the package
         overlap_time_derivative,
         velocity_verlet_next,
     )
+    from .forces import total_force
+    from .h0_overlap import build_h0_overlap
     from .rt import RTState
+    from .scc import scf
 except (ImportError, ValueError):  # allow running as a stand-alone script
     from ehrenfest import (
         build_coupling,
@@ -38,7 +41,10 @@ except (ImportError, ValueError):  # allow running as a stand-alone script
         overlap_time_derivative,
         velocity_verlet_next,
     )
+    from forces import total_force
+    from h0_overlap import build_h0_overlap
     from rt import RTState
+    from scc import scf
 
 PROPAGATORS = ("leapfrog", "cayley", "cayley-midpoint")
 
@@ -444,3 +450,87 @@ def run_ehrenfest(
         "coupling_residual": coupling_residual,
         "state": state,
     }
+
+
+# ---------------------------------------------------------------------------- #
+# Born-Oppenheimer pre-equilibration                                           #
+# ---------------------------------------------------------------------------- #
+def bomd_equilibrate(
+    system, n_steps, dt, kT, friction, rng, charge=0.0, tolerance=1.0e-10
+):
+    """
+    Thermalize one system with Langevin Born-Oppenheimer MD, in place.
+
+    OBABO steps of ``dt`` on the SCC ground-state surface: at every geometry the SCC
+    charges are reconverged from the previous step's charges and the force is
+    :func:`forces.total_force`. Positions are advanced in ``system.coords``; the
+    velocities start from a Maxwell-Boltzmann draw and are returned, so a following
+    Ehrenfest run can continue the same thermal motion.
+
+    Parameters
+    ----------
+    system : dftb_params.DFTBSystem
+        Geometry and basis layout; ``system.coords`` is updated in place.
+    n_steps : int
+        Number of MD steps.
+    dt : float
+        MD time step in atomic units.
+    kT : float
+        Temperature in Hartree.
+    friction : float
+        Langevin relaxation time in atomic units.
+    rng : numpy.random.Generator
+        Source of the initial velocities and the Langevin noise.
+    charge : float, default: 0.0
+        Net charge of the system in units of ``+e``.
+    tolerance : float, default: 1e-10
+        SCC convergence threshold on the shell charges.
+
+    Returns
+    -------
+    numpy.ndarray of float, shape (n_atom, 3)
+        Nuclear velocities at the end, in atomic units.
+
+    Raises
+    ------
+    RuntimeError
+        If the SCC loop fails to converge at some geometry.
+    """
+
+    n_atom = system.n_atom
+    mass = np.array(
+        [system.sk_set.mass[sp] for sp in system.atom_species], dtype=float
+    )[:, None]
+    c1h = float(np.exp(-0.5 * dt / friction))  # Langevin O half-step scaling
+    noise = np.sqrt(kT / mass * (1.0 - c1h**2))  # its velocity noise, per atom
+
+    velocity = np.sqrt(kT / mass) * rng.standard_normal((n_atom, 3))
+    velocity -= (mass * velocity).sum(axis=0) / mass.sum()  # no centre-of-mass drift
+
+    dq_shell = None
+
+    def acceleration():
+        nonlocal dq_shell
+        h0, overlap = build_h0_overlap(system)
+        ground = scf(
+            system,
+            h0,
+            overlap,
+            tolerance=tolerance,
+            charge=charge,
+            dq_shell_start=dq_shell,
+        )
+        if not ground.converged:
+            raise RuntimeError("the SCC ground state did not converge during pre-NVT.")
+        dq_shell = ground.dq_shell.copy()
+        return total_force(system, ground) / mass
+
+    accel = acceleration()
+    for _ in range(int(n_steps)):
+        velocity = c1h * velocity + noise * rng.standard_normal((n_atom, 3))  # O
+        velocity += 0.5 * dt * accel  # B
+        system.coords += dt * velocity  # A
+        accel = acceleration()
+        velocity += 0.5 * dt * accel  # B
+        velocity = c1h * velocity + noise * rng.standard_normal((n_atom, 3))  # O
+    return velocity

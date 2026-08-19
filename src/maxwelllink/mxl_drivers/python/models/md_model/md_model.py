@@ -19,7 +19,8 @@ import os
 
 import numpy as np
 
-from maxwelllink.units import FS_TO_AU, K_TO_AU
+from maxwelllink.tools.xyz_helper import read_xyz, read_xyz_frames
+from maxwelllink.units import BOHR_PER_ANG, FS_TO_AU, K_TO_AU
 from .trajectory import BASE_RECORD_NAMES, TrajectoryRecorder, trajectory_filename
 
 try:
@@ -57,6 +58,8 @@ class MDModel(DummyModel):
         ff="qtip4pf",
         n_molecules=None,
         positions=None,
+        xyz=None,
+        batch_xyz=None,
         box=None,
         rcut=None,
         ewald_wrcut=None,
@@ -91,6 +94,18 @@ class MDModel(DummyModel):
         positions : array-like of float, shape (n_atoms, 3), optional
             Initial atomic positions in Bohr. If ``None`` the force field builds a
             default geometry from ``n_molecules`` (and ``box``).
+        xyz : str, optional
+            Path to an XYZ file (Angstrom) to take the starting geometry from, with the
+            atoms in the order the force field expects (``[C, O, O, ...]`` for CO2,
+            ``[O, H, H, ...]`` for water). Overrides ``positions``; like it, it gives
+            coordinates only, so a periodic system still needs ``box``.
+        batch_xyz : str, optional
+            Path to a multi-frame XYZ file (Angstrom) that gives every molecule its own
+            starting geometry: molecule ``m`` starts from frame ``m``, so a batch of
+            drivers, or several batches, read consecutive frames and the same molecule
+            ID always gets the same frame. Every frame must list the same atoms; there
+            must be more frames than the largest molecule ID. Frame 0 doubles as the
+            template geometry when neither ``xyz`` nor ``positions`` is given.
         box : float or array-like of float, shape (3,), optional
             Periodic box lengths in Bohr. ``None`` treats the system as a finite
             cluster.
@@ -166,6 +181,19 @@ class MDModel(DummyModel):
         self._recorder = None
         self._step_index = 0  # production steps taken; not part of the snapshot
 
+        # the starting geometry from XYZ files: one for all, or one frame per molecule
+        # (picked by molecule ID in initialize()); Angstrom in the files, Bohr here
+        self.batch_frames = None
+        elements = None
+        if batch_xyz is not None:
+            elements, frames = read_xyz_frames(batch_xyz)
+            self.batch_frames = frames * BOHR_PER_ANG
+            if xyz is None and positions is None:
+                positions = self.batch_frames[0]
+        if xyz is not None:
+            elements, positions = read_xyz(xyz)
+            positions = positions * BOHR_PER_ANG
+
         # build the force field
         key = str(ff).lower()
         if key not in _FORCE_FIELDS:
@@ -183,6 +211,12 @@ class MDModel(DummyModel):
             ff_params["n_molecules"] = n_molecules
         self.ff = _FORCE_FIELDS[key](**ff_params)
         self.ff_name = self.ff.name
+        expected = list(self.ff.molecule_symbols) * self.ff.n_molecules
+        if elements is not None and expected and list(elements) != expected:
+            raise ValueError(
+                f"the XYZ atoms do not follow the {self.ff_name} force field's order "
+                f"{list(self.ff.molecule_symbols)} per molecule."
+            )
 
         # Pick the force evaluator
         backend = str(force_backend).lower()
@@ -242,6 +276,13 @@ class MDModel(DummyModel):
         self.dt = float(dt_new)
         self.molecule_id = int(molecule_id)
         self.checkpoint_filename = "md_checkpoint_id_%d.npz" % self.molecule_id
+        if self.batch_frames is not None:
+            if self.molecule_id >= len(self.batch_frames):
+                raise ValueError(
+                    "[molecule ID %d] batch_xyz holds %d frames, so it has no frame "
+                    "for this molecule." % (self.molecule_id, len(self.batch_frames))
+                )
+            self.x = self.batch_frames[self.molecule_id].copy()
 
         # random generator (deterministic given the seed and molecule id)
         self.rng = np.random.default_rng(self.seed + self.molecule_id)

@@ -219,6 +219,64 @@ def test_driver_is_registered_for_maxwelllink():
 
 
 @pytest.mark.core
+def test_batch_xyz_frames_are_picked_by_molecule_id(tmp_path):
+    """Molecule ``m`` reads frame ``m``; too few frames or other atoms are refused."""
+    from maxwelllink.mxl_drivers.python.models.rtdftb_model.rtdftb_model import (
+        read_xyz_frames,
+    )
+
+    path = tmp_path / "frames.xyz"
+    frames = [_POSITIONS * (1.0 + 0.05 * k) for k in range(3)]
+    with open(path, "w") as handle:
+        for k, positions in enumerate(frames):
+            handle.write(f"3\nframe {k}\n")
+            for symbol, (x, y, z) in zip(_ELEMENTS, positions):
+                handle.write(f"{symbol} {x:.8f} {y:.8f} {z:.8f}\n")
+    elements, read = read_xyz_frames(str(path))
+    assert elements == _ELEMENTS and read.shape == (3, 3, 3)
+    np.testing.assert_allclose(read, np.array(frames))
+
+    for molecule_id in (0, 2):
+        model = RTDFTBModel(sk_path=sk_path(skip=pytest.skip), batch_xyz=str(path))
+        model.initialize(_DT, molecule_id)
+        np.testing.assert_allclose(
+            model.system.coords, frames[molecule_id] / dftb_mod.BOHR_TO_AA, atol=1e-12
+        )
+    model = RTDFTBModel(sk_path=sk_path(skip=pytest.skip), batch_xyz=str(path))
+    with pytest.raises(ValueError):
+        model.initialize(_DT, 3)  # only three frames
+    with pytest.raises(ValueError):
+        RTDFTBModel(
+            sk_path=sk_path(skip=pytest.skip),
+            batch_xyz=str(path),
+            elements=["O", "H", "D"],
+            positions=_POSITIONS,
+        )
+
+
+@pytest.mark.core
+def test_pre_nvt_moves_the_geometry_deterministically_per_molecule():
+    """The Born-Oppenheimer pre-equilibration follows ``seed + molecule_id``: same ID,
+    same thermalized state; another ID, another one; the SCC stays converged."""
+    settings = dict(ehrenfest=True, pre_nvt=True, pre_nvt_duration_ps=0.005)
+    first = _driver(**settings)
+    first.initialize(_DT, 0)
+    again = _driver(**settings)
+    again.initialize(_DT, 0)
+    other = _driver(**settings)
+    other.initialize(_DT, 1)
+    still = _driver(ehrenfest=True)
+    still.initialize(_DT, 0)
+    assert np.array_equal(first.system.coords, again.system.coords)
+    assert np.array_equal(first.dynamics.velocity, again.dynamics.velocity)
+    assert np.abs(first.system.coords - other.system.coords).max() > 1e-4
+    assert np.abs(first.system.coords - still.system.coords).max() > 1e-4
+    assert first.ground.converged and np.isfinite(first.ground.energy_total)
+    with pytest.raises(ValueError):
+        _driver(pre_nvt=True, pre_nvt_duration_ps=0.0)
+
+
+@pytest.mark.core
 def test_bad_arguments_are_rejected():
     """The constructor checks what it can before any expensive work happens."""
 

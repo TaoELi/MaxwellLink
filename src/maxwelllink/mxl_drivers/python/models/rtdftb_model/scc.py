@@ -21,6 +21,8 @@ the reported energy is the free energy ``E - TS``.
 import math
 from collections import namedtuple
 
+import os
+
 import numpy as np
 
 try:  # inside the package
@@ -482,6 +484,62 @@ class SCCResult:
         self.__dict__.update(fields)
 
 
+#: Thread-count setters of the BLAS builds numpy ships or links against.
+_BLAS_SET_THREADS = (
+    "openblas_set_num_threads",
+    "openblas_set_num_threads64_",
+    "scipy_openblas_set_num_threads",
+    "scipy_openblas_set_num_threads64_",
+    "MKL_Set_Num_Threads",
+    "bli_thread_set_num_threads",
+)
+
+
+def limit_blas_threads(n_threads=1):
+    """
+    Cap the thread count of every BLAS library loaded in this process.
+
+    The DFTB matrices are small (a few hundred orbitals at most), and a threaded BLAS
+    only spins on them: with numpy's default OpenBLAS on a 48-core host one SCC
+    iteration at 120 orbitals took 200 ms instead of 3 ms. This is what
+    ``OMP_NUM_THREADS=1`` does before start-up, applied after the fact.
+
+    Parameters
+    ----------
+    n_threads : int, default: 1
+        Thread count to set.
+
+    Returns
+    -------
+    list of str
+        The libraries that were capped; empty on platforms without ``/proc``.
+    """
+
+    import ctypes
+
+    capped = []
+    try:
+        with open("/proc/self/maps") as handle:
+            paths = {line.split()[-1] for line in handle if "/" in line}
+    except OSError:
+        return capped
+    for path in sorted(paths):
+        name = os.path.basename(path).lower()
+        if not any(tag in name for tag in ("openblas", "mkl_rt", "libblis")):
+            continue
+        try:
+            library = ctypes.CDLL(path)
+        except OSError:
+            continue
+        for symbol in _BLAS_SET_THREADS:
+            setter = getattr(library, symbol, None)
+            if setter is not None:
+                setter(int(n_threads))
+                capped.append(os.path.basename(path))
+                break
+    return capped
+
+
 def scf(
     system,
     h0,
@@ -494,6 +552,7 @@ def scf(
     charge=0.0,
     shell_resolved=False,
     verbose=False,
+    dq_shell_start=None,
 ):
     """
     Converge the SCC charges of one system and report energies and matrices.
@@ -521,6 +580,10 @@ def scf(
         neutral one minus this.
     shell_resolved : bool
         Whether every shell keeps its own Hubbard U; DFTB+ defaults to ``False``.
+    dq_shell_start : numpy.ndarray of float, shape (n_shell,), optional
+        Shell charges to start the loop from instead of the neutral atoms, e.g. the
+        converged charges of a nearby geometry, which cuts the iteration count of a
+        Born-Oppenheimer trajectory several-fold.
 
     Returns
     -------
@@ -542,6 +605,8 @@ def scf(
     build_gamma(system.coords, layout.shell_atom, layout.shell_u, gamma)
 
     dq_shell = np.zeros(n_shell)
+    if dq_shell_start is not None:
+        dq_shell[:] = dq_shell_start
     dq_new = np.zeros(n_shell)
     history_in = np.zeros((history, n_shell))
     history_residual = np.zeros((history, n_shell))

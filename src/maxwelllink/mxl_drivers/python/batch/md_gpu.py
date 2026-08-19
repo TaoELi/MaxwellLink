@@ -260,6 +260,7 @@ class MDGPUBatchModel(DummyBatchModel):
 
         # the scalar driver's settings, copied so the template can be dropped
         self.x0 = np.ascontiguousarray(template.x, dtype=float)  # shared geometry
+        self.batch_frames = template.batch_frames  # or one frame per molecule ID
         self.thermostat = template.thermostat
         self.temperature_K = template.temperature_K
         self.friction_fs = template.friction_fs
@@ -298,8 +299,9 @@ class MDGPUBatchModel(DummyBatchModel):
         """
         Allocate the batch state and optionally pre-equilibrate.
 
-        Every system starts from the force field's geometry and owns one random stream
-        keyed on ``seed + molecule_id``, as in the scalar ``MDModel``, for both its
+        Every system starts from the force field's geometry -- or, with ``batch_xyz``,
+        from its molecule ID's frame -- and owns one random stream keyed on
+        ``seed + molecule_id``, as in the scalar ``MDModel``, for both its
         initial momenta and its Langevin noise. A molecule's trajectory therefore does
         not depend on which batch, or how many drivers, it is run in; on the CPU backend
         it is the scalar driver's trajectory bit for bit.
@@ -349,8 +351,17 @@ class MDGPUBatchModel(DummyBatchModel):
             np.random.default_rng(self.seed + mid) for mid in self.molecule_ids
         ]
 
-        # positions: one geometry replicated; momenta: one draw per molecule
-        x_host = np.broadcast_to(self.x0, (n, na, 3)).copy()
+        # positions: one geometry replicated, or every molecule's own frame; momenta:
+        # one draw per molecule
+        if self.batch_frames is None:
+            x_host = np.broadcast_to(self.x0, (n, na, 3)).copy()
+        else:
+            if max(self.molecule_ids) >= len(self.batch_frames):
+                raise ValueError(
+                    f"batch_xyz holds {len(self.batch_frames)} frames, fewer than "
+                    f"molecule ID {max(self.molecule_ids)} needs."
+                )
+            x_host = np.array([self.batch_frames[mid] for mid in self.molecule_ids])
         p_host = np.zeros((n, na, 3))
         if self.init_velocities:
             sigma_p = np.sqrt(mass * self.kT)

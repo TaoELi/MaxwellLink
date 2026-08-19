@@ -264,6 +264,9 @@ class CO2JCP2021ForceField(DummyForceField):
     # ------------------------------ compiled kernels -------------------------------
     has_compiled_kernels = True
 
+    #: one molecule's atoms, in the order the geometry lists them
+    molecule_symbols = ("C", "O", "O")
+
     #: energy terms reported next to the potential: the two bond stretches and the bend
     term_names = ("stretch_au", "bend_au")
 

@@ -252,6 +252,9 @@ class QTIP4PFForceField(DummyForceField):
     # ------------------------------ compiled kernels -------------------------------
     has_compiled_kernels = True
 
+    #: one molecule's atoms, in the order the geometry lists them
+    molecule_symbols = ("O", "H", "H")
+
     #: energy terms reported next to the potential: the two bond stretches and the bend
     term_names = ("stretch_au", "bend_au")
 

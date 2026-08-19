@@ -271,6 +271,89 @@ def test_a_batch_of_one_runs_on_the_cpu_backend(ehrenfest):
     assert np.abs(energy - reference[2]).max() < 1e-12
 
 
+def _write_frames(path, num):
+    """A multi-frame XYZ of ``num`` waters, each stretched and bent a little differently."""
+
+    with open(path, "w") as handle:
+        for k in range(num):
+            positions = _POSITIONS * (1.0 + 0.02 * k)
+            positions[1, 1] += 0.01 * k  # and a slightly different bend angle
+            handle.write(f"3\nframe {k}\n")
+            for symbol, (x, y, z) in zip(_ELEMENTS, positions):
+                handle.write(f"{symbol} {x:.8f} {y:.8f} {z:.8f}\n")
+    return str(path)
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("ehrenfest", [False, True])
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_batch_xyz_gives_every_system_its_own_geometry(tmp_path, backend, ehrenfest):
+    """With ``batch_xyz`` molecule ``m`` starts from frame ``m``: the batch member is the
+    scalar driver of that molecule ID, and the members start from different geometries.
+    """
+    xp = _array_module(backend)
+    frames = _write_frames(tmp_path / "frames.xyz", _NUM)
+    fields = _fields(n_steps=10)
+    reference = _scalar_reference(fields, batch_xyz=frames, ehrenfest=ehrenfest)
+    dipole, amplitude, energy, model = _run_batch(
+        xp, fields, batch_xyz=frames, ehrenfest=ehrenfest
+    )
+    assert np.abs(dipole - reference[0]).max() < 1e-13
+    assert np.abs(amplitude - reference[1]).max() < 1e-12
+    assert np.abs(energy - reference[2]).max() < 1e-12
+    coords = model.coordinates()
+    assert np.abs(coords[1] - coords[0]).max() > 1e-3, "rows share a geometry"
+    model.close()
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_pre_nvt_thermalizes_every_system_on_its_own(backend):
+    """A short Born-Oppenheimer pre-equilibration leaves every system at its own
+    geometry with its own velocities, and each is exactly the scalar driver's."""
+    xp = _array_module(backend)
+    fields = _fields(n_steps=10)
+    settings = dict(ehrenfest=True, pre_nvt=True, pre_nvt_duration_ps=0.005)
+    reference = _scalar_reference(fields, **settings)
+    dipole, amplitude, energy, model = _run_batch(xp, fields, **settings)
+    assert np.abs(dipole - reference[0]).max() < 1e-13
+    assert np.abs(energy - reference[2]).max() < 1e-12
+    coords, velocity = model.coordinates(), model.velocities()
+    assert np.abs(coords[1] - coords[0]).max() > 1e-4, "pre-NVT left the rows alike"
+    assert (
+        np.abs(velocity).max() > 0.0 and np.abs(velocity[1] - velocity[0]).max() > 1e-6
+    )
+    model.close()
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_sampled_velocities_are_drawn_per_system(backend):
+    """``init_velocities`` gives every molecule ID its own draw, as the scalar driver."""
+    xp = _array_module(backend)
+    fields = _fields(n_steps=5)
+    settings = dict(ehrenfest=True, init_velocities=True, temperature_K=300.0)
+    reference = _scalar_reference(fields, **settings)
+    dipole, amplitude, energy, model = _run_batch(xp, fields, **settings)
+    assert np.abs(dipole - reference[0]).max() < 1e-13
+    velocity = model.velocities()
+    assert np.abs(velocity[1] - velocity[0]).max() > 1e-6, "one draw was copied around"
+    model.close()
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_one_geometry_starts_every_system_alike(backend):
+    """Without ``batch_xyz`` or ``pre_nvt`` every system starts from the given geometry."""
+    xp = _array_module(backend)
+    dipole, amplitude, energy, model = _run_batch(
+        xp, _fields(n_steps=1), ehrenfest=True
+    )
+    coords = model.coordinates()
+    assert np.abs(coords - coords[0]).max() == 0.0
+    model.close()
+
+
 @pytest.mark.core
 def test_reset_dipole_matches_the_scalar_driver():
     """The baseline is captured once and subtracted, exactly as the scalar does."""
