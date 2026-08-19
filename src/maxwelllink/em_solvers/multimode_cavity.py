@@ -879,7 +879,7 @@ class MultiModeSimulation(DummyEMSimulation):
         assert efield_vec.shape == mu.shape
         return efield_vec
 
-    def _calc_photonic_energy(self, pc, qc) -> np.ndarray:
+    def _calc_bare_photonic_energy(self, pc, qc) -> np.ndarray:
         r"""
         Calculate the energy of the all photonic modes.
 
@@ -894,17 +894,51 @@ class MultiModeSimulation(DummyEMSimulation):
 
         Returns
         -------
-        photonic_energy : numpy.ndarray of float, shape (n_mode,)
+        bare_photonic_energy : numpy.ndarray of float, shape (n_mode,)
             Energy of each cavity mode.
         """
         kinetic_energy = 0.5 * pc**2
         potential_energy = 0.5 * self.omega_k2[:, None] * qc**2
-        photonic_energy = np.sum(
+        bare_photonic_energy = np.sum(
             (kinetic_energy + potential_energy) * self.axis, axis=1
         )
-        return photonic_energy
+        return bare_photonic_energy
 
-    def _calc_energy(self, pc, qc, mu) -> float:
+    def _calc_photonic_energy_with_dse(self, pc, qc, mu) -> np.ndarray:
+        """
+        Calculate the total energy of each cavity photon coupled to the molecular system.
+
+        Parameters
+        ----------
+        pc : numpy.ndarray of float, shape (n_mode, 3)
+            Current cavity mode momentum with shape (n_mode,3).
+        qc : numpy.ndarray of float, shape (n_mode, 3)
+            Current cavity mode coordinate with shape (n_mode,3).
+        mu : numpy.ndarray of float, shape (n_grid, 3)
+            Current total molecular dipole along the coupling axis with shape (n_grid,3).
+
+        Returns
+        -------
+        photonic_energy_with_dse : numpy.ndarray of float, shape (n_mode,)
+            Energy of each cavity mode.
+        """
+        kinetic_energy = 0.5 * pc**2
+        # mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
+        mu_dot_f = self._calc_mu_dot_f_subspace(mu)
+        potential_energy = (
+            0.5 * self.omega_k2[:, None] * qc**2
+            + self.varepsilon_k[:, None] * qc * mu_dot_f
+        )
+
+        if self.include_dse:
+            potential_energy += 0.5 * self.dse_coeff[:, None] * mu_dot_f**2
+
+        photonic_energy_with_dse = np.sum(
+            (kinetic_energy + potential_energy) * self.axis, axis=1
+        )
+        return photonic_energy_with_dse
+
+    def _calc_total_energy(self, pc, qc, mu) -> float:
         """
         Calculate the total energy of the cavity + molecular system.
 
@@ -1268,12 +1302,16 @@ class MultiModeSimulation(DummyEMSimulation):
                             pulse_record_value(self.molecule_pulse)
                         )
                     if "energy" in self.record_list:
-                        self.memmaps["energy"][record_idx, 0] = self._calc_energy(
+                        self.memmaps["energy"][record_idx, 0] = self._calc_total_energy(
                             self.pc, self.qc, self.dipole
                         )
-                    if "photonic_energy" in self.record_list:
-                        self.memmaps["photonic_energy"][record_idx, :] = (
-                            self._calc_photonic_energy(self.pc, self.qc)
+                    if "bare_photonic_energy" in self.record_list:
+                        self.memmaps["bare_photonic_energy"][record_idx, :] = (
+                            self._calc_bare_photonic_energy(self.pc, self.qc)
+                        )
+                    if "photonic_energy_with_dse" in self.record_list:
+                        self.memmaps["photonic_energy_with_dse"][record_idx, :] = (
+                            self._calc_photonic_energy_with_dse(self.pc, self.qc, self.dipole)
                         )
                     if "effective_efield" in self.record_list:
                         self.memmaps["effective_efield"][record_idx, :, :] = (
@@ -1312,12 +1350,16 @@ class MultiModeSimulation(DummyEMSimulation):
                             pulse_record_value(self.molecule_pulse)
                         )
                     if "energy" in self.record_list:
-                        self.h5_file["energy"][record_idx, 0] = self._calc_energy(
+                        self.h5_file["energy"][record_idx, 0] = self._calc_total_energy(
                             self.pc, self.qc, self.dipole
                         )
-                    if "photonic_energy" in self.record_list:
-                        self.h5_file["photonic_energy"][record_idx, :] = (
-                            self._calc_photonic_energy(self.pc, self.qc)
+                    if "bare_photonic_energy" in self.record_list:
+                        self.h5_file["bare_photonic_energy"][record_idx, :] = (
+                            self._calc_bare_photonic_energy(self.pc, self.qc)
+                        )
+                    if "photonic_energy_with_dse" in self.record_list:
+                        self.h5_file["photonic_energy_with_dse"][record_idx, :] = (
+                            self._calc_photonic_energy_with_dse(self.pc, self.qc, self.dipole)
                         )
                     if "effective_efield" in self.record_list:
                         self.h5_file["effective_efield"][record_idx, :, :] = (
@@ -1351,11 +1393,15 @@ class MultiModeSimulation(DummyEMSimulation):
                     self.molecule_pulse_history.append(self.molecule_pulse(self.time))
                 if "energy" in self.record_list:
                     self.energy_history.append(
-                        self._calc_energy(self.pc, self.qc, self.dipole)
+                        self._calc_total_energy(self.pc, self.qc, self.dipole)
                     )
-                if "photonic_energy" in self.record_list:
-                    self.photonic_energy_history.append(
-                        self._calc_photonic_energy(self.pc, self.qc)
+                if "bare_photonic_energy" in self.record_list:
+                    self.bare_photonic_energy_history.append(
+                        self._calc_bare_photonic_energy(self.pc, self.qc)
+                    )
+                if "photonic_energy_with_dse" in self.record_list:
+                    self.photonic_energy_with_dse_history.append(
+                        self._calc_photonic_energy_with_dse(self.pc, self.qc, self.dipole)
                     )
                 if "molecule_response" in self.record_list:
                     self.molecule_response_history.append(self.dmudt.copy())
@@ -1382,10 +1428,7 @@ class MultiModeSimulation(DummyEMSimulation):
         self,
         steps: Optional[int] = None,
         record_history: bool = True,
-        record_to_disk: bool = False,
-        disk_folder_address: Optional[str] = None,
-        npz_filename: Optional[str] = None,
-        h5_filename: Optional[str] = None,
+        record_filename: Optional[str] = None,
         record_max_steps: Optional[int] = None,
         record_every_steps: int = 1,
         record_list: Optional[list] = None,
@@ -1395,23 +1438,37 @@ class MultiModeSimulation(DummyEMSimulation):
         """
 
         self.record_history = bool(record_history)
-        self.record_to_disk = bool(record_to_disk)
-        self.disk_folder_address = disk_folder_address
 
-        if npz_filename is not None and h5_filename is not None:
-            raise ValueError(
-                "Only one of npz_filename and h5_filename can be provided."
-            )
-        elif npz_filename is None and h5_filename is None and record_to_disk:
-            raise ValueError(
-                "Either npz_filename or h5_filename must be provided when record_to_disk is True."
-            )
-        elif npz_filename is not None:
-            self.filename = npz_filename
-            self.file_format = "npz"
-        elif h5_filename is not None:
-            self.filename = h5_filename
-            self.file_format = "h5"
+        if record_filename == "":
+            raise ValueError("record_filename cannot be empty.")
+        
+        self.record_filename = record_filename
+        self.record_to_disk = record_filename is not None
+        self.filename = None
+        self.file_format = None
+        self.disk_folder_address = None
+
+        if self.record_to_disk:
+            record_path = os.path.expanduser(os.fspath(record_filename))
+
+            if not os.path.isabs(record_path):
+                record_path = os.path.abspath(record_path)
+
+            suffix = os.path.splitext(record_path)[1].lower()
+            if suffix == ".npz":
+                self.file_format = "npz"
+            elif suffix == ".h5":
+                self.file_format = "h5"
+            else:
+                raise ValueError(
+                    "record_filename must end with '.npz' or '.h5', "
+                    f"got: {record_filename!r}"
+                )
+
+            self.disk_folder_address = os.path.dirname(record_path)
+            self.filename = os.path.basename(record_path)
+
+            os.makedirs(self.disk_folder_address, exist_ok=True)
 
         if record_every_steps < 1 or isinstance(record_every_steps, int) == False:
             raise ValueError("record_every_steps must be a positive integer.")
@@ -1438,13 +1495,14 @@ class MultiModeSimulation(DummyEMSimulation):
                     "photon_drive",
                     "molecule_pulse",
                     "energy",
-                    "photonic_energy",
+                    "bare_photonic_energy",
+                    "photonic_energy_with_dse",
                     "effective_efield",
                     "molecule_response",
                     "molecule_dipole",
                 ]:
                     raise ValueError(
-                        f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'photon_drive', 'molecule_pulse', 'energy', 'photonic_energy', 'effective_efield', 'molecule_response', 'molecule_dipole'."
+                        f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'photon_drive', 'molecule_pulse', 'energy', 'bare_photonic_energy', 'photonic_energy_with_dse', 'effective_efield', 'molecule_response', 'molecule_dipole'."
                     )
 
             if record_list == ["all"]:
@@ -1455,7 +1513,8 @@ class MultiModeSimulation(DummyEMSimulation):
                     "photon_drive",
                     "molecule_pulse",
                     "energy",
-                    "photonic_energy",
+                    "bare_photonic_energy",
+                    "photonic_energy_with_dse",
                     "effective_efield",
                     "molecule_response",
                     "molecule_dipole",
@@ -1472,7 +1531,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
         if self.record_history:
 
-            if self.record_to_disk and disk_folder_address is not None:
+            if self.record_to_disk and self.disk_folder_address is not None:
 
                 def pulse_record_dim(pulse):
                     shape = np.asarray(pulse(self.time), dtype=float).shape
@@ -1492,7 +1551,8 @@ class MultiModeSimulation(DummyEMSimulation):
                     "photon_drive": photon_drive_dim,
                     "molecule_pulse": molecule_pulse_dim,
                     "energy": 1,
-                    "photonic_energy": self.pc.shape[0],
+                    "bare_photonic_energy": self.pc.shape[0],
+                    "photonic_energy_with_dse": self.pc.shape[0],
                     "effective_efield": self.dmudt.shape,
                     "molecule_response": self.dmudt.shape,
                     "molecule_dipole": self.dmudt.shape,
@@ -1500,7 +1560,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
                 if self.file_format == "npz":
 
-                    TEMP_DIR = os.path.join(disk_folder_address, "temp_memmap")
+                    TEMP_DIR = os.path.join(self.disk_folder_address, "temp_memmap")
                     self.temp_dir = TEMP_DIR
                     if os.path.exists(TEMP_DIR):
                         print(
@@ -1528,7 +1588,7 @@ class MultiModeSimulation(DummyEMSimulation):
                     import h5py
 
                     self.h5_file = h5py.File(
-                        os.path.join(disk_folder_address, self.filename), "w"
+                        os.path.join(self.disk_folder_address, self.filename), "w"
                     )
                     self.datasets = {}
                     for name in self.record_list:
@@ -1539,11 +1599,6 @@ class MultiModeSimulation(DummyEMSimulation):
                         self.datasets[name] = self.h5_file.create_dataset(
                             name, shape=shape, dtype=np.float64, maxshape=shape
                         )
-
-            elif self.record_to_disk and self.disk_folder_address is None:
-                raise ValueError(
-                    "disk_folder_address must be provided when record_to_disk is True."
-                )
 
             else:
 
@@ -1559,8 +1614,10 @@ class MultiModeSimulation(DummyEMSimulation):
                     self.molecule_pulse_history = []
                 if "energy" in self.record_list:
                     self.energy_history = []
-                if "photonic_energy" in self.record_list:
-                    self.photonic_energy_history = []
+                if "bare_photonic_energy" in self.record_list:
+                    self.bare_photonic_energy_history = []
+                if "photonic_energy_with_dse" in self.record_list:
+                    self.photonic_energy_with_dse_history = []
                 if "effective_efield" in self.record_list:
                     self.effective_efield_history = []
                 if "molecule_response" in self.record_list:
@@ -1628,10 +1685,7 @@ class MultiModeSimulation(DummyEMSimulation):
         until: Optional[float] = None,
         steps: Optional[int] = None,
         record_history: bool = True,
-        record_to_disk: bool = False,
-        disk_folder_address: Optional[str] = None,
-        npz_filename: Optional[str] = None,
-        h5_filename: Optional[str] = None,
+        record_filename: Optional[str] = None,
         record_max_steps: Optional[int] = None,
         record_every_steps: int = 1,
         record_list: Optional[list] = None,
@@ -1647,17 +1701,14 @@ class MultiModeSimulation(DummyEMSimulation):
             Number of steps to execute. ``until`` must be ``None``,
         record_history : bool, default: True
             Record time, field, velocity, drive, and molecular response histories.
-        record_to_disk : bool, default: False
-            Whether to save the history data to disk in HDF5 format. If False, the history data will be stored in memory.
-        disk_folder_address : str, optional
-            Folder path for saving history data when ``record_to_disk`` is True.
-        npz_filename : str, optional
-            Name of the .npz file to save the simulation results to when ``record_to_disk`` is True.
-        h5_filename : str, optional
-            Name of the .h5 file to save the simulation results to when ``record_to_disk`` is True.
+        record_filename : str or path-like, optional
+            Output path for recorded simulation data. When omitted, data are
+            retained in memory. Relative paths are resolved against the current
+            working directory. The suffix must be either ``.npz`` or ``.h5``.
         record_max_steps : int, optional
-            Upper bound for the on-disk history length when ``record_to_disk`` is
-            True. If ``None``, the HDF5 datasets grow dynamically.
+            Maximum number of recorded history entries for all storage modes,
+            including in-memory (list), NPZ, and HDF5 storage. If ``None``, the number
+            is inferred from ``steps`` and ``record_every_steps``.
         record_every_steps : int, default: 1
             Number of steps to record data every ``record_every_steps`` steps.
         record_list : list of str, optional
@@ -1675,10 +1726,7 @@ class MultiModeSimulation(DummyEMSimulation):
         self.storage_initialization(
             steps=steps,
             record_history=record_history,
-            record_to_disk=record_to_disk,
-            disk_folder_address=disk_folder_address,
-            npz_filename=npz_filename,
-            h5_filename=h5_filename,
+            record_filename=record_filename,
             record_max_steps=record_max_steps,
             record_every_steps=record_every_steps,
             record_list=record_list,
