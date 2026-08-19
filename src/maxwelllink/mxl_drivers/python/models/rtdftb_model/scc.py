@@ -326,6 +326,69 @@ def solve_generalised(h, overlap):
 
 
 @kernel
+def fermi_electron_count(eigenvalues, e_fermi, temperature):
+    """Electrons held by the Fermi-Dirac occupations at ``e_fermi`` (etemp.F90:220)."""
+
+    total = 0.0
+    for i in range(eigenvalues.shape[0]):
+        x = (eigenvalues[i] - e_fermi) / temperature
+        if x < FERMI_CUT:
+            total += 2.0 / (1.0 + math.exp(x))
+    return total
+
+
+@kernel
+def fermi_smeared_filling(eigenvalues, n_electron, temperature, filling):
+    """Fermi-Dirac occupations at finite electronic temperature, ``etemp.F90:59``.
+
+    The Fermi energy is located as DFTB+ does: the middle of the gap is tried first
+    (an exact root whenever the temperature is small against the gap), then bisection
+    between brackets grown around the spectrum, polished by Newton-Raphson steps on
+    the analytic derivative. Occupations are ``2 / (1 + exp((eps - E_F) / kT))``.
+    """
+
+    n_level = eigenvalues.shape[0]
+    # bracket the Fermi energy, growing the interval if the temperature is huge
+    lower = eigenvalues[0] - 0.01
+    upper = eigenvalues[n_level - 1] + 0.01
+    while fermi_electron_count(eigenvalues, lower, temperature) > n_electron:
+        lower = 2.0 * (lower - upper) + lower
+    while fermi_electron_count(eigenvalues, upper, temperature) < n_electron:
+        upper = 2.0 * (upper - lower) + lower
+    e_fermi = 0.5 * (lower + upper)
+    count = fermi_electron_count(eigenvalues, e_fermi, temperature)
+    while (
+        abs(n_electron - count) > 1.0e-12
+        and (upper - lower) > max(abs(e_fermi), 1.0) * EPSILON
+    ):
+        if count < n_electron:
+            lower = e_fermi
+        else:
+            upper = e_fermi
+        e_fermi = 0.5 * (lower + upper)
+        count = fermi_electron_count(eigenvalues, e_fermi, temperature)
+    # Newton polish on dN/dE_F = sum 2 f (1 - f) / kT (etemp.F90:344)
+    for _ in range(3):
+        residual = fermi_electron_count(eigenvalues, e_fermi, temperature) - n_electron
+        slope = 0.0
+        for i in range(n_level):
+            x = (eigenvalues[i] - e_fermi) / temperature
+            if abs(x) < FERMI_CUT:
+                occupied = 1.0 / (1.0 + math.exp(x))
+                slope += 2.0 * occupied * (1.0 - occupied) / temperature
+        if slope < EPSILON:
+            break
+        e_fermi -= residual / slope
+    for i in range(n_level):
+        x = (eigenvalues[i] - e_fermi) / temperature
+        if x < FERMI_CUT:
+            filling[i] = 2.0 / (1.0 + math.exp(x))
+        else:
+            filling[i] = 0.0
+    return e_fermi
+
+
+@kernel
 def fermi_filling(eigenvalues, n_electron, temperature, filling):
     """Level occupations of a spin-restricted system, up to 2 electrons per level.
 
@@ -334,9 +397,13 @@ def fermi_filling(eigenvalues, n_electron, temperature, filling):
     limit is evaluated directly rather than through the Fermi function, whose exponent
     divided by 1e-8 would turn a one-ulp error in the Fermi energy into a 1e-9 error in
     the occupation and stall the SCF. Returns the Fermi energy: the partially filled level
-    itself, or the middle of the gap, as DFTB+ chooses (``etemp.F90:564``).
+    itself, or the middle of the gap, as DFTB+ chooses (``etemp.F90:564``). Above the
+    floor (``temperature > 10 * MIN_TEMP``) the occupations are the finite-temperature
+    Fermi-Dirac ones of :func:`fermi_smeared_filling` instead.
     """
 
+    if temperature > 10.0 * MIN_TEMP:
+        return fermi_smeared_filling(eigenvalues, n_electron, temperature, filling)
     n_level = eigenvalues.shape[0]
     tolerance = FERMI_CUT * temperature
     remaining = n_electron
@@ -555,7 +622,7 @@ def scf(
     max_iterations=500,
     mixing=0.2,
     history=8,
-    temperature=MIN_TEMP,
+    electronic_temperature_au=MIN_TEMP,
     charge=0.0,
     shell_resolved=False,
     verbose=False,
@@ -578,9 +645,10 @@ def scf(
         Mixing parameter on the shell charges.
     history : int
         Number of previous iterations the DIIS mixer keeps.
-    temperature : float
-        Electronic temperature in Hartree. Only the DFTB+ floor (1e-8) is
-        supported: the filling is the exact zero-temperature limit, so a warmer
+    electronic_temperature_au : float
+        Electronic temperature of the Fermi-Dirac filling in Hartree. At the DFTB+
+        floor (1e-8, the default) the filling is the exact zero-temperature limit,
+        so a warmer
         electronic distribution is rejected rather than silently approximated.
     charge : float
         Net charge of the system in units of ``+e``; the electron count is the
@@ -631,18 +699,14 @@ def scf(
     eigenvalues = np.zeros(n_orb)
     e_fermi = 0.0
 
-    if temperature > 10.0 * MIN_TEMP:
-        raise ValueError(
-            "Only the zero-temperature filling is implemented; "
-            f"temperature={temperature:g} Ha is above the DFTB+ floor {MIN_TEMP:g}."
-        )
-
     for iteration in range(max_iterations):
         n_iteration = iteration + 1
         scc_potential(gamma, dq_shell, layout.orb_shell, v_shell, v_orb)
         scc_hamiltonian(h0, overlap, v_orb, h)
         eigenvalues, vectors = solve_generalised(h, overlap)
-        e_fermi = fermi_filling(eigenvalues, n_electron, temperature, filling)
+        e_fermi = fermi_filling(
+            eigenvalues, n_electron, electronic_temperature_au, filling
+        )
         rho, edm = density_matrices(vectors, eigenvalues, filling)
         mulliken_charges(rho, overlap, q_orb)
         shell_charges(q_orb, layout.q0_orb, layout.orb_shell, dq_new)
@@ -680,14 +744,14 @@ def scf(
     scc_potential(gamma, dq_shell, layout.orb_shell, v_shell, v_orb)
     scc_hamiltonian(h0, overlap, v_orb, h)
     eigenvalues, vectors = solve_generalised(h, overlap)
-    e_fermi = fermi_filling(eigenvalues, n_electron, temperature, filling)
+    e_fermi = fermi_filling(eigenvalues, n_electron, electronic_temperature_au, filling)
     rho, edm = density_matrices(vectors, eigenvalues, filling)
     mulliken_charges(rho, overlap, q_orb)
 
     energy_h0 = float(np.sum(rho * h0))
     energy_scc = 0.5 * float(v_shell @ dq_shell)
     energy_repulsive = repulsive_total(system)
-    entropy_ts = fermi_entropy(filling, temperature)
+    entropy_ts = fermi_entropy(filling, electronic_temperature_au)
 
     return SCCResult(
         rho=rho,

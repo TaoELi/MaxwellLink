@@ -32,7 +32,7 @@ try:  # inside the package
     from .forces import total_force
     from .h0_overlap import build_h0_overlap
     from .rt import RTState
-    from .scc import scf
+    from .scc import MIN_TEMP, scf
 except (ImportError, ValueError):  # allow running as a stand-alone script
     from ehrenfest import (
         build_coupling,
@@ -44,7 +44,7 @@ except (ImportError, ValueError):  # allow running as a stand-alone script
     from forces import total_force
     from h0_overlap import build_h0_overlap
     from rt import RTState
-    from scc import scf
+    from scc import MIN_TEMP, scf
 
 PROPAGATORS = ("leapfrog", "cayley", "cayley-midpoint")
 
@@ -456,7 +456,15 @@ def run_ehrenfest(
 # Born-Oppenheimer pre-equilibration                                           #
 # ---------------------------------------------------------------------------- #
 def bomd_equilibrate(
-    system, n_steps, dt, kT, friction, rng, charge=0.0, tolerance=1.0e-10
+    system,
+    n_steps,
+    dt,
+    kT,
+    friction,
+    rng,
+    charge=0.0,
+    tolerance=1.0e-10,
+    electronic_temperature_au=MIN_TEMP,
 ):
     """
     Thermalize one system with Langevin Born-Oppenheimer MD, in place.
@@ -476,7 +484,8 @@ def bomd_equilibrate(
     dt : float
         MD time step in atomic units.
     kT : float
-        Temperature in Hartree.
+        NUCLEAR temperature of the Langevin thermostat, in Hartree; distinct from
+        ``electronic_temperature_au``, the Fermi-Dirac smearing of the electrons.
     friction : float
         Langevin relaxation time in atomic units.
     rng : numpy.random.Generator
@@ -485,6 +494,9 @@ def bomd_equilibrate(
         Net charge of the system in units of ``+e``.
     tolerance : float, default: 1e-10
         SCC convergence threshold on the shell charges.
+    electronic_temperature_au : float, default: MIN_TEMP
+        ELECTRONIC temperature of the Fermi-Dirac filling on the SCC surface, in
+        Hartree; the floor value is the exact zero-temperature limit.
 
     Returns
     -------
@@ -517,6 +529,7 @@ def bomd_equilibrate(
             h0,
             overlap,
             tolerance=tolerance,
+            electronic_temperature_au=electronic_temperature_au,
             charge=charge,
             dq_shell_start=dq_shell,
         )

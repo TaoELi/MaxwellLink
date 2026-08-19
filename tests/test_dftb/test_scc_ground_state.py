@@ -150,8 +150,8 @@ def test_force_is_the_gradient_of_the_energy():
 
 
 @pytest.mark.core
-def test_warm_electronic_temperature_is_rejected():
-    """Only the zero-temperature filling is implemented, so warmer runs must raise."""
+def test_warm_electronic_temperature_smears_the_filling():
+    """A warm run converges with Fermi-Dirac occupations and a Mermin free energy."""
     reference = _reference_or_skip()
     name = "gs_h2o"
     species = [str(s) for s in reference[f"{name}/species"]]
@@ -163,8 +163,11 @@ def test_warm_electronic_temperature_is_rejected():
         sk_set,
     )
     h0, overlap = build_h0_overlap(system)
-    with pytest.raises(ValueError, match="zero-temperature"):
-        scf(system, h0, overlap, temperature=9.5e-3)  # 3000 K
+    warm = scf(system, h0, overlap, electronic_temperature_au=9.5e-3)  # 3000 K
+    assert warm.converged
+    assert abs(np.sum(warm.filling) - system.n_electrons()) < 1e-10
+    assert warm.entropy_ts >= 0.0
+    assert warm.energy_mermin <= warm.energy_total + 1e-12
 
 
 @pytest.mark.core
@@ -211,3 +214,74 @@ if __name__ == "__main__":
         test_ground_state_matches_dftbplus(system)
     test_force_is_the_gradient_of_the_energy()
     print("SCC ground state matches DFTB+ on every tested system")
+
+
+@pytest.mark.core
+def test_fermi_smearing_fills_like_dftbplus():
+    """Finite-temperature Fermi-Dirac occupations: count, limits and entropy."""
+
+    from maxwelllink.mxl_drivers.python.models.rtdftb_model.scc import (
+        MIN_TEMP,
+        fermi_entropy,
+        fermi_filling,
+    )
+
+    # a gapped spectrum: smearing far below the gap reproduces the zero-T filling
+    eigenvalues = np.array([-0.5, -0.4, -0.3, 0.3, 0.4])
+    cold = np.zeros(5)
+    warm = np.zeros(5)
+    fermi_filling(eigenvalues, 6.0, MIN_TEMP, cold)
+    e_fermi = fermi_filling(eigenvalues, 6.0, 300.0 * 3.166811563e-6, warm)  # 300 K
+    assert np.allclose(cold, [2.0, 2.0, 2.0, 0.0, 0.0])
+    assert np.allclose(warm, cold, atol=1e-12)
+    assert -0.3 < e_fermi < 0.3
+    assert fermi_entropy(warm, 300.0 * 3.166811563e-6) < 1e-12
+
+    # a metallic-like cluster of levels at the Fermi energy: fractional occupations,
+    # an exact electron count, and a positive entropy
+    eigenvalues = np.array([-0.2, -0.01, 0.0, 0.01, 0.2])
+    kT = 0.01
+    filling = np.zeros(5)
+    e_fermi = fermi_filling(eigenvalues, 5.0, kT, filling)
+    assert abs(filling.sum() - 5.0) < 1e-10
+    assert 0.0 < filling[3] < filling[2] < filling[1] < 2.0  # monotone in energy
+    expected = 2.0 / (1.0 + np.exp((eigenvalues - e_fermi) / kT))
+    assert np.allclose(filling, expected, atol=1e-12)
+    assert fermi_entropy(filling, kT) > 1e-4  # T S of the smeared levels
+
+
+@pytest.mark.core
+def test_scf_accepts_a_finite_electronic_temperature():
+    """A smeared SCF converges and stays consistent with the zero-T result."""
+
+    from maxwelllink.mxl_drivers.python.models.rtdftb_model.dftb_params import (
+        DFTBSystem,
+        load_sk_set,
+    )
+    from maxwelllink.mxl_drivers.python.models.rtdftb_model.h0_overlap import (
+        build_h0_overlap,
+    )
+    from maxwelllink.mxl_drivers.python.models.rtdftb_model.scc import scf
+
+    sk_set = load_sk_set(
+        sk_path_for("3ob", ["O", "H"], skip=pytest.skip), ["O", "H"], None
+    )
+    system = DFTBSystem(
+        ["O", "H", "H"],
+        np.array([[0.0, 0.0, 0.1173], [0.0, 0.7572, -0.4692], [0.0, -0.7572, -0.4692]]),
+        sk_set,
+        units="angstrom",
+    )
+    h0, overlap = build_h0_overlap(system)
+    cold = scf(system, h0, overlap, tolerance=1e-10)
+    warm = scf(
+        system,
+        h0,
+        overlap,
+        tolerance=1e-10,
+        electronic_temperature_au=300.0 * 3.166811563e-6,
+    )
+    assert warm.converged
+    # water's gap dwarfs 300 K: the free energy and charges match the cold result
+    assert abs(warm.energy_mermin - cold.energy_total) < 1e-9
+    assert np.abs(warm.dq_shell - cold.dq_shell).max() < 1e-8

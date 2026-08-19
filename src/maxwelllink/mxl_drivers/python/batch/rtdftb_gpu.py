@@ -1568,7 +1568,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
 
     def _eigh_general_on_device(self, h, overlap, dtype=None):
         """
-        Solve the generalized eigenvalue problem ``H c = eps S c`` on the GPU device, 
+        Solve the generalized eigenvalue problem ``H c = eps S c`` on the GPU device,
         the Cholesky route of ``solve_generalised``.
         """
 
@@ -1620,7 +1620,8 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
 
         n_electron = template.system.n_electrons() - template.charge
         tolerance = template.scc_tolerance
-        mixing, history, max_iterations, temperature = 0.2, 8, 500, MIN_TEMP
+        mixing, history, max_iterations = 0.2, 8, 500
+        electronic_temperature_au = template.electronic_temperature_au
         dq_shell = np.zeros(n_shell)
         if dq_start is not None:
             dq_shell[:] = dq_start
@@ -1637,7 +1638,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
             )
             eigenvalues, vectors = self._eigh_general_on_device(h, overlap, dtype)
             eig_host = xp.asnumpy(eigenvalues).astype(np.float64)
-            fermi_filling(eig_host, n_electron, temperature, filling)
+            fermi_filling(eig_host, n_electron, electronic_temperature_au, filling)
             rho = (vectors * xp.asarray(filling).astype(vectors.dtype)) @ vectors.T
             s_here = (
                 overlap if rho.dtype == overlap.dtype else overlap.astype(rho.dtype)

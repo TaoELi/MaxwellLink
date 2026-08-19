@@ -27,13 +27,13 @@ try:
     from .dftb_params import AA_TO_BOHR, DFTBSystem, load_sk_set
     from .dynamics import PROPAGATORS, RTDynamics, bomd_equilibrate
     from .h0_overlap import build_h0_overlap
-    from .scc import limit_blas_threads, scf
+    from .scc import MIN_TEMP as _MIN_TEMP, limit_blas_threads, scf
 except (ImportError, ValueError):  # allow running as a stand-alone script
     from dummy_model import DummyModel
     from dftb_params import AA_TO_BOHR, DFTBSystem, load_sk_set
     from dynamics import PROPAGATORS, RTDynamics, bomd_equilibrate
     from h0_overlap import build_h0_overlap
-    from scc import limit_blas_threads, scf
+    from scc import MIN_TEMP as _MIN_TEMP, limit_blas_threads, scf
 
 # kick and field polarisations, as the DFTB+ input names them
 _DIRECTIONS = {"x": 0, "y": 1, "z": 2}
@@ -76,6 +76,7 @@ class RTDFTBModel(DummyModel):
         max_angular_momentum=None,
         charge=0.0,
         scc_tolerance=1.0e-10,
+        electronic_temperature_K: float = 0.0,
         ehrenfest: bool = False,
         propagator: str = "leapfrog",
         hybrid_precision: bool = False,
@@ -126,6 +127,10 @@ class RTDFTBModel(DummyModel):
             Net charge of the system in units of ``+e``.
         scc_tolerance : float, default: 1e-10
             Convergence threshold of the ground-state SCC loop, on the shell charges.
+        electronic_temperature_K : float, default: 0.0
+            Electronic temperature of the Fermi-Dirac filling in Kelvin. Zero as the default.
+            A few hundred to a few thousand Kelvin smears the
+            occupations across a closing HOMO-LUMO gap.
         ehrenfest : bool, default: False
             Whether the nuclei move. ``False`` is plain RT-TDDFTB at a frozen geometry;
             ``True`` is RT-TDDFTB-Ehrenfest.
@@ -233,6 +238,12 @@ class RTDFTBModel(DummyModel):
         self.max_angular_momentum = max_angular_momentum
         self.charge = float(charge)
         self.scc_tolerance = float(scc_tolerance)
+        if electronic_temperature_K < 0.0:
+            raise ValueError("electronic_temperature_K must be non-negative.")
+        #: electronic temperature in Hartree, floored at the DFTB+ zero-T limit
+        self.electronic_temperature_au = max(
+            float(electronic_temperature_K) * K_TO_AU, _MIN_TEMP
+        )
 
         self.ehrenfest = bool(ehrenfest)
         self.propagator = propagator
@@ -349,6 +360,7 @@ class RTDFTBModel(DummyModel):
                 self._rng,
                 charge=self.charge,
                 tolerance=self.scc_tolerance,
+                electronic_temperature_au=self.electronic_temperature_au,
             )
             self.positions = self.system.coords.copy()
 
@@ -358,6 +370,7 @@ class RTDFTBModel(DummyModel):
             h0,
             overlap,
             tolerance=self.scc_tolerance,
+            electronic_temperature_au=self.electronic_temperature_au,
             charge=self.charge,
             verbose=self.verbose,
         )
