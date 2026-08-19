@@ -445,6 +445,103 @@ H0Scratch = namedtuple(
 
 
 @kernel
+def h0_overlap_onsite(sk, atom_species, atom_offset, atom, h0, overlap):
+    """
+    The on-site block of one atom: free-atom shell energies on the diagonal of ``H0``,
+    the identity in ``S``. DFTB+ never rotates an atom against itself.
+    """
+
+    sp = atom_species[atom]
+    offset = atom_offset[atom]
+    for i in range(sk.n_orb_species[sp]):
+        shell = sk.shell_of_orbital[sp, i]
+        h0[offset + i, offset + i] = sk.on_site_energy[sp, shell]
+        overlap[offset + i, offset + i] = 1.0
+
+
+@kernel
+def h0_overlap_pair(sk, coords, atom_species, atom_offset, a, b, h0, overlap, s):
+    """
+    The two-centre blocks of one unordered atom pair ``a < b``, written to both
+    triangles of ``H0`` and ``S``.
+
+    Atom ``a`` supplies the columns and atom ``b`` the rows, matching the DFTB+
+    neighbour list, which stores ``iAt2 >= iAt1``. Pairs touch disjoint blocks, so
+    they may be assembled in any order or in parallel. ``s`` is an :data:`H0Scratch`.
+    """
+
+    sp_a = atom_species[a]
+    n_orb_a = sk.n_orb_species[sp_a]
+    sp_b = atom_species[b]
+    n_orb_b = sk.n_orb_species[sp_b]
+
+    dx = coords[b, 0] - coords[a, 0]
+    dy = coords[b, 1] - coords[a, 1]
+    dz = coords[b, 2] - coords[a, 2]
+    dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    u_x = dx / dist
+    u_y = dy / dist
+    u_z = dz / dist
+
+    # No cutoff test here: past the table plus its tail sk_interpolate returns
+    # all zeros, and the rotation of zeros is the zero block the pair deserves.
+    pair = sk.pair_index[sp_a, sp_b]
+    n_integral = sk.tab_n_integral[pair]
+    sk_interpolate(
+        sk.tab_h[pair],
+        sk.tab_n_grid[pair],
+        sk.tab_grid_dist[pair],
+        n_integral,
+        dist,
+        s.sk_h,
+        (s.node, s.cc, s.dd, s.delta, s.y_low, s.y_high),
+    )
+    sk_interpolate(
+        sk.tab_s[pair],
+        sk.tab_n_grid[pair],
+        sk.tab_grid_dist[pair],
+        n_integral,
+        dist,
+        s.sk_s,
+        (s.node, s.cc, s.dd, s.delta, s.y_low, s.y_high),
+    )
+
+    rotate_block(
+        s.sk_h,
+        u_x,
+        u_y,
+        u_z,
+        sk.ang_shell[sp_a],
+        sk.n_shell[sp_a],
+        sk.ang_shell[sp_b],
+        sk.n_shell[sp_b],
+        s.block_h,
+        s.core,
+    )
+    rotate_block(
+        s.sk_s,
+        u_x,
+        u_y,
+        u_z,
+        sk.ang_shell[sp_a],
+        sk.n_shell[sp_a],
+        sk.ang_shell[sp_b],
+        sk.n_shell[sp_b],
+        s.block_s,
+        s.core,
+    )
+
+    row = atom_offset[b]
+    col = atom_offset[a]
+    for p in range(n_orb_b):
+        for q in range(n_orb_a):
+            h0[row + p, col + q] = s.block_h[p, q]
+            h0[col + q, row + p] = s.block_h[p, q]
+            overlap[row + p, col + q] = s.block_s[p, q]
+            overlap[col + q, row + p] = s.block_s[p, q]
+
+
+@kernel
 def build_h0_overlap_kernel(
     sk, coords, atom_species, atom_offset, n_atom, h0, overlap, s
 ):
@@ -478,89 +575,12 @@ def build_h0_overlap_kernel(
             h0[i, j] = 0.0
             overlap[i, j] = 0.0
 
-    # On-site blocks: H0 carries the free-atom shell energies on its diagonal and
-    # nothing else, S is the identity. DFTB+ never rotates an atom against itself.
     for atom in range(n_atom):
-        sp = atom_species[atom]
-        offset = atom_offset[atom]
-        for i in range(sk.n_orb_species[sp]):
-            shell = sk.shell_of_orbital[sp, i]
-            h0[offset + i, offset + i] = sk.on_site_energy[sp, shell]
-            overlap[offset + i, offset + i] = 1.0
+        h0_overlap_onsite(sk, atom_species, atom_offset, atom, h0, overlap)
 
-    # Two-centre blocks, one per unordered atom pair. Atom a supplies the columns and
-    # atom b the rows, matching the DFTB+ neighbour list, which stores iAt2 >= iAt1.
     for a in range(n_atom):
-        sp_a = atom_species[a]
-        n_orb_a = sk.n_orb_species[sp_a]
         for b in range(a + 1, n_atom):
-            sp_b = atom_species[b]
-            n_orb_b = sk.n_orb_species[sp_b]
-
-            dx = coords[b, 0] - coords[a, 0]
-            dy = coords[b, 1] - coords[a, 1]
-            dz = coords[b, 2] - coords[a, 2]
-            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-            u_x = dx / dist
-            u_y = dy / dist
-            u_z = dz / dist
-
-            # No cutoff test here: past the table plus its tail sk_interpolate returns
-            # all zeros, and the rotation of zeros is the zero block the pair deserves.
-            pair = sk.pair_index[sp_a, sp_b]
-            n_integral = sk.tab_n_integral[pair]
-            sk_interpolate(
-                sk.tab_h[pair],
-                sk.tab_n_grid[pair],
-                sk.tab_grid_dist[pair],
-                n_integral,
-                dist,
-                s.sk_h,
-                (s.node, s.cc, s.dd, s.delta, s.y_low, s.y_high),
-            )
-            sk_interpolate(
-                sk.tab_s[pair],
-                sk.tab_n_grid[pair],
-                sk.tab_grid_dist[pair],
-                n_integral,
-                dist,
-                s.sk_s,
-                (s.node, s.cc, s.dd, s.delta, s.y_low, s.y_high),
-            )
-
-            rotate_block(
-                s.sk_h,
-                u_x,
-                u_y,
-                u_z,
-                sk.ang_shell[sp_a],
-                sk.n_shell[sp_a],
-                sk.ang_shell[sp_b],
-                sk.n_shell[sp_b],
-                s.block_h,
-                s.core,
-            )
-            rotate_block(
-                s.sk_s,
-                u_x,
-                u_y,
-                u_z,
-                sk.ang_shell[sp_a],
-                sk.n_shell[sp_a],
-                sk.ang_shell[sp_b],
-                sk.n_shell[sp_b],
-                s.block_s,
-                s.core,
-            )
-
-            row = atom_offset[b]
-            col = atom_offset[a]
-            for p in range(n_orb_b):
-                for q in range(n_orb_a):
-                    h0[row + p, col + q] = s.block_h[p, q]
-                    h0[col + q, row + p] = s.block_h[p, q]
-                    overlap[row + p, col + q] = s.block_s[p, q]
-                    overlap[col + q, row + p] = s.block_s[p, q]
+            h0_overlap_pair(sk, coords, atom_species, atom_offset, a, b, h0, overlap, s)
 
 
 #: The one :data:`H0Scratch` of this process, keyed by the sizes that fix its shapes.

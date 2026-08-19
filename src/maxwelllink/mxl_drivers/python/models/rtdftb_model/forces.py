@@ -26,13 +26,13 @@ import numpy as np
 
 try:  # inside the package
     from .kernels_dftb import kernel
-    from .skfiles import spline_repulsive
+    from .skfiles import repulsive_pair
     from .dftb_params import DIST_FUDGE, MAX_INTEGRAL, MAX_ORB, N_INTERPOLATION
     from .scc import exp_gamma_prime
     from .sk_deriv import block_derivatives, sk_interpolate_deriv
 except (ImportError, ValueError):  # allow running as a stand-alone script
     from kernels_dftb import kernel
-    from skfiles import spline_repulsive
+    from skfiles import repulsive_pair
     from dftb_params import DIST_FUDGE, MAX_INTEGRAL, MAX_ORB, N_INTERPOLATION
     from scc import exp_gamma_prime
     from sk_deriv import block_derivatives, sk_interpolate_deriv
@@ -109,34 +109,15 @@ def repulsive_gradient_kernel(sk, coords, atom_species, n_atom, gradient, pair):
 
     energy = 0.0
     for a in range(n_atom):
-        sp_a = atom_species[a]
         for b in range(a + 1, n_atom):
-            sp_b = atom_species[b]
-            dx = coords[a, 0] - coords[b, 0]
-            dy = coords[a, 1] - coords[b, 1]
-            dz = coords[a, 2] - coords[b, 2]
-            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-            # twobodyrep.F90:261 indexes [neighbour, owner], which is the A-B file for
-            # the half-list entry whose owner is the lower-numbered atom.
-            p = sk.pair_index[sp_a, sp_b]
-            spline_repulsive(
-                sk.rep_xstart[p],
-                sk.rep_coeffs[p],
-                sk.rep_last[p],
-                sk.rep_exp[p],
-                sk.rep_cutoff[p],
-                sk.rep_n_interval[p],
-                dist,
-                pair,
-            )
-            energy += pair[0]
-            slope = pair[1] / dist
-            gradient[a, 0] += slope * dx
-            gradient[a, 1] += slope * dy
-            gradient[a, 2] += slope * dz
-            gradient[b, 0] -= slope * dx
-            gradient[b, 1] -= slope * dy
-            gradient[b, 2] -= slope * dz
+            e_pair, gx, gy, gz = repulsive_pair(sk, coords, atom_species, a, b, pair)
+            energy += e_pair
+            gradient[a, 0] += gx
+            gradient[a, 1] += gy
+            gradient[a, 2] += gz
+            gradient[b, 0] -= gx
+            gradient[b, 1] -= gy
+            gradient[b, 2] -= gz
     return energy
 
 
@@ -157,6 +138,14 @@ def repulsive_energy_gradient(system, gradient):
 # electronic gradient                                                          #
 # ---------------------------------------------------------------------------- #
 @kernel
+def overlap_weight_row(rho, edm, v_orb, weight, mu):
+    """Row ``mu`` of :func:`overlap_weight`."""
+
+    for nu in range(v_orb.shape[0]):
+        weight[mu, nu] = -edm[mu, nu] + 0.5 * rho[mu, nu] * (v_orb[mu] + v_orb[nu])
+
+
+@kernel
 def overlap_weight(rho, edm, v_orb, weight):
     """
     Matrix multiplying ``dS/dR``: the Pulay term plus the derivative of the SCC shift.
@@ -166,10 +155,102 @@ def overlap_weight(rho, edm, v_orb, weight):
     ``-edm``. Both are collected once here so the pair loop touches one matrix.
     """
 
-    n_orb = v_orb.shape[0]
-    for mu in range(n_orb):
-        for nu in range(n_orb):
-            weight[mu, nu] = -edm[mu, nu] + 0.5 * rho[mu, nu] * (v_orb[mu] + v_orb[nu])
+    for mu in range(v_orb.shape[0]):
+        overlap_weight_row(rho, edm, v_orb, weight, mu)
+
+
+@kernel
+def band_gradient_pair(sk, coords, atom_species, atom_offset, a, b, rho, weight, s):
+    """
+    Band, Pulay and shift gradient of one ordered atom pair ``a != b`` on atom ``a``.
+
+    Returns the three components; the factor two stands for the ``(b, a)`` block,
+    which the ordered enumeration covers by visiting the pair again with the atoms
+    exchanged. Pairs beyond the table's reach return zeros. ``s`` is a
+    :data:`BandScratch`.
+    """
+
+    sp_a = atom_species[a]
+    n_orb_a = sk.n_orb_species[sp_a]
+    sp_b = atom_species[b]
+    n_orb_b = sk.n_orb_species[sp_b]
+
+    dx = coords[b, 0] - coords[a, 0]
+    dy = coords[b, 1] - coords[a, 1]
+    dz = coords[b, 2] - coords[a, 2]
+    dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    u_x = dx / dist
+    u_y = dy / dist
+    u_z = dz / dist
+
+    pair = sk.pair_index[sp_a, sp_b]
+    n_grid = sk.tab_n_grid[pair]
+    grid_dist = sk.tab_grid_dist[pair]
+    n_integral = sk.tab_n_integral[pair]
+    if dist >= n_grid * grid_dist + DIST_FUDGE:
+        return 0.0, 0.0, 0.0
+    sk_interpolate_deriv(
+        sk.tab_h[pair],
+        n_grid,
+        grid_dist,
+        n_integral,
+        dist,
+        s.sk_h,
+        s.dsk_h,
+        (s.weight, s.first, s.second),
+    )
+    sk_interpolate_deriv(
+        sk.tab_s[pair],
+        n_grid,
+        grid_dist,
+        n_integral,
+        dist,
+        s.sk_s,
+        s.dsk_s,
+        (s.weight, s.first, s.second),
+    )
+    block_derivatives(
+        s.sk_h,
+        s.dsk_h,
+        u_x,
+        u_y,
+        u_z,
+        dist,
+        sk.ang_shell[sp_a],
+        sk.n_shell[sp_a],
+        sk.ang_shell[sp_b],
+        sk.n_shell[sp_b],
+        s.d_h0,
+        (s.radial, s.angular, s.core, s.dcore),
+    )
+    block_derivatives(
+        s.sk_s,
+        s.dsk_s,
+        u_x,
+        u_y,
+        u_z,
+        dist,
+        sk.ang_shell[sp_a],
+        sk.n_shell[sp_a],
+        sk.ang_shell[sp_b],
+        sk.n_shell[sp_b],
+        s.d_overlap,
+        (s.radial, s.angular, s.core, s.dcore),
+    )
+
+    row = atom_offset[b]
+    col = atom_offset[a]
+    g_x = 0.0
+    g_y = 0.0
+    g_z = 0.0
+    for p in range(n_orb_b):
+        for q in range(n_orb_a):
+            r = rho[row + p, col + q]
+            w = weight[row + p, col + q]
+            g_x += r * s.d_h0[0, p, q] + w * s.d_overlap[0, p, q]
+            g_y += r * s.d_h0[1, p, q] + w * s.d_overlap[1, p, q]
+            g_z += r * s.d_h0[2, p, q] + w * s.d_overlap[2, p, q]
+    return 2.0 * g_x, 2.0 * g_y, 2.0 * g_z
 
 
 @kernel
@@ -186,90 +267,15 @@ def band_gradient_kernel(
     """
 
     for a in range(n_atom):
-        sp_a = atom_species[a]
-        n_orb_a = sk.n_orb_species[sp_a]
         for b in range(n_atom):
             if b == a:
                 continue  # on-site blocks do not move, forces.F90:631
-            sp_b = atom_species[b]
-            n_orb_b = sk.n_orb_species[sp_b]
-
-            dx = coords[b, 0] - coords[a, 0]
-            dy = coords[b, 1] - coords[a, 1]
-            dz = coords[b, 2] - coords[a, 2]
-            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-            u_x = dx / dist
-            u_y = dy / dist
-            u_z = dz / dist
-
-            pair = sk.pair_index[sp_a, sp_b]
-            n_grid = sk.tab_n_grid[pair]
-            grid_dist = sk.tab_grid_dist[pair]
-            n_integral = sk.tab_n_integral[pair]
-            if dist >= n_grid * grid_dist + DIST_FUDGE:
-                continue
-            sk_interpolate_deriv(
-                sk.tab_h[pair],
-                n_grid,
-                grid_dist,
-                n_integral,
-                dist,
-                s.sk_h,
-                s.dsk_h,
-                (s.weight, s.first, s.second),
+            g_x, g_y, g_z = band_gradient_pair(
+                sk, coords, atom_species, atom_offset, a, b, rho, weight, s
             )
-            sk_interpolate_deriv(
-                sk.tab_s[pair],
-                n_grid,
-                grid_dist,
-                n_integral,
-                dist,
-                s.sk_s,
-                s.dsk_s,
-                (s.weight, s.first, s.second),
-            )
-            block_derivatives(
-                s.sk_h,
-                s.dsk_h,
-                u_x,
-                u_y,
-                u_z,
-                dist,
-                sk.ang_shell[sp_a],
-                sk.n_shell[sp_a],
-                sk.ang_shell[sp_b],
-                sk.n_shell[sp_b],
-                s.d_h0,
-                (s.radial, s.angular, s.core, s.dcore),
-            )
-            block_derivatives(
-                s.sk_s,
-                s.dsk_s,
-                u_x,
-                u_y,
-                u_z,
-                dist,
-                sk.ang_shell[sp_a],
-                sk.n_shell[sp_a],
-                sk.ang_shell[sp_b],
-                sk.n_shell[sp_b],
-                s.d_overlap,
-                (s.radial, s.angular, s.core, s.dcore),
-            )
-
-            row = atom_offset[b]
-            col = atom_offset[a]
-            for k in range(3):
-                total = 0.0
-                for p in range(n_orb_b):
-                    for q in range(n_orb_a):
-                        total += (
-                            rho[row + p, col + q] * s.d_h0[k, p, q]
-                            + weight[row + p, col + q] * s.d_overlap[k, p, q]
-                        )
-                # The factor two stands for the (b, a) block, which the ordered loop
-                # covers by visiting the pair again with the atoms exchanged.
-                gradient[a, k] += 2.0 * total
+            gradient[a, 0] += g_x
+            gradient[a, 1] += g_y
+            gradient[a, 2] += g_z
 
 
 def band_gradient(system, rho, weight, gradient):
@@ -289,6 +295,29 @@ def band_gradient(system, rho, weight, gradient):
 
 
 @kernel
+def gamma_gradient_pair(coords, shell_atom, shell_u, dq_shell, i, j):
+    """
+    SCC double-counting gradient of one ordered shell pair, on the atom of shell ``i``.
+
+    Returns the three components; the atom of shell ``j`` takes the negative. Shells on
+    the same atom return zeros, since the on-site gamma does not depend on any position.
+    """
+
+    atom_i = shell_atom[i]
+    atom_j = shell_atom[j]
+    if atom_i == atom_j:
+        return 0.0, 0.0, 0.0
+    dx = coords[atom_i, 0] - coords[atom_j, 0]
+    dy = coords[atom_i, 1] - coords[atom_j, 1]
+    dz = coords[atom_i, 2] - coords[atom_j, 2]
+    dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    d_gamma = -1.0 / (dist * dist) - exp_gamma_prime(dist, shell_u[i], shell_u[j])
+    # Ordered shell pairs, so the 1/2 of the energy expression survives here.
+    factor = 0.5 * dq_shell[i] * dq_shell[j] * d_gamma / dist
+    return factor * dx, factor * dy, factor * dz
+
+
+@kernel
 def gamma_gradient_kernel(coords, shell_atom, shell_u, dq_shell, n_shell, gradient):
     """
     SCC double-counting gradient, shortgamma.F90:396 plus coulomb.F90:1164.
@@ -303,21 +332,15 @@ def gamma_gradient_kernel(coords, shell_atom, shell_u, dq_shell, n_shell, gradie
             atom_j = shell_atom[j]
             if atom_i == atom_j:
                 continue  # the on-site gamma does not depend on any position
-            dx = coords[atom_i, 0] - coords[atom_j, 0]
-            dy = coords[atom_i, 1] - coords[atom_j, 1]
-            dz = coords[atom_i, 2] - coords[atom_j, 2]
-            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-            d_gamma = -1.0 / (dist * dist) - exp_gamma_prime(
-                dist, shell_u[i], shell_u[j]
+            f_x, f_y, f_z = gamma_gradient_pair(
+                coords, shell_atom, shell_u, dq_shell, i, j
             )
-            # Ordered shell pairs, so the 1/2 of the energy expression survives here.
-            factor = 0.5 * dq_shell[i] * dq_shell[j] * d_gamma / dist
-            gradient[atom_i, 0] += factor * dx
-            gradient[atom_i, 1] += factor * dy
-            gradient[atom_i, 2] += factor * dz
-            gradient[atom_j, 0] -= factor * dx
-            gradient[atom_j, 1] -= factor * dy
-            gradient[atom_j, 2] -= factor * dz
+            gradient[atom_i, 0] += f_x
+            gradient[atom_i, 1] += f_y
+            gradient[atom_i, 2] += f_z
+            gradient[atom_j, 0] -= f_x
+            gradient[atom_j, 1] -= f_y
+            gradient[atom_j, 2] -= f_z
 
 
 def gamma_gradient(system, layout, dq_shell, gradient):

@@ -25,10 +25,10 @@ import numpy as np
 
 try:  # inside the package
     from .kernels_dftb import kernel
-    from .skfiles import spline_repulsive
+    from .skfiles import repulsive_pair
 except (ImportError, ValueError):  # allow running as a stand-alone script
     from kernels_dftb import kernel
-    from skfiles import spline_repulsive
+    from skfiles import repulsive_pair
 
 # accuracy.F90:69, 110, 106, 64 -- the tolerances the branch structure keys on.
 TOL_SAME_DIST = 1.0e-5
@@ -207,28 +207,34 @@ class ShellLayout:
 
 
 @kernel
-def build_gamma(coords, shell_atom, shell_u, gamma):
+def gamma_element(coords, shell_atom, shell_u, i, j):
     """
-    Fill the shell-pair charge-charge interaction matrix of one geometry.
+    One entry of the shell-pair charge-charge interaction matrix.
 
-    ``gamma[i, j] = 1 / R - exp_gamma(R, U_i, U_j)`` with the 1/R term dropped for
-    shells sitting on the same atom (coulomb.F90:707 never writes the diagonal), so a
-    same-atom entry is exactly ``+U`` when the two shells share their U.
+    ``1 / R - exp_gamma(R, U_i, U_j)`` with the 1/R term dropped for shells sitting on
+    the same atom (coulomb.F90:707 never writes the diagonal), so a same-atom entry is
+    exactly ``+U`` when the two shells share their U.
     """
+
+    atom_i = shell_atom[i]
+    atom_j = shell_atom[j]
+    if atom_i == atom_j:
+        return -exp_gamma(0.0, shell_u[i], shell_u[j])
+    dx = coords[atom_i, 0] - coords[atom_j, 0]
+    dy = coords[atom_i, 1] - coords[atom_j, 1]
+    dz = coords[atom_i, 2] - coords[atom_j, 2]
+    dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    return 1.0 / dist - exp_gamma(dist, shell_u[i], shell_u[j])
+
+
+@kernel
+def build_gamma(coords, shell_atom, shell_u, gamma):
+    """Fill the shell-pair charge-charge interaction matrix of one geometry."""
 
     n_shell = shell_atom.shape[0]
     for i in range(n_shell):
-        atom_i = shell_atom[i]
         for j in range(n_shell):
-            atom_j = shell_atom[j]
-            if atom_i == atom_j:
-                gamma[i, j] = -exp_gamma(0.0, shell_u[i], shell_u[j])
-            else:
-                dx = coords[atom_i, 0] - coords[atom_j, 0]
-                dy = coords[atom_i, 1] - coords[atom_j, 1]
-                dz = coords[atom_i, 2] - coords[atom_j, 2]
-                dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-                gamma[i, j] = 1.0 / dist - exp_gamma(dist, shell_u[i], shell_u[j])
+            gamma[i, j] = gamma_element(coords, shell_atom, shell_u, i, j)
 
 
 # ---------------------------------------------------------------------------- #
@@ -271,13 +277,19 @@ def scc_potential(gamma, dq_shell, orb_shell, v_shell, v_orb):
 
 
 @kernel
+def scc_hamiltonian_row(h0, overlap, v_orb, h, mu):
+    """Row ``mu`` of :func:`scc_hamiltonian`."""
+
+    for nu in range(v_orb.shape[0]):
+        h[mu, nu] = h0[mu, nu] + 0.5 * overlap[mu, nu] * (v_orb[mu] + v_orb[nu])
+
+
+@kernel
 def scc_hamiltonian(h0, overlap, v_orb, h):
     """``H = H0 + 0.5 * S * (V_mu + V_nu)``, shift.F90:212 plus hamiltonian.F90:386."""
 
-    n_orb = v_orb.shape[0]
-    for mu in range(n_orb):
-        for nu in range(n_orb):
-            h[mu, nu] = h0[mu, nu] + 0.5 * overlap[mu, nu] * (v_orb[mu] + v_orb[nu])
+    for mu in range(v_orb.shape[0]):
+        scc_hamiltonian_row(h0, overlap, v_orb, h, mu)
 
 
 # ---------------------------------------------------------------------------- #
@@ -385,34 +397,18 @@ def repulsive_sum(sk, coords, atom_species, n_atom, scratch):
     """
     Sum the repulsive pair potential over unordered atom pairs, in Hartree.
 
-    Every pair is evaluated with the same spline routine the *gradient* uses, off the
-    flattened ``rep_*`` tables of :data:`dftb_params.SKTables`, so the energy and its
-    derivative cannot come from two implementations that drift apart.
+    Every pair goes through :func:`skfiles.repulsive_pair`, the routine the *gradient*
+    uses too, so the energy and its derivative cannot come from two implementations
+    that drift apart.
     """
 
     total = 0.0
     for a in range(n_atom):
-        sp_a = atom_species[a]
         for b in range(a + 1, n_atom):
-            sp_b = atom_species[b]
-            dx = coords[a, 0] - coords[b, 0]
-            dy = coords[a, 1] - coords[b, 1]
-            dz = coords[a, 2] - coords[b, 2]
-            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-            # twobodyrep.F90:261 indexes [neighbour, owner], which is the A-B table for
-            # the half-list entry whose owner is the lower-numbered atom.
-            pair = sk.pair_index[sp_a, sp_b]
-            spline_repulsive(
-                sk.rep_xstart[pair],
-                sk.rep_coeffs[pair],
-                sk.rep_last[pair],
-                sk.rep_exp[pair],
-                sk.rep_cutoff[pair],
-                sk.rep_n_interval[pair],
-                dist,
-                scratch.pair,
+            e_pair, gx, gy, gz = repulsive_pair(
+                sk, coords, atom_species, a, b, scratch.pair
             )
-            total += scratch.pair[0]
+            total += e_pair
     return total
 
 

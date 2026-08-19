@@ -380,3 +380,36 @@ def spline_repulsive(
         out[1] = c1 + dr * (
             2.0 * c2 + dr * (3.0 * c3 + dr * (4.0 * c4 + dr * 5.0 * c5))
         )
+
+
+@kernel
+def repulsive_pair(sk, coords, atom_species, a, b, pair):
+    """
+    Repulsive energy of one unordered atom pair and its gradient on atom ``a``.
+
+    Returns ``(energy, gx, gy, gz)``; the gradient on ``b`` is the negative. ``pair`` is
+    the two-element ``(V, dV/dr)`` buffer of :func:`spline_repulsive`. The energy sum
+    and the force use this one routine, so they cannot drift apart.
+    """
+
+    sp_a = atom_species[a]
+    sp_b = atom_species[b]
+    dx = coords[a, 0] - coords[b, 0]
+    dy = coords[a, 1] - coords[b, 1]
+    dz = coords[a, 2] - coords[b, 2]
+    dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    # twobodyrep.F90:261 indexes [neighbour, owner], which is the A-B table for the
+    # half-list entry whose owner is the lower-numbered atom.
+    p = sk.pair_index[sp_a, sp_b]
+    spline_repulsive(
+        sk.rep_xstart[p],
+        sk.rep_coeffs[p],
+        sk.rep_last[p],
+        sk.rep_exp[p],
+        sk.rep_cutoff[p],
+        sk.rep_n_interval[p],
+        dist,
+        pair,
+    )
+    slope = pair[1] / dist
+    return pair[0], slope * dx, slope * dy, slope * dz

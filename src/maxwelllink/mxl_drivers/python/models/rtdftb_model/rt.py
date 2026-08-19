@@ -195,14 +195,21 @@ def kick_density(
 # observables                                                                  #
 # ---------------------------------------------------------------------------- #
 @kernel
+def rt_orbital_charge(rho, overlap, mu, n):
+    """Mulliken gross population of one orbital, ``Re[(S rho)_mu,mu]``."""
+
+    total = 0.0
+    for nu in range(n):
+        total += rho[nu, mu].real * overlap[nu, mu]
+    return total
+
+
+@kernel
 def rt_orbital_charges(rho, overlap, q_orb, n):
     """Mulliken gross populations of a complex density, ``q_mu = Re[(S rho)_mu,mu]``."""
 
     for mu in range(n):
-        total = 0.0
-        for nu in range(n):
-            total += rho[nu, mu].real * overlap[nu, mu]
-        q_orb[mu] = total
+        q_orb[mu] = rt_orbital_charge(rho, overlap, mu, n)
 
 
 @kernel
@@ -285,13 +292,22 @@ def external_potential(coords, field, shell_atom, v_shell, n_shell):
 
 
 @kernel
+def band_energy_row(rho, h0, mu, n):
+    """Row ``mu`` of ``Tr(rho H0)``."""
+
+    total = 0.0
+    for nu in range(n):
+        total += rho[mu, nu].real * h0[mu, nu]
+    return total
+
+
+@kernel
 def band_energy(rho, h0, n):
     """``Tr(rho H0)``, the non-SCC part of the electronic energy."""
 
     total = 0.0
     for mu in range(n):
-        for nu in range(n):
-            total += rho[mu, nu].real * h0[mu, nu]
+        total += band_energy_row(rho, h0, mu, n)
     return total
 
 

@@ -14,10 +14,11 @@ the initial conditions (geometry and density matrix); only the field, and with
 
 This driver runs one execution path on each backend:
 
-- **GPU** (``xp=cupy``): one thread per system with cuda optimization.
+- **GPU** (``xp=cupy``): one CUDA block per system.
 - **CPU reference** (``xp=numpy``): the same compiled physics through ``numba.njit``.
 """
 
+import math
 from collections import namedtuple
 
 import numpy as np
@@ -43,8 +44,10 @@ _FORCE_DIPOLE_KEYS = ("mux_m_au", "muy_m_au", "muz_m_au")
 #   checkpoint/restart -- the scalar driver writes one .npz per molecule ID
 _UNSUPPORTED_GPU_FLAGS = ("verbose", "checkpoint", "restart")
 
-# Radial-interpolation stencil width, slakoeqgrid.F90:78.
+# Radial-interpolation stencil width, slakoeqgrid.F90:78, and the difference table
+# of the stencil; both size per-thread scratch, so they must be constants.
 _N_INTERPOLATION = 8
+_N_DELTA = _N_INTERPOLATION - 1
 
 # Kernel argument bundles. numba accepts a namedtuple of device arrays as a kernel
 # argument, and bundling matters: with the arrays passed individually the launch spends
@@ -66,9 +69,10 @@ _Geometry = namedtuple("_Geometry", "coords h0 overlap s_inv gamma e_repulsive")
 _Nuclear = namedtuple("_Nuclear", "velocity half_velocity coords_next accel force")
 _Out = namedtuple("_Out", "amp mu_end mu_half energy")
 
-#: Per-system working storage for the matrix-assembly kernels. On the scalar path one
-#: copy is shared across calls; here every system needs its own, because on the GPU all
-#: of them are in flight at once.
+#: Per-system working storage. The Slater-Koster assembly scratch (``h0_*``, ``b_*``)
+#: serves the CPU batch path, which steps the systems one after another; the GPU stage
+#: kernels give every thread its own local copy instead. The matrices from ``density``
+#: on are per system on both backends.
 _Scratch = namedtuple(
     "_Scratch",
     "h0_sk_h h0_sk_s h0_block_h h0_block_s h0_core h0_node h0_cc h0_dd h0_delta "
@@ -88,13 +92,16 @@ _STEP_KERNELS = {}
 
 
 def _build_stage_kernels(ehrenfest):
-    """Compile (once) and return the per-thread stage kernels of one RT-TDDFTB step.
+    """Compile (once) and return the block-per-system stage kernels of one step.
 
-    Each stage is one slice of ``doTdStep`` per thread, assembled from the device builds
-    of the validated scalar kernels. The step is cut where its dense linear algebra
-    sits, so that the host can hand those products to cuBLAS/cuSOLVER for the whole
-    batch: a lone thread multiplying ``n_orb x n_orb`` matrices is the slowest thing a
-    GPU can do, and for medium-sized molecules it was most of the step.
+    Each stage runs one CUDA block per system: its threads stride over the atom pairs
+    of the Slater-Koster assemblies, the rows of the matrix passes and the shell pairs
+    of gamma, and meet in shared-memory reductions for the per-system scalars, while
+    thread 0 does the O(n_atom) bookkeeping. The bodies are the device builds of the
+    validated per-pair and per-row kernels; the CPU path drives the same bodies
+    serially. Between the stages the host applies the dense linear algebra -- the
+    leapfrog products, ``S^-1`` and the energy-weighted density -- to the whole batch
+    through cuBLAS/cuSOLVER (CuPy).
 
     Parameters
     ----------
@@ -104,7 +111,7 @@ def _build_stage_kernels(ehrenfest):
     Returns
     -------
     _Stages
-        The compiled kernels, ready to launch with ``kernel[blocks, tpb]``.
+        The compiled kernels, ready to launch with ``kernel[num, tpb]``.
 
     Raises
     ------
@@ -128,34 +135,54 @@ def _build_stage_kernels(ehrenfest):
     from ..models.rtdftb_model.forces import BandScratch
     from ..models.rtdftb_model.h0_overlap import H0Scratch
     from ..models.rtdftb_model.kernels_dftb import device_kernels
-    from ..models.rtdftb_model.scc import RepulsiveScratch
 
     d = device_kernels()
     scc_potential = d["scc_potential"]
-    scc_hamiltonian = d["scc_hamiltonian"]
     external_potential = d["external_potential"]
-    rt_orbital_charges = d["rt_orbital_charges"]
-    atom_charges = d["atom_charges"]
-    shell_charges_from_orbital = d["shell_charges_from_orbital"]
-    band_energy = d["band_energy"]
+    scc_hamiltonian_row = d["scc_hamiltonian_row"]
+    band_energy_row = d["band_energy_row"]
     scc_energy = d["scc_energy"]
     external_energy = d["external_energy"]
-    build_h0_overlap_kernel = d["build_h0_overlap_kernel"]
-    build_gamma = d["build_gamma"]
-    repulsive_sum = d["repulsive_sum"]
-    coupling_kernel = d["coupling_kernel"]
+    rt_orbital_charge = d["rt_orbital_charge"]
+    atom_charges = d["atom_charges"]
+    shell_charges_from_orbital = d["shell_charges_from_orbital"]
+    h0_overlap_onsite = d["h0_overlap_onsite"]
+    h0_overlap_pair = d["h0_overlap_pair"]
+    gamma_element = d["gamma_element"]
+    repulsive_pair = d["repulsive_pair"]
+    coupling_pair = d["coupling_pair"]
     nuclear_step = d["nuclear_step"]
     kinetic_sum = d["kinetic_sum"]
-    real_part = d["real_part"]
-    overlap_weight = d["overlap_weight"]
-    band_gradient_kernel = d["band_gradient_kernel"]
-    gamma_gradient_kernel = d["gamma_gradient_kernel"]
-    repulsive_gradient_kernel = d["repulsive_gradient_kernel"]
+    real_part_row = d["real_part_row"]
+    overlap_weight_row = d["overlap_weight_row"]
+    band_gradient_pair = d["band_gradient_pair"]
+    gamma_gradient_pair = d["gamma_gradient_pair"]
     field_gradient = d["field_gradient"]
 
     @cuda.jit(device=True)
-    def rebuild_h(i, st, sh, coords, h0, overlap, gamma, field, n_orb, n_shell):
-        """Rebuild ``H`` of ONE system from its charges and this step's field."""
+    def ordered_pair(p, n_atom):
+        """The ``p``-th ordered atom pair ``(a, b)``, ``a != b``."""
+
+        a = p // (n_atom - 1)
+        b = p - a * (n_atom - 1)
+        if b >= a:
+            b += 1
+        return a, b
+
+    @cuda.jit(device=True)
+    def unordered_pair(p):
+        """The ``p``-th unordered atom pair ``(a, b)``, ``a < b``, enumerated by ``b``."""
+
+        b = int((1.0 + math.sqrt(1.0 + 8.0 * p)) * 0.5)
+        while b * (b - 1) // 2 > p:
+            b -= 1
+        while (b + 1) * b // 2 <= p:
+            b += 1
+        return p - b * (b - 1) // 2, b
+
+    @cuda.jit(device=True)
+    def potentials(i, st, sh, coords, gamma, field, n_orb, n_shell):
+        """Shell and orbital potentials of ONE system from its charges and the field."""
 
         scc_potential(
             gamma, st.dq_shell[i], sh.orb_shell, st.v_scc_shell[i], st.v_orb[i]
@@ -165,27 +192,38 @@ def _build_stage_kernels(ehrenfest):
         external_potential(coords, field[i], sh.shell_atom, st.v_shell[i], n_shell)
         for mu in range(n_orb):
             st.v_orb[i, mu] = st.v_shell[i, sh.orb_shell[mu]]
-        scc_hamiltonian(h0, overlap, st.v_orb[i], st.h[i])
 
     @cuda.jit(device=True)
-    def total_energy(
-        i, st, rho, coords, h0, field, e_rep, e_kin, n_orb, n_shell, n_atom
-    ):
-        """Total energy of ONE system, matching ``RTState.energies`` for our scope."""
+    def hamiltonian_rows(i, st, h0, overlap, n_orb, tid, tpb):
+        """``H = H0 + 0.5 S (V_mu + V_nu)`` of ONE system, its rows over the threads."""
+
+        for mu in range(tid, n_orb, tpb):
+            scc_hamiltonian_row(h0, overlap, st.v_orb[i], st.h[i], mu)
+
+    @cuda.jit(device=True)
+    def band_partial(rho, h0, n_orb, tid, tpb):
+        """This thread's rows of ``Tr(rho H0)``."""
+
+        total = 0.0
+        for mu in range(tid, n_orb, tpb):
+            total += band_energy_row(rho, h0, mu, n_orb)
+        return total
+
+    @cuda.jit(device=True)
+    def energy_rest(i, st, coords, field, e_rep, e_kin, n_shell, n_atom):
+        """The energy of ONE system apart from its band term."""
 
         return (
-            band_energy(rho[i], h0, n_orb)
-            + scc_energy(st.v_scc_shell[i], st.dq_shell[i], n_shell)
+            scc_energy(st.v_scc_shell[i], st.dq_shell[i], n_shell)
             + external_energy(st.dq_atom[i], coords, field[i], n_atom)
             + e_rep
             + e_kin
         )
 
     @cuda.jit(device=True)
-    def recharge(i, st, sh, rho, overlap, coords, mu, n_orb, n_shell, n_atom):
-        """Mulliken charges and the dipole of ONE system, after propagation."""
+    def charges(i, st, sh, coords, mu, n_orb, n_shell, n_atom):
+        """Atom and shell charges and the dipole of ONE system, from ``q_orb``."""
 
-        rt_orbital_charges(rho[i], overlap, st.q_orb[i], n_orb)
         atom_charges(st.q_orb[i], sh.q0_orb, sh.orb_atom, st.dq_atom[i], n_orb, n_atom)
         shell_charges_from_orbital(
             st.q_orb[i], sh.q0_orb, sh.orb_shell, st.dq_shell[i], n_orb, n_shell
@@ -218,63 +256,59 @@ def _build_stage_kernels(ehrenfest):
         def k_pre(st, sh, gm, field):
             """``H(t)`` and the energy at ``t`` of ONE system, at the fixed geometry."""
 
-            i = cuda.grid(1)
-            if i >= st.rho.shape[0]:
-                return
+            i = cuda.blockIdx.x
+            tid = cuda.threadIdx.x
+            tpb = cuda.blockDim.x
             n_orb = st.rho.shape[1]
             n_shell = st.dq_shell.shape[1]
             n_atom = st.dq_atom.shape[1]
+            acc = cuda.shared.array(1, float64)
 
-            rebuild_h(
-                i, st, sh, gm.coords, gm.h0, gm.overlap, gm.gamma, field, n_orb, n_shell
-            )
-            st.energy_start[i] = total_energy(
-                i,
-                st,
-                st.rho,
-                gm.coords,
-                gm.h0,
-                field,
-                gm.e_repulsive,
-                0.0,
-                n_orb,
-                n_shell,
-                n_atom,
-            )
+            if tid == 0:
+                acc[0] = 0.0
+                potentials(i, st, sh, gm.coords, gm.gamma, field, n_orb, n_shell)
+            cuda.syncthreads()
+            hamiltonian_rows(i, st, gm.h0, gm.overlap, n_orb, tid, tpb)
+            cuda.atomic.add(acc, 0, band_partial(st.rho[i], gm.h0, n_orb, tid, tpb))
+            cuda.syncthreads()
+            if tid == 0:
+                st.energy_start[i] = acc[0] + energy_rest(
+                    i, st, gm.coords, field, gm.e_repulsive, 0.0, n_shell, n_atom
+                )
 
         @cuda.jit
         def k_post(st, sh, gm, out, field, dt):
             """Charges, dipole and energy at ``t + dt`` of ONE system, and its reply."""
 
-            i = cuda.grid(1)
-            if i >= st.rho.shape[0]:
-                return
+            i = cuda.blockIdx.x
+            tid = cuda.threadIdx.x
+            tpb = cuda.blockDim.x
             n_orb = st.rho.shape[1]
             n_shell = st.dq_shell.shape[1]
             n_atom = st.dq_atom.shape[1]
+            acc = cuda.shared.array(1, float64)
             mu = cuda.local.array(3, float64)
 
             # rho(t+dt) is in rho_old, where the leapfrog products left it
-            recharge(
-                i, st, sh, st.rho_old, gm.overlap, gm.coords, mu, n_orb, n_shell, n_atom
-            )
-            rebuild_h(
-                i, st, sh, gm.coords, gm.h0, gm.overlap, gm.gamma, field, n_orb, n_shell
-            )
-            energy_end = total_energy(
-                i,
-                st,
-                st.rho_old,
-                gm.coords,
-                gm.h0,
-                field,
-                gm.e_repulsive,
-                0.0,
-                n_orb,
-                n_shell,
-                n_atom,
-            )
-            report(i, out, sh, st.energy_start[i], energy_end, mu, dt)
+            for col in range(tid, n_orb, tpb):
+                st.q_orb[i, col] = rt_orbital_charge(
+                    st.rho_old[i], gm.overlap, col, n_orb
+                )
+            if tid == 0:
+                acc[0] = 0.0
+            cuda.syncthreads()
+            if tid == 0:
+                charges(i, st, sh, gm.coords, mu, n_orb, n_shell, n_atom)
+                potentials(i, st, sh, gm.coords, gm.gamma, field, n_orb, n_shell)
+            cuda.syncthreads()
+            hamiltonian_rows(i, st, gm.h0, gm.overlap, n_orb, tid, tpb)
+            cuda.atomic.add(acc, 0, band_partial(st.rho_old[i], gm.h0, n_orb, tid, tpb))
+            cuda.syncthreads()
+            if tid == 0:
+                energy_end = acc[0] + energy_rest(
+                    i, st, gm.coords, field, gm.e_repulsive, 0.0, n_shell, n_atom
+                )
+                report(i, out, sh, st.energy_start[i], energy_end, mu, dt)
 
         _STEP_KERNELS[ehrenfest] = _Stages(k_pre, None, k_post, None)
         return _STEP_KERNELS[ehrenfest]
@@ -283,216 +317,276 @@ def _build_stage_kernels(ehrenfest):
     def k_pre(st, sh, gm, nu, sc, field, dt):
         """Nuclear step, ``H(t)``, energy at ``t`` and ``D(t)`` of ONE system."""
 
-        i = cuda.grid(1)
-        if i >= st.rho.shape[0]:
-            return
+        i = cuda.blockIdx.x
+        tid = cuda.threadIdx.x
+        tpb = cuda.blockDim.x
         n_orb = st.rho.shape[1]
         n_shell = st.dq_shell.shape[1]
         n_atom = st.dq_atom.shape[1]
-
-        # the integrator consumes a(t) and returns r(t+dt) together with v(t)
-        nuclear_step(
-            nu.coords_next[i],
-            nu.half_velocity[i],
-            nu.accel[i],
-            dt,
-            n_atom,
-            nu.velocity[i],
-        )
-        st.e_kin[i] = kinetic_sum(sh.mass, nu.velocity[i], n_atom)
-
-        rebuild_h(
-            i,
-            st,
-            sh,
-            gm.coords[i],
-            gm.h0[i],
-            gm.overlap[i],
-            gm.gamma[i],
-            field,
-            n_orb,
-            n_shell,
-        )
-        st.energy_start[i] = total_energy(
-            i,
-            st,
-            st.rho,
-            gm.coords[i],
-            gm.h0[i],
-            field,
-            gm.e_repulsive[i],
-            st.e_kin[i],
-            n_orb,
-            n_shell,
-            n_atom,
+        acc = cuda.shared.array(1, float64)
+        # per-thread working storage of the coupling assembly
+        cs = CouplingScratch(
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array((MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((5, 5), float64),
+            cuda.local.array((3, 5, 5), float64),
         )
 
-        # D(t) is built at r(t) with v(t), before the geometry is adopted
-        coupling_kernel(
-            sh.sk,
-            gm.coords[i],
-            sh.atom_species,
-            sh.atom_offset,
-            n_atom,
-            nu.velocity[i],
-            st.coupling[i],
-            CouplingScratch(
-                sc.b_sk_s[i],
-                sc.b_dsk_s[i],
-                sc.b_d_overlap[i],
-                sc.b_weight[i],
-                sc.b_first[i],
-                sc.b_second[i],
-                sc.b_radial[i],
-                sc.b_angular[i],
-                sc.b_core[i],
-                sc.b_dcore[i],
-            ),
-        )
+        if tid == 0:
+            acc[0] = 0.0
+            # the integrator consumes a(t) and returns r(t+dt) together with v(t)
+            nuclear_step(
+                nu.coords_next[i],
+                nu.half_velocity[i],
+                nu.accel[i],
+                dt,
+                n_atom,
+                nu.velocity[i],
+            )
+            st.e_kin[i] = kinetic_sum(sh.mass, nu.velocity[i], n_atom)
+            potentials(i, st, sh, gm.coords[i], gm.gamma[i], field, n_orb, n_shell)
+        # D is assembled onto a clean matrix (see coupling_kernel)
+        for row in range(tid, n_orb, tpb):
+            for col in range(n_orb):
+                st.coupling[i, row, col] = 0.0
+        cuda.syncthreads()
+
+        hamiltonian_rows(i, st, gm.h0[i], gm.overlap[i], n_orb, tid, tpb)
+        cuda.atomic.add(acc, 0, band_partial(st.rho[i], gm.h0[i], n_orb, tid, tpb))
+        # D(t) is built at r(t) with v(t), before the geometry is adopted: one ordered
+        # atom pair per thread and turn
+        for p in range(tid, n_atom * (n_atom - 1), tpb):
+            a, b = ordered_pair(p, n_atom)
+            coupling_pair(
+                sh.sk,
+                gm.coords[i],
+                sh.atom_species,
+                sh.atom_offset,
+                a,
+                b,
+                nu.velocity[i],
+                st.coupling[i],
+                cs,
+            )
+        cuda.syncthreads()
+        if tid == 0:
+            st.energy_start[i] = acc[0] + energy_rest(
+                i,
+                st,
+                gm.coords[i],
+                field,
+                gm.e_repulsive[i],
+                st.e_kin[i],
+                n_shell,
+                n_atom,
+            )
 
     @cuda.jit
     def k_geometry(st, sh, gm, nu, sc):
         """Adopt ``r(t+dt)`` and rebuild ``H0``, ``S``, gamma and ``E_rep`` there."""
 
-        i = cuda.grid(1)
-        if i >= st.rho.shape[0]:
-            return
+        i = cuda.blockIdx.x
+        tid = cuda.threadIdx.x
+        tpb = cuda.blockDim.x
+        n_orb = st.rho.shape[1]
+        n_shell = st.dq_shell.shape[1]
         n_atom = st.dq_atom.shape[1]
+        acc = cuda.shared.array(1, float64)
+        # per-thread working storage of the H0/S assembly and the repulsive spline
+        hs = H0Scratch(
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array((MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((5, 5), float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_DELTA, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+        )
+        pair = cuda.local.array(2, float64)
 
-        for a in range(n_atom):
+        for a in range(tid, n_atom, tpb):
             for k in range(3):
                 gm.coords[i, a, k] = nu.coords_next[i, a, k]
-        build_h0_overlap_kernel(
-            sh.sk,
-            gm.coords[i],
-            sh.atom_species,
-            sh.atom_offset,
-            n_atom,
-            gm.h0[i],
-            gm.overlap[i],
-            H0Scratch(
-                sc.h0_sk_h[i],
-                sc.h0_sk_s[i],
-                sc.h0_block_h[i],
-                sc.h0_block_s[i],
-                sc.h0_core[i],
-                sc.h0_node[i],
-                sc.h0_cc[i],
-                sc.h0_dd[i],
-                sc.h0_delta[i],
-                sc.h0_y_low[i],
-                sc.h0_y_high[i],
-            ),
-        )
-        build_gamma(gm.coords[i], sh.shell_atom, sh.shell_u, gm.gamma[i])
-        gm.e_repulsive[i] = repulsive_sum(
-            sh.sk, gm.coords[i], sh.atom_species, n_atom, RepulsiveScratch(sc.pair[i])
-        )
+        # H0 and S start clean (see build_h0_overlap_kernel)
+        for row in range(tid, n_orb, tpb):
+            for col in range(n_orb):
+                gm.h0[i, row, col] = 0.0
+                gm.overlap[i, row, col] = 0.0
+        if tid == 0:
+            acc[0] = 0.0
+        cuda.syncthreads()
+
+        for atom in range(tid, n_atom, tpb):
+            h0_overlap_onsite(
+                sh.sk, sh.atom_species, sh.atom_offset, atom, gm.h0[i], gm.overlap[i]
+            )
+        rep = 0.0
+        for p in range(tid, n_atom * (n_atom - 1) // 2, tpb):
+            a, b = unordered_pair(p)
+            h0_overlap_pair(
+                sh.sk,
+                gm.coords[i],
+                sh.atom_species,
+                sh.atom_offset,
+                a,
+                b,
+                gm.h0[i],
+                gm.overlap[i],
+                hs,
+            )
+            e_pair, g_x, g_y, g_z = repulsive_pair(
+                sh.sk, gm.coords[i], sh.atom_species, a, b, pair
+            )
+            rep += e_pair
+        cuda.atomic.add(acc, 0, rep)
+        for e in range(tid, n_shell * n_shell, tpb):
+            row = e // n_shell
+            col = e - row * n_shell
+            gm.gamma[i, row, col] = gamma_element(
+                gm.coords[i], sh.shell_atom, sh.shell_u, row, col
+            )
+        cuda.syncthreads()
+        if tid == 0:
+            gm.e_repulsive[i] = acc[0]
 
     @cuda.jit
     def k_post(st, sh, gm, sc, out, field, dt):
         """Charges, dipole, energy and reply at ``t + dt`` of ONE system, and ``Re[rho]``."""
 
-        i = cuda.grid(1)
-        if i >= st.rho.shape[0]:
-            return
+        i = cuda.blockIdx.x
+        tid = cuda.threadIdx.x
+        tpb = cuda.blockDim.x
         n_orb = st.rho.shape[1]
         n_shell = st.dq_shell.shape[1]
         n_atom = st.dq_atom.shape[1]
+        acc = cuda.shared.array(1, float64)
         mu = cuda.local.array(3, float64)
 
-        recharge(
-            i,
-            st,
-            sh,
-            st.rho_old,
-            gm.overlap[i],
-            gm.coords[i],
-            mu,
-            n_orb,
-            n_shell,
-            n_atom,
-        )
-        rebuild_h(
-            i,
-            st,
-            sh,
-            gm.coords[i],
-            gm.h0[i],
-            gm.overlap[i],
-            gm.gamma[i],
-            field,
-            n_orb,
-            n_shell,
-        )
-        energy_end = total_energy(
-            i,
-            st,
-            st.rho_old,
-            gm.coords[i],
-            gm.h0[i],
-            field,
-            gm.e_repulsive[i],
-            st.e_kin[i],
-            n_orb,
-            n_shell,
-            n_atom,
-        )
-        report(i, out, sh, st.energy_start[i], energy_end, mu, dt)
-        real_part(st.rho_old[i], sc.density[i], n_orb)
+        for col in range(tid, n_orb, tpb):
+            st.q_orb[i, col] = rt_orbital_charge(
+                st.rho_old[i], gm.overlap[i], col, n_orb
+            )
+        for row in range(tid, n_orb, tpb):
+            real_part_row(st.rho_old[i], sc.density[i], row, n_orb)
+        if tid == 0:
+            acc[0] = 0.0
+        cuda.syncthreads()
+        if tid == 0:
+            charges(i, st, sh, gm.coords[i], mu, n_orb, n_shell, n_atom)
+            potentials(i, st, sh, gm.coords[i], gm.gamma[i], field, n_orb, n_shell)
+        cuda.syncthreads()
+        hamiltonian_rows(i, st, gm.h0[i], gm.overlap[i], n_orb, tid, tpb)
+        cuda.atomic.add(acc, 0, band_partial(st.rho_old[i], gm.h0[i], n_orb, tid, tpb))
+        cuda.syncthreads()
+        if tid == 0:
+            energy_end = acc[0] + energy_rest(
+                i,
+                st,
+                gm.coords[i],
+                field,
+                gm.e_repulsive[i],
+                st.e_kin[i],
+                n_shell,
+                n_atom,
+            )
+            report(i, out, sh, st.energy_start[i], energy_end, mu, dt)
 
     @cuda.jit
     def k_force(st, sh, gm, nu, sc, field):
         """The Ehrenfest force at ``r(t+dt)`` of ONE system, from the weighted densities."""
 
-        i = cuda.grid(1)
-        if i >= st.rho.shape[0]:
-            return
+        i = cuda.blockIdx.x
+        tid = cuda.threadIdx.x
+        tpb = cuda.blockDim.x
+        n_orb = st.rho.shape[1]
         n_shell = st.dq_shell.shape[1]
         n_atom = st.dq_atom.shape[1]
+        # per-thread working storage of the band-gradient assembly and the repulsive
+        bs = BandScratch(
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array(MAX_INTEGRAL, float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array(_N_INTERPOLATION, float64),
+            cuda.local.array((MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((3, MAX_ORB, MAX_ORB), float64),
+            cuda.local.array((5, 5), float64),
+            cuda.local.array((3, 5, 5), float64),
+        )
+        pair = cuda.local.array(2, float64)
 
-        overlap_weight(sc.density[i], sc.weight_e[i], st.v_orb[i], sc.weight[i])
-        for a in range(n_atom):
+        for row in range(tid, n_orb, tpb):
+            overlap_weight_row(
+                sc.density[i], sc.weight_e[i], st.v_orb[i], sc.weight[i], row
+            )
+        for a in range(tid, n_atom, tpb):
             for k in range(3):
                 sc.gradient[i, a, k] = 0.0
-        band_gradient_kernel(
-            sh.sk,
-            gm.coords[i],
-            sh.atom_species,
-            sh.atom_offset,
-            n_atom,
-            sc.density[i],
-            sc.weight[i],
-            sc.gradient[i],
-            BandScratch(
-                sc.b_sk_h[i],
-                sc.b_sk_s[i],
-                sc.b_dsk_h[i],
-                sc.b_dsk_s[i],
-                sc.b_d_h0[i],
-                sc.b_d_overlap[i],
-                sc.b_weight[i],
-                sc.b_first[i],
-                sc.b_second[i],
-                sc.b_radial[i],
-                sc.b_angular[i],
-                sc.b_core[i],
-                sc.b_dcore[i],
-            ),
-        )
-        gamma_gradient_kernel(
-            gm.coords[i],
-            sh.shell_atom,
-            sh.shell_u,
-            st.dq_shell[i],
-            n_shell,
-            sc.gradient[i],
-        )
-        repulsive_gradient_kernel(
-            sh.sk, gm.coords[i], sh.atom_species, n_atom, sc.gradient[i], sc.pair[i]
-        )
-        field_gradient(st.dq_atom[i], field[i], sc.gradient[i], n_atom)
-        for a in range(n_atom):
+        cuda.syncthreads()
+
+        # the pair sums accumulate onto the atoms with atomics; their order is not
+        # fixed, so the gradient differs from the serial sum at round-off only
+        for p in range(tid, n_atom * (n_atom - 1), tpb):
+            a, b = ordered_pair(p, n_atom)
+            g_x, g_y, g_z = band_gradient_pair(
+                sh.sk,
+                gm.coords[i],
+                sh.atom_species,
+                sh.atom_offset,
+                a,
+                b,
+                sc.density[i],
+                sc.weight[i],
+                bs,
+            )
+            cuda.atomic.add(sc.gradient, (i, a, 0), g_x)
+            cuda.atomic.add(sc.gradient, (i, a, 1), g_y)
+            cuda.atomic.add(sc.gradient, (i, a, 2), g_z)
+        for e in range(tid, n_shell * n_shell, tpb):
+            row = e // n_shell
+            col = e - row * n_shell
+            atom_row = sh.shell_atom[row]
+            atom_col = sh.shell_atom[col]
+            if atom_row != atom_col:
+                f_x, f_y, f_z = gamma_gradient_pair(
+                    gm.coords[i], sh.shell_atom, sh.shell_u, st.dq_shell[i], row, col
+                )
+                cuda.atomic.add(sc.gradient, (i, atom_row, 0), f_x)
+                cuda.atomic.add(sc.gradient, (i, atom_row, 1), f_y)
+                cuda.atomic.add(sc.gradient, (i, atom_row, 2), f_z)
+                cuda.atomic.add(sc.gradient, (i, atom_col, 0), -f_x)
+                cuda.atomic.add(sc.gradient, (i, atom_col, 1), -f_y)
+                cuda.atomic.add(sc.gradient, (i, atom_col, 2), -f_z)
+        for p in range(tid, n_atom * (n_atom - 1) // 2, tpb):
+            a, b = unordered_pair(p)
+            e_pair, g_x, g_y, g_z = repulsive_pair(
+                sh.sk, gm.coords[i], sh.atom_species, a, b, pair
+            )
+            cuda.atomic.add(sc.gradient, (i, a, 0), g_x)
+            cuda.atomic.add(sc.gradient, (i, a, 1), g_y)
+            cuda.atomic.add(sc.gradient, (i, a, 2), g_z)
+            cuda.atomic.add(sc.gradient, (i, b, 0), -g_x)
+            cuda.atomic.add(sc.gradient, (i, b, 1), -g_y)
+            cuda.atomic.add(sc.gradient, (i, b, 2), -g_z)
+        cuda.syncthreads()
+        if tid == 0:
+            field_gradient(st.dq_atom[i], field[i], sc.gradient[i], n_atom)
+        cuda.syncthreads()
+        for a in range(tid, n_atom, tpb):
             for k in range(3):
                 nu.force[i, a, k] = -sc.gradient[i, a, k]
                 nu.accel[i, a, k] = nu.force[i, a, k] / sh.mass[a]
@@ -725,11 +819,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         self._bundles = self._build_bundles()
 
     def _allocate_scratch(self):
-        """Per-system working storage for the matrix-assembly kernels.
-
-        One copy per system, not one shared copy: on the GPU every thread runs a whole
-        system at once, so a shared buffer would be written by every thread in flight.
-        """
+        """Per-system working storage, see :data:`_Scratch`."""
 
         xp, num, n, n_atom = self.xp, self.num, self.n_orb, self.n_atom
 
@@ -887,7 +977,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
     def _step_on_gpu(self):
         """One step of the whole batch: stage kernels around the dense linear algebra.
 
-        The stage kernels run one thread per system; between them CuPy applies the
+        The stage kernels run one block per system; between them CuPy applies the
         leapfrog products, ``S^-1`` and the energy-weighted density to every system at
         once through cuBLAS/cuSOLVER. Both libraries queue on the default CUDA stream,
         which keeps the stages in order; the one synchronization at the end is for the
@@ -897,30 +987,20 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         from numba import cuda
 
         state, shared, geometry, nuclear, scratch, out, field = self._bundles
-        blocks = (self.num + _THREADS_PER_BLOCK - 1) // _THREADS_PER_BLOCK
+        launch = (self.num, _THREADS_PER_BLOCK)  # one block per system
         stages, dt = self._kernels, self.dt
         if self.ehrenfest:
-            stages.pre[blocks, _THREADS_PER_BLOCK](
-                state, shared, geometry, nuclear, scratch, field, dt
-            )
+            stages.pre[launch](state, shared, geometry, nuclear, scratch, field, dt)
             self._leapfrog_on_device(2.0 * dt)
-            stages.geometry[blocks, _THREADS_PER_BLOCK](
-                state, shared, geometry, nuclear, scratch
-            )
+            stages.geometry[launch](state, shared, geometry, nuclear, scratch)
             self._invert_overlap_on_device()
-            stages.post[blocks, _THREADS_PER_BLOCK](
-                state, shared, geometry, scratch, out, field, dt
-            )
+            stages.post[launch](state, shared, geometry, scratch, out, field, dt)
             self._energy_weighted_density_on_device()
-            stages.force[blocks, _THREADS_PER_BLOCK](
-                state, shared, geometry, nuclear, scratch, field
-            )
+            stages.force[launch](state, shared, geometry, nuclear, scratch, field)
         else:
-            stages.pre[blocks, _THREADS_PER_BLOCK](state, shared, geometry, field)
+            stages.pre[launch](state, shared, geometry, field)
             self._leapfrog_on_device(2.0 * dt)
-            stages.post[blocks, _THREADS_PER_BLOCK](
-                state, shared, geometry, out, field, dt
-            )
+            stages.post[launch](state, shared, geometry, out, field, dt)
         cuda.synchronize()
 
     def _leapfrog_on_device(self, step):
@@ -930,7 +1010,9 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         ``rho(t+dt) = rho(t-dt) - step (T1 rho + rho T1^dagger)`` with
         ``T1 = S^-1 (D + iH)``, written into ``rho_old`` as the kernel does; the host
         swaps the two buffers afterwards. ``T1`` is assembled from two real products
-        rather than one complex one, which is half the work.
+        rather than one complex one, and ``rho T1^dagger`` is the adjoint of ``T1 rho``
+        because ``rho`` is Hermitian, so one complex product serves both terms (the
+        kernel computes both, as DFTB+ does; the two agree to round-off).
         """
 
         xp = self.xp
@@ -939,8 +1021,7 @@ class RTDFTBGPUBatchModel(DummyBatchModel):
         if self.ehrenfest:
             t1 += xp.matmul(self._s_inv, self._coupling)  # + S^-1 D
         xp.matmul(t1, self._rho, out=work_b)  # T1 rho
-        xp.conj(t1, out=t1)
-        xp.matmul(self._rho, t1.transpose(0, 2, 1), out=work_c)  # rho T1^dagger
+        xp.conj(work_b.transpose(0, 2, 1), out=work_c)  # rho T1^dagger
         work_b += work_c
         work_b *= step
         self._rho_old -= work_b

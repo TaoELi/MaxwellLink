@@ -53,12 +53,19 @@ except (ImportError, ValueError):  # allow running as a stand-alone script
 # energy-weighted density matrix of a real-time state                          #
 # ---------------------------------------------------------------------------- #
 @kernel
+def real_part_row(rho, out, i, n):
+    """Row ``i`` of ``Re[rho]``."""
+
+    for j in range(n):
+        out[i, j] = rho[i, j].real
+
+
+@kernel
 def real_part(rho, out, n):
     """Copy ``Re[rho]`` into a real matrix; the imaginary part never enters a force."""
 
     for i in range(n):
-        for j in range(n):
-            out[i, j] = rho[i, j].real
+        real_part_row(rho, out, i, n)
 
 
 @kernel
@@ -142,6 +149,66 @@ def coupling_scratch():
 
 
 @kernel
+def coupling_pair(sk, coords, atom_species, atom_offset, a, b, velocities, coupling, s):
+    """
+    ``D`` block of one ordered atom pair ``a != b``: ``v_a . dS_mu,nu / dR_a`` for the
+    rows of ``b`` and the columns of ``a``, added to a zeroed ``coupling``.
+
+    Ordered pairs write disjoint blocks, so they may run in any order or in parallel.
+    Pairs beyond the table's reach contribute nothing. ``s`` is a
+    :data:`CouplingScratch`.
+    """
+
+    sp_a = atom_species[a]
+    n_orb_a = sk.n_orb_species[sp_a]
+    sp_b = atom_species[b]
+    n_orb_b = sk.n_orb_species[sp_b]
+
+    dx = coords[b, 0] - coords[a, 0]
+    dy = coords[b, 1] - coords[a, 1]
+    dz = coords[b, 2] - coords[a, 2]
+    dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    pair = sk.pair_index[sp_a, sp_b]
+    n_grid = sk.tab_n_grid[pair]
+    grid_dist = sk.tab_grid_dist[pair]
+    if dist >= n_grid * grid_dist + DIST_FUDGE:
+        return
+    sk_interpolate_deriv(
+        sk.tab_s[pair],
+        n_grid,
+        grid_dist,
+        sk.tab_n_integral[pair],
+        dist,
+        s.sk_s,
+        s.dsk_s,
+        (s.weight, s.first, s.second),
+    )
+    block_derivatives(
+        s.sk_s,
+        s.dsk_s,
+        dx / dist,
+        dy / dist,
+        dz / dist,
+        dist,
+        sk.ang_shell[sp_a],
+        sk.n_shell[sp_a],
+        sk.ang_shell[sp_b],
+        sk.n_shell[sp_b],
+        s.d_overlap,
+        (s.radial, s.angular, s.core, s.dcore),
+    )
+
+    row = atom_offset[b]
+    col = atom_offset[a]
+    for p in range(n_orb_b):
+        for q in range(n_orb_a):
+            total = 0.0
+            for k in range(3):
+                total += s.d_overlap[k, p, q] * velocities[a, k]
+            coupling[row + p, col + q] += total
+
+
+@kernel
 def coupling_kernel(
     sk, coords, atom_species, atom_offset, n_atom, velocities, coupling, s
 ):
@@ -158,56 +225,11 @@ def coupling_kernel(
             coupling[i, j] = 0.0
 
     for a in range(n_atom):
-        sp_a = atom_species[a]
-        n_orb_a = sk.n_orb_species[sp_a]
         for b in range(n_atom):
-            if b == a:
-                continue
-            sp_b = atom_species[b]
-            n_orb_b = sk.n_orb_species[sp_b]
-
-            dx = coords[b, 0] - coords[a, 0]
-            dy = coords[b, 1] - coords[a, 1]
-            dz = coords[b, 2] - coords[a, 2]
-            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-            pair = sk.pair_index[sp_a, sp_b]
-            n_grid = sk.tab_n_grid[pair]
-            grid_dist = sk.tab_grid_dist[pair]
-            if dist >= n_grid * grid_dist + DIST_FUDGE:
-                continue
-            sk_interpolate_deriv(
-                sk.tab_s[pair],
-                n_grid,
-                grid_dist,
-                sk.tab_n_integral[pair],
-                dist,
-                s.sk_s,
-                s.dsk_s,
-                (s.weight, s.first, s.second),
-            )
-            block_derivatives(
-                s.sk_s,
-                s.dsk_s,
-                dx / dist,
-                dy / dist,
-                dz / dist,
-                dist,
-                sk.ang_shell[sp_a],
-                sk.n_shell[sp_a],
-                sk.ang_shell[sp_b],
-                sk.n_shell[sp_b],
-                s.d_overlap,
-                (s.radial, s.angular, s.core, s.dcore),
-            )
-
-            row = atom_offset[b]
-            col = atom_offset[a]
-            for p in range(n_orb_b):
-                for q in range(n_orb_a):
-                    total = 0.0
-                    for k in range(3):
-                        total += s.d_overlap[k, p, q] * velocities[a, k]
-                    coupling[row + p, col + q] += total
+            if b != a:
+                coupling_pair(
+                    sk, coords, atom_species, atom_offset, a, b, velocities, coupling, s
+                )
 
 
 def build_coupling(system, velocities, coupling):
