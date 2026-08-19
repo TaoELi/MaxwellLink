@@ -34,7 +34,6 @@ from ..models.rtdftb_model.dftb_params import load_sk_set
 from ..models.rtdftb_model.h0_overlap import MAX_INTEGRAL, MAX_ORB
 from ..models.rtdftb_model.rtdftb_model import _PRE_NVT_DT_FS, RTDFTBModel
 from ..models.rtdftb_model.scc import (
-    MIN_TEMP,
     ShellLayout,
     diis_mix,
     fermi_filling,

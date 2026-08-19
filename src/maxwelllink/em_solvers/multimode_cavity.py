@@ -257,7 +257,7 @@ class FabryPerotCavity:
         self.n_mode_x = n_mode_x
         self.n_mode_y = n_mode_y
         self.mode_start_index = mode_start_index
-        # the original code indeces the modes from 1 to n_mode_x/y        
+        # the original code indeces the modes from 1 to n_mode_x/y
         # kx_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_x)])
         # ky_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_y)])
         # let's update the index from 0 to n_mode_x/y [fix the 2D gaussian pulse issue]
