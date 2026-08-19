@@ -2,6 +2,7 @@
 # Copyright (c) 2026 MaxwellLink                                                        #
 # This file is part of MaxwellLink. Repository: https://github.com/TaoELi/MaxwellLink   #
 # If you use this code, always credit and cite arXiv:2512.06173.                        #
+# See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
 """
@@ -22,14 +23,9 @@ import math
 
 import numpy as np
 
-try:  # inside the package
-    from .kernels_dftb import kernel
-    from .dftb_params import DIST_FUDGE, N_INTERPOLATION, N_RIGHT
-    from .h0_overlap import SQRT3, poly5_to_zero, rotate_block
-except (ImportError, ValueError):  # allow running as a stand-alone script
-    from kernels_dftb import kernel
-    from dftb_params import DIST_FUDGE, N_INTERPOLATION, N_RIGHT
-    from h0_overlap import SQRT3, poly5_to_zero, rotate_block
+from .dftb_params import DIST_FUDGE, N_INTERPOLATION, N_RIGHT
+from .h0_overlap import SQRT3, poly5_to_zero, rotate_block
+from .jit import kernel
 
 # 1 / prod_{j != k} (k - j) for the eight integer nodes 0 ... 7.
 INV_DENOM = np.array(
@@ -92,7 +88,7 @@ def _poly5_to_zero_deriv(y0, y0p, y0pp, xx, dx, invdx):
 
 
 @kernel
-def sk_interpolate_deriv(table, n_grid, grid_dist, n_integral, r, out, dout, scratch):
+def sk_interpolate_deriv(table, n_grid, grid_dist, n_integral, r, out, dout, s):
     """
     Interpolate one pair's radial table at ``r`` and return ``d/dr`` as well.
 
@@ -111,11 +107,11 @@ def sk_interpolate_deriv(table, n_grid, grid_dist, n_integral, r, out, dout, scr
         Interatomic distance in Bohr.
     out, dout : numpy.ndarray of float, shape (>= n_integral,)
         Receive the integrals and their radial derivatives; zeroed first.
-    scratch : tuple of numpy.ndarray
-        ``(weight, first, second)`` working arrays of length 8.
+    s : h0_overlap.PairScratch
+        Working arrays; ``weight``, ``first`` and ``second`` are used.
     """
 
-    weight, first, second = scratch
+    weight, first, second = s.weight, s.first, s.second
     for c in range(n_integral):
         out[c] = 0.0
         dout[c] = 0.0
@@ -559,7 +555,7 @@ def rotate_block_du(sk, ll, mm, nn, ang_a, n_shell_a, ang_b, n_shell_b, blocks, 
 
 @kernel
 def block_derivatives(
-    sk, dskdr, ll, mm, nn, dist, ang_a, n_shell_a, ang_b, n_shell_b, dblock, scratch
+    sk, dskdr, ll, mm, nn, dist, ang_a, n_shell_a, ang_b, n_shell_b, dblock, s
 ):
     """
     Cartesian derivative of one diatomic block with respect to the *column* atom.
@@ -580,12 +576,11 @@ def block_derivatives(
         Shell layout of the column and row species, as in :func:`rotate_block_du`.
     dblock : numpy.ndarray of float, shape (3, MAX_ORB, MAX_ORB)
         Receives the three Cartesian derivative blocks.
-    scratch : tuple of numpy.ndarray
-        ``(radial, angular, core, dcore)`` working arrays shaped
-        ``(MAX_ORB, MAX_ORB)``, ``(3, MAX_ORB, MAX_ORB)``, ``(5, 5)`` and ``(3, 5, 5)``.
+    s : h0_overlap.PairScratch
+        Working arrays; ``radial``, ``angular``, ``core`` and ``dcore`` are used.
     """
 
-    radial, angular, core, dcore = scratch
+    radial, angular, core, dcore = s.radial, s.angular, s.core, s.dcore
     n_orb_a = 0
     for i in range(n_shell_a):
         n_orb_a += 2 * ang_a[i] + 1

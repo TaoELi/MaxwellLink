@@ -142,7 +142,7 @@ def test_batch_reproduces_independent_scalar_drivers(backend):
 
 @pytest.mark.core
 def test_the_two_backends_agree():
-    """The compiled CPU path and the CUDA kernel are the same physics."""
+    """The scalar drivers (the CPU backend) and the CUDA kernels are the same physics."""
 
     cupy = _array_module("cupy")
     fields = _fields()
@@ -154,6 +154,33 @@ def test_the_two_backends_agree():
     assert np.abs(on_cpu[0] - on_gpu[0]).max() < 1e-13
     assert np.abs(on_cpu[1] - on_gpu[1]).max() < 1e-12
     assert np.abs(on_cpu[2] - on_gpu[2]).max() < 1e-12
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+def test_sub_stepping_follows_the_scalar_drivers(backend):
+    """``dt_rtdftb_au`` sub-steps the batch exactly as it sub-steps the scalar driver.
+
+    Two electronic steps per EM step: the reported dipole and energy are the midpoint
+    averages over the whole EM step and the amplitude its finite difference, as the
+    scalar driver builds them, so the batch must follow it to round-off.
+    """
+
+    xp = _array_module(backend)
+    fields = _fields(n_steps=12)
+    overrides = dict(dt_rtdftb_au=0.5 * _DT, ehrenfest=True, velocities=_VELOCITIES)
+    reference = _scalar_reference(fields, **overrides)
+    dipole, amplitude, energy, model = _run_batch(xp, fields, **overrides)
+    assert model.n_substeps == 2
+    model.close()
+
+    assert np.abs(dipole - reference[0]).max() < 1e-13
+    assert np.abs(amplitude - reference[1]).max() < 1e-12
+    assert np.abs(energy - reference[2]).max() < 1e-12
+    # and sub-stepping changed the trajectory against the single-step batch
+    single = _run_batch(xp, fields, ehrenfest=True, velocities=_VELOCITIES)
+    single[3].close()
+    assert np.abs(dipole - single[0]).max() > 1e-8
 
 
 @pytest.mark.core
@@ -265,11 +292,10 @@ def test_ehrenfest_systems_do_not_share_a_geometry(backend):
 @pytest.mark.core
 @pytest.mark.parametrize("ehrenfest", [False, True])
 def test_a_batch_of_one_runs_on_the_cpu_backend(ehrenfest):
-    """A batch of one system must be writable on the CPU backend, like any other batch.
+    """A batch of one system runs on the CPU backend like any other batch.
 
-    ``spread()`` broadcasts the template state over the batch; for one system the
-    broadcast view is already contiguous, so it must still be copied or the kernels
-    write into a read-only array.
+    The CPU backend is the scalar drivers themselves, one per system; a batch of one
+    must step, report and close exactly as a larger one does.
     """
     fields = _fields(n_steps=3, num=1)
     dipole, amplitude, energy, model = _run_batch(np, fields, ehrenfest=ehrenfest)
@@ -509,14 +535,17 @@ def test_every_kernel_avoids_cuda_hostile_constructs():
     once, in ``sk_interpolate``.
     """
 
-    kernels = dftb_mod.kernels_dftb.KERNELS
+    kernels = dftb_mod.jit.KERNELS
     assert len(kernels) > 50, "the kernel registry looks empty"
 
     forbidden = {
         "two-argument min()/max()": r"\b(?:min|max)\(\s*[^)\n]*,",
         "allocation inside a kernel": r"\bnp\.(?:zeros|empty|array|ones)\s*\(",
         "linear algebra call": r"\bnp\.linalg\.",
-        "module-attribute kernel call": r"\b(?:sk_deriv|h0_overlap|scc|forces|rt)\.\w+\(",
+        "module-attribute kernel call": (
+            r"\b(?:jit|skfiles|dftb_params|h0_overlap|sk_deriv|scc|forces|rt"
+            r"|dynamics|kernels_gpu)\.\w+\("
+        ),
     }
     offenders = []
     for name, body in sorted(kernels.items()):
@@ -532,8 +561,8 @@ def test_every_kernel_builds_for_cuda():
     """Every registered body must also compile as a CUDA device function."""
 
     _array_module("cupy")  # skips when there is no device
-    device = dftb_mod.kernels_dftb.device_kernels()
-    assert set(device) == set(dftb_mod.kernels_dftb.KERNELS)
+    device = dftb_mod.jit.device_kernels()
+    assert set(device) == set(dftb_mod.jit.KERNELS)
 
 
 @pytest.mark.core
@@ -647,10 +676,10 @@ def test_gpu_init_defaults_on_for_cuda_and_off_for_numpy():
     cupy = _array_module("cupy")
     fields = _fields(n_steps=2)
     auto = _run_batch(cupy, fields, gpu_init=None)
-    assert auto[3]._gpu_layout is not None  # the GPU initialization ran
+    assert auto[3]._gpu_initialized  # the GPU initialization ran
     auto[3].close()
     plain = _run_batch(np, fields, gpu_init=None)
-    assert plain[3]._gpu_layout is None  # the numpy backend never uses it
+    assert not plain[3]._gpu_initialized  # the numpy backend never uses it
     plain[3].close()
 
 

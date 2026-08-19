@@ -2,6 +2,7 @@
 # Copyright (c) 2026 MaxwellLink                                                        #
 # This file is part of MaxwellLink. Repository: https://github.com/TaoELi/MaxwellLink   #
 # If you use this code, always credit and cite arXiv:2512.06173.                        #
+# See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
 """
@@ -18,21 +19,30 @@ per step but does not match DFTB+ exactly. Plain ``cayley`` is kept for comparis
 with the SCC charge feedback it is first order and can be unstable.
 
 Every kernel here is a scalar loop over pre-allocated scratch, so the same body compiles
-for the CPU and for the GPU.
+for the CPU and for the GPU; :class:`RTState` is one system's electronic state at a
+geometry, with the matrices and the working arrays a step needs.
 """
 
 import math
 
 import numpy as np
 
-try:  # inside the package
-    from .h0_overlap import build_h0_overlap
-    from .kernels_dftb import kernel
-    from .scc import build_gamma, repulsive_total, scc_hamiltonian, scc_potential
-except (ImportError, ValueError):  # allow running as a stand-alone script
-    from h0_overlap import build_h0_overlap
-    from kernels_dftb import kernel
-    from scc import build_gamma, repulsive_total, scc_hamiltonian, scc_potential
+from .h0_overlap import build_h0_overlap_kernel, pair_scratch
+from .jit import kernel
+from .scc import (
+    atom_charges,
+    band_energy,
+    build_gamma,
+    dipole_from_charges,
+    external_energy,
+    orbital_charges,
+    orbital_potentials,
+    repulsive_sum,
+    scc_energy,
+    scc_hamiltonian,
+    scc_potential,
+    shell_charges,
+)
 
 
 # ---------------------------------------------------------------------------- #
@@ -192,57 +202,8 @@ def kick_density(
 
 
 # ---------------------------------------------------------------------------- #
-# observables                                                                  #
+# diagnostics                                                                  #
 # ---------------------------------------------------------------------------- #
-@kernel
-def rt_orbital_charge(rho, overlap, mu, n):
-    """Mulliken gross population of one orbital, ``Re[(S rho)_mu,mu]``."""
-
-    total = 0.0
-    for nu in range(n):
-        total += rho[nu, mu].real * overlap[nu, mu]
-    return total
-
-
-@kernel
-def rt_orbital_charges(rho, overlap, q_orb, n):
-    """Mulliken gross populations of a complex density, ``q_mu = Re[(S rho)_mu,mu]``."""
-
-    for mu in range(n):
-        q_orb[mu] = rt_orbital_charge(rho, overlap, mu, n)
-
-
-@kernel
-def atom_charges(q_orb, q0_orb, orb_atom, dq_atom, n, n_atom):
-    """Per-atom electron excess ``dq_A = sum_{mu in A} (q_mu - q0_mu)``."""
-
-    for a in range(n_atom):
-        dq_atom[a] = 0.0
-    for mu in range(n):
-        dq_atom[orb_atom[mu]] += q_orb[mu] - q0_orb[mu]
-
-
-@kernel
-def shell_charges_from_orbital(q_orb, q0_orb, orb_shell, dq_shell, n, n_shell):
-    """Per-shell electron excess; the SCC potential is shell resolved, not atom resolved."""
-
-    for i in range(n_shell):
-        dq_shell[i] = 0.0
-    for mu in range(n):
-        dq_shell[orb_shell[mu]] += q_orb[mu] - q0_orb[mu]
-
-
-@kernel
-def rt_dipole(dq_atom, coords, dipole, n_atom):
-    """Dipole in atomic units, ``mu = -sum_A R_A dq_A`` (timeprop.F90:2148)."""
-
-    for k in range(3):
-        dipole[k] = 0.0
-    for a in range(n_atom):
-        for k in range(3):
-            dipole[k] -= coords[a, k] * dq_atom[a]
-
-
 @kernel
 def trace_overlap(rho, overlap, n):
     """``Tr(rho S)``, the electron count the propagator must conserve."""
@@ -267,70 +228,6 @@ def idempotency_error(rho, overlap, work_a, work_b, n):
             if deviation > worst:
                 worst = deviation
     return worst
-
-
-# ---------------------------------------------------------------------------- #
-# the instantaneous Hamiltonian                                                #
-# ---------------------------------------------------------------------------- #
-@kernel
-def external_potential(coords, field, shell_atom, v_shell, n_shell):
-    """
-    Add the external-field potential ``V_A = +R_A . E(t)`` to the shell potential.
-
-    A per-atom scalar, shell independent, exactly as ``updateH`` builds it
-    (timeprop.F90:1675); it then folds into H through the same
-    ``0.5 S (V_mu + V_nu)`` as the SCC shift.
-    """
-
-    for i in range(n_shell):
-        atom = shell_atom[i]
-        v_shell[i] += (
-            coords[atom, 0] * field[0]
-            + coords[atom, 1] * field[1]
-            + coords[atom, 2] * field[2]
-        )
-
-
-@kernel
-def band_energy_row(rho, h0, mu, n):
-    """Row ``mu`` of ``Tr(rho H0)``."""
-
-    total = 0.0
-    for nu in range(n):
-        total += rho[mu, nu].real * h0[mu, nu]
-    return total
-
-
-@kernel
-def band_energy(rho, h0, n):
-    """``Tr(rho H0)``, the non-SCC part of the electronic energy."""
-
-    total = 0.0
-    for mu in range(n):
-        total += band_energy_row(rho, h0, mu, n)
-    return total
-
-
-@kernel
-def scc_energy(v_scc_shell, dq_shell, n_shell):
-    """SCC double-counting energy ``0.5 sum_i V_i dq_i`` (scc.F90:664-693)."""
-
-    total = 0.0
-    for i in range(n_shell):
-        total += v_scc_shell[i] * dq_shell[i]
-    return 0.5 * total
-
-
-@kernel
-def external_energy(dq_atom, coords, field, n_atom):
-    """Energy of the excess charges in the external field, ``sum_A dq_A R_A . E``."""
-
-    total = 0.0
-    for a in range(n_atom):
-        total += dq_atom[a] * (
-            coords[a, 0] * field[0] + coords[a, 1] * field[1] + coords[a, 2] * field[2]
-        )
-    return total
 
 
 # ---------------------------------------------------------------------------- #
@@ -392,7 +289,7 @@ def leapfrog_step(rho_old, rho, h, s_inv, d, step, h1, t1, work, n):
 
 
 # ---------------------------------------------------------------------------- #
-# one system's real-time state                                               #
+# one system's real-time state                                                 #
 # ---------------------------------------------------------------------------- #
 class RTState:
     """
@@ -405,16 +302,30 @@ class RTState:
         Ehrenfest driver, so this object owns the current geometry.
     ground : scc.SCCResult
         Converged ground state at the initial geometry; supplies the initial density
-        matrix, the gamma matrix and the shell layout.
+        matrix and the shell layout.
 
     Attributes
     ----------
-    rho : numpy.ndarray of complex, shape (n_orb, n_orb)
-        The density matrix at the current time.
+    rho, rho_old : numpy.ndarray of complex, shape (n_orb, n_orb)
+        The density matrix at the current time and the leapfrog's previous one.
+    h0, overlap, s_inv : numpy.ndarray of float, shape (n_orb, n_orb)
+        Non-SCC Hamiltonian, overlap and its inverse at the current geometry.
+    gamma : numpy.ndarray of float, shape (n_shell, n_shell)
+        Shell-pair interaction matrix at the current geometry.
+    e_repulsive : float
+        Repulsive energy at the current geometry.
     h : numpy.ndarray of float, shape (n_orb, n_orb)
         The Hamiltonian built from the current charges, geometry and field.
-    dipole : numpy.ndarray of float, shape (3,)
-        Dipole moment in atomic units.
+    coupling : numpy.ndarray of float, shape (n_orb, n_orb)
+        The non-adiabatic coupling ``D``, non-zero only with moving nuclei.
+    q_orb, dq_atom, dq_shell : numpy.ndarray of float
+        Gross orbital populations and the atomic and shell charge excess.
+    v_scc_shell, v_orb : numpy.ndarray of float
+        SCC shell potential, and the orbital potential including the field.
+    dipole, field : numpy.ndarray of float, shape (3,)
+        Dipole moment and the field of the last Hamiltonian, in atomic units.
+    scratch : h0_overlap.PairScratch
+        Working arrays of the pair kernels.
     """
 
     def __init__(self, system, ground):
@@ -424,26 +335,31 @@ class RTState:
         self.n_orb = n
         self.n_atom = system.n_atom
         self.n_shell = self.layout.n_shell
+        self.scratch = pair_scratch()
 
+        # geometry-dependent matrices, filled by refresh_geometry()
         self.h0 = np.zeros((n, n))
         self.overlap = np.zeros((n, n))
         self.s_inv = np.zeros((n, n))
         self.gamma = np.zeros((self.n_shell, self.n_shell))
-        self.h = np.zeros((n, n))
-        self.coupling = np.zeros((n, n))  # D, non-zero only with moving nuclei
+        self.e_repulsive = 0.0
 
+        # the density, the Hamiltonian and the coupling
         self.rho = np.zeros((n, n), dtype=np.complex128)
         self.rho_old = np.zeros((n, n), dtype=np.complex128)
+        self.h = np.zeros((n, n))
+        self.coupling = np.zeros((n, n))
 
+        # charges, potentials, dipole and the field of the last Hamiltonian
         self.q_orb = np.zeros(n)
         self.dq_atom = np.zeros(self.n_atom)
         self.dq_shell = np.zeros(self.n_shell)
-        self.v_shell = np.zeros(self.n_shell)
         self.v_scc_shell = np.zeros(self.n_shell)
         self.v_orb = np.zeros(n)
         self.dipole = np.zeros(3)
         self.field = np.zeros(3)
 
+        # work arrays of the propagators and the kick
         self._phase = np.zeros(n)
         self._pivot = np.zeros(n, dtype=np.int64)
         self._work_r = np.zeros((n, n))
@@ -459,79 +375,66 @@ class RTState:
 
     # -- geometry-dependent matrices ------------------------------------------
     def refresh_geometry(self):
-        """Rebuild H0, S, S^-1 and gamma at the current coordinates (``updateH0S``)."""
+        """Rebuild H0, S, S^-1, gamma and E_rep at the current coordinates (``updateH0S``)."""
 
-        h0, overlap = build_h0_overlap(self.system)
-        self.h0 = h0
-        self.overlap = overlap
-        lu_invert(overlap, self.n_orb, self._work_r, self._pivot, self.s_inv)
+        system = self.system
+        build_h0_overlap_kernel(
+            system.tables,
+            system.coords,
+            system.atom_species,
+            system.atom_offset,
+            system.n_atom,
+            self.h0,
+            self.overlap,
+            self.scratch,
+        )
+        lu_invert(self.overlap, self.n_orb, self._work_r, self._pivot, self.s_inv)
         build_gamma(
-            self.system.coords,
-            self.layout.shell_atom,
-            self.layout.shell_u,
-            self.gamma,
+            system.coords, self.layout.shell_atom, self.layout.shell_u, self.gamma
+        )
+        self.e_repulsive = repulsive_sum(
+            system.tables,
+            system.coords,
+            system.atom_species,
+            system.n_atom,
+            self.scratch.pair,
         )
 
     # -- charges, dipole, Hamiltonian -----------------------------------------
     def update_charges(self):
         """Mulliken charges and dipole of the current density (``getChargeDipole``)."""
 
-        rt_orbital_charges(self.rho, self.overlap, self.q_orb, self.n_orb)
-        atom_charges(
-            self.q_orb,
-            self.layout.q0_orb,
-            self.layout.orb_atom,
-            self.dq_atom,
-            self.n_orb,
-            self.n_atom,
-        )
-        shell_charges_from_orbital(
-            self.q_orb,
-            self.layout.q0_orb,
-            self.layout.orb_shell,
-            self.dq_shell,
-            self.n_orb,
-            self.n_shell,
-        )
-        rt_dipole(self.dq_atom, self.system.coords, self.dipole, self.n_atom)
+        layout = self.layout
+        orbital_charges(self.rho, self.overlap, self.q_orb, self.n_orb)
+        atom_charges(self.q_orb, layout.q0_orb, layout.orb_atom, self.dq_atom)
+        shell_charges(self.q_orb, layout.q0_orb, layout.orb_shell, self.dq_shell)
+        dipole_from_charges(self.dq_atom, self.system.coords, self.dipole)
 
     def update_hamiltonian(self, field=None):
         """Rebuild H from the instantaneous charges and field (``updateH``)."""
 
-        if field is None:
-            self.field[:] = 0.0
-        else:
-            self.field[:] = field
-        scc_potential(
-            self.gamma,
-            self.dq_shell,
-            self.layout.orb_shell,
+        self.field[:] = 0.0 if field is None else field
+        scc_potential(self.gamma, self.dq_shell, self.v_scc_shell)
+        orbital_potentials(
             self.v_scc_shell,
-            self.v_orb,
-        )
-        self.v_shell[:] = self.v_scc_shell
-        external_potential(
             self.system.coords,
             self.field,
-            self.layout.shell_atom,
-            self.v_shell,
-            self.n_shell,
+            self.layout.orb_shell,
+            self.layout.orb_atom,
+            self.v_orb,
         )
-        for mu in range(self.n_orb):
-            self.v_orb[mu] = self.v_shell[self.layout.orb_shell[mu]]
         scc_hamiltonian(self.h0, self.overlap, self.v_orb, self.h)
 
     # -- energies --------------------------------------------------------------
     def energies(self):
-        """Energy components in Hartree, matching ``calcEnergies`` for our scope."""
+        """Energy components ``(band, SCC, external, repulsive)`` in Hartree."""
 
-        e_band = band_energy(self.rho, self.h0, self.n_orb)
-        e_scc = scc_energy(self.v_scc_shell, self.dq_shell, self.n_shell)
-        e_ext = external_energy(
-            self.dq_atom, self.system.coords, self.field, self.n_atom
+        return (
+            band_energy(self.rho, self.h0, self.n_orb),
+            scc_energy(self.v_scc_shell, self.dq_shell),
+            external_energy(self.dq_atom, self.system.coords, self.field),
+            self.e_repulsive,
         )
-        e_rep = repulsive_total(self.system)
-        return e_band, e_scc, e_ext, e_rep
 
     # -- perturbation ----------------------------------------------------------
     def kick(self, kappa, pol_dir):
@@ -587,9 +490,8 @@ class RTState:
             )
             self.update_charges()
             self.update_hamiltonian(field)
-            for i in range(self.n_orb):
-                for j in range(self.n_orb):
-                    self.h[i, j] = 0.5 * (self._h_start[i, j] + self.h[i, j])
+            self.h += self._h_start
+            self.h *= 0.5
         cayley_operator(
             overlap,
             self.h,

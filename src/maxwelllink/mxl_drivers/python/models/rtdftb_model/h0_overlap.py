@@ -2,6 +2,7 @@
 # Copyright (c) 2026 MaxwellLink                                                        #
 # This file is part of MaxwellLink. Repository: https://github.com/TaoELi/MaxwellLink   #
 # If you use this code, always credit and cite arXiv:2512.06173.                        #
+# See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
 """
@@ -23,28 +24,74 @@ from collections import namedtuple
 
 import numpy as np
 
-try:  # inside the package
-    from .kernels_dftb import kernel
-    from .dftb_params import (
-        DELTA_R,
-        DIST_FUDGE,
-        MAX_INTEGRAL,
-        MAX_ORB,
-        N_INTERPOLATION,
-        N_RIGHT,
-    )
-except (ImportError, ValueError):  # allow running as a stand-alone script
-    from kernels_dftb import kernel
-    from dftb_params import (
-        DELTA_R,
-        DIST_FUDGE,
-        MAX_INTEGRAL,
-        MAX_ORB,
-        N_INTERPOLATION,
-        N_RIGHT,
-    )
+from .dftb_params import (
+    DELTA_R,
+    DIST_FUDGE,
+    MAX_INTEGRAL,
+    MAX_ORB,
+    N_INTERPOLATION,
+    N_RIGHT,
+)
+from .jit import kernel
 
 SQRT3 = math.sqrt(3.0)
+
+
+# ---------------------------------------------------------------------------- #
+# the working arrays of every pair kernel                                      #
+# ---------------------------------------------------------------------------- #
+#: Name and shape of every working array a pair kernel may need, in one pack. Neither
+#: numba target allows an allocation inside a device function, so the kernels that walk
+#: atom pairs (``H0``/``S`` assembly, the band gradient, the non-adiabatic coupling)
+#: take a :data:`PairScratch` they index by field; one pack serves all three, so the
+#: CPU allocates it once per state and a CUDA thread builds its own in local memory
+#: (:mod:`kernels_gpu`) from these same shapes.
+#:
+#: ``sk_h``, ``sk_s``, ``dsk_h``, ``dsk_s``
+#:     Interpolated H and S integrals of one pair and their radial derivatives.
+#: ``block_h``, ``block_s``
+#:     The two rotated diatomic blocks; ``core`` the elementary shell-pair block.
+#: ``node``, ``cc``, ``dd``, ``delta``, ``y_low``, ``y_high``
+#:     Work arrays of the value-only interpolation :func:`sk_interpolate`.
+#: ``weight``, ``first``, ``second``
+#:     Lagrange weights and their two derivatives of :func:`sk_deriv.sk_interpolate_deriv`.
+#: ``d_h0``, ``d_overlap``, ``radial``, ``angular``, ``dcore``
+#:     The Cartesian derivative blocks and the work arrays of
+#:     :func:`sk_deriv.block_derivatives`.
+#: ``pair``
+#:     ``(V, dV/dr)`` of one repulsive spline evaluation.
+PAIR_SCRATCH_SHAPES = (
+    ("sk_h", (MAX_INTEGRAL,)),
+    ("sk_s", (MAX_INTEGRAL,)),
+    ("dsk_h", (MAX_INTEGRAL,)),
+    ("dsk_s", (MAX_INTEGRAL,)),
+    ("block_h", (MAX_ORB, MAX_ORB)),
+    ("block_s", (MAX_ORB, MAX_ORB)),
+    ("core", (5, 5)),
+    ("node", (N_INTERPOLATION,)),
+    ("cc", (N_INTERPOLATION,)),
+    ("dd", (N_INTERPOLATION,)),
+    ("delta", (N_INTERPOLATION - 1,)),
+    ("y_low", (MAX_INTEGRAL,)),
+    ("y_high", (MAX_INTEGRAL,)),
+    ("weight", (N_INTERPOLATION,)),
+    ("first", (N_INTERPOLATION,)),
+    ("second", (N_INTERPOLATION,)),
+    ("d_h0", (3, MAX_ORB, MAX_ORB)),
+    ("d_overlap", (3, MAX_ORB, MAX_ORB)),
+    ("radial", (MAX_ORB, MAX_ORB)),
+    ("angular", (3, MAX_ORB, MAX_ORB)),
+    ("dcore", (3, 5, 5)),
+    ("pair", (2,)),
+)
+
+PairScratch = namedtuple("PairScratch", [name for name, _ in PAIR_SCRATCH_SHAPES])
+
+
+def pair_scratch():
+    """Allocate one host :data:`PairScratch` (NumPy arrays, all zero)."""
+
+    return PairScratch(*[np.zeros(shape) for _, shape in PAIR_SCRATCH_SHAPES])
 
 
 # ---------------------------------------------------------------------------- #
@@ -101,7 +148,7 @@ def poly5_to_zero(y0, y0p, y0pp, x, dx, inv_dx):
 
 
 @kernel
-def sk_interpolate(table, n_grid, grid_dist, n_integral, r, out, scratch):
+def sk_interpolate(table, n_grid, grid_dist, n_integral, r, out, s):
     """
     Interpolate one pair's radial Slater-Koster table at distance ``r``.
 
@@ -120,12 +167,12 @@ def sk_interpolate(table, n_grid, grid_dist, n_integral, r, out, scratch):
         Interatomic distance in Bohr.
     out : numpy.ndarray of float, shape (>= n_integral,)
         Receives the integrals; zeroed first, so padded columns stay clean.
-    scratch : tuple of numpy.ndarray
-        ``(node, cc, dd, delta, y_low, y_high)`` working arrays of sizes 8, 8, 8, 7,
-        ``MAX_INTEGRAL`` and ``MAX_INTEGRAL``.
+    s : PairScratch
+        Working arrays; ``node``, ``cc``, ``dd``, ``delta``, ``y_low`` and ``y_high``
+        are used.
     """
 
-    node, cc, dd, delta, y_low, y_high = scratch
+    node, cc, dd, delta, y_low, y_high = s.node, s.cc, s.dd, s.delta, s.y_low, s.y_high
     for c in range(n_integral):
         out[c] = 0.0
 
@@ -426,24 +473,6 @@ def rotate_block(sk, ll, mm, nn, ang_a, n_shell_a, ang_b, n_shell_b, block, core
 # ---------------------------------------------------------------------------- #
 # dense assembly                                                               #
 # ---------------------------------------------------------------------------- #
-#: Every working array :func:`build_h0_overlap_kernel` needs, so that the kernel itself
-#: allocates nothing -- neither numba target allows an allocation inside a device
-#: function, and on the CPU this also keeps the per-step cost free of malloc traffic.
-#:
-#: ``sk_h``, ``sk_s``
-#:     Interpolated radial integrals of one pair, ``MAX_INTEGRAL`` long.
-#: ``block_h``, ``block_s``
-#:     The two rotated ``(MAX_ORB, MAX_ORB)`` diatomic blocks.
-#: ``core``
-#:     ``(5, 5)`` scratch of the elementary shell-pair blocks, shared by both rotations.
-#: ``node``, ``cc``, ``dd``, ``delta``, ``y_low``, ``y_high``
-#:     The six interpolation work arrays that :func:`sk_interpolate` takes as its
-#:     ``scratch`` tuple, of sizes 8, 8, 8, 7, ``MAX_INTEGRAL`` and ``MAX_INTEGRAL``.
-H0Scratch = namedtuple(
-    "H0Scratch", "sk_h sk_s block_h block_s core node cc dd delta y_low y_high"
-)
-
-
 @kernel
 def h0_overlap_onsite(sk, atom_species, atom_offset, atom, h0, overlap):
     """
@@ -467,7 +496,7 @@ def h0_overlap_pair(sk, coords, atom_species, atom_offset, a, b, h0, overlap, s)
 
     Atom ``a`` supplies the columns and atom ``b`` the rows, matching the DFTB+
     neighbour list, which stores ``iAt2 >= iAt1``. Pairs touch disjoint blocks, so
-    they may be assembled in any order or in parallel. ``s`` is an :data:`H0Scratch`.
+    they may be assembled in any order or in parallel. ``s`` is a :data:`PairScratch`.
     """
 
     sp_a = atom_species[a]
@@ -494,7 +523,7 @@ def h0_overlap_pair(sk, coords, atom_species, atom_offset, a, b, h0, overlap, s)
         n_integral,
         dist,
         s.sk_h,
-        (s.node, s.cc, s.dd, s.delta, s.y_low, s.y_high),
+        s,
     )
     sk_interpolate(
         sk.tab_s[pair],
@@ -503,7 +532,7 @@ def h0_overlap_pair(sk, coords, atom_species, atom_offset, a, b, h0, overlap, s)
         n_integral,
         dist,
         s.sk_s,
-        (s.node, s.cc, s.dd, s.delta, s.y_low, s.y_high),
+        s,
     )
 
     rotate_block(
@@ -551,7 +580,7 @@ def build_h0_overlap_kernel(
     Parameters
     ----------
     sk : dftb_params.SKTables
-        The parameter set as plain arrays, from ``SlaterKosterSet.tables()``.
+        The parameter set as plain arrays, ``SlaterKosterSet.tables``.
     coords : numpy.ndarray of float, shape (n_atom, 3)
         Atomic positions in Bohr.
     atom_species : numpy.ndarray of int, shape (n_atom,)
@@ -563,8 +592,8 @@ def build_h0_overlap_kernel(
     h0, overlap : numpy.ndarray of float, shape (n_orb, n_orb)
         Receive the Hamiltonian in Hartree and the overlap; both are zeroed here, so
         they may come in uninitialised.
-    s : H0Scratch
-        Fixed-size working arrays; see :data:`H0Scratch`.
+    s : PairScratch
+        Working arrays; see :data:`PAIR_SCRATCH_SHAPES`.
     """
 
     # The pair loop writes only the blocks it touches and the on-site loop only the
@@ -583,34 +612,7 @@ def build_h0_overlap_kernel(
             h0_overlap_pair(sk, coords, atom_species, atom_offset, a, b, h0, overlap, s)
 
 
-#: The one :data:`H0Scratch` of this process, keyed by the sizes that fix its shapes.
-#: Ehrenfest dynamics rebuilds H0 and S at every new geometry, so the wrapper below must
-#: not allocate this scratch per call.
-_SCRATCH_CACHE = {}
-
-
-def _h0_scratch():
-    """Return the shared assembly scratch, allocating it on first use."""
-
-    key = (MAX_INTEGRAL, MAX_ORB, N_INTERPOLATION)
-    if key not in _SCRATCH_CACHE:
-        _SCRATCH_CACHE[key] = H0Scratch(
-            np.zeros(MAX_INTEGRAL),
-            np.zeros(MAX_INTEGRAL),
-            np.zeros((MAX_ORB, MAX_ORB)),
-            np.zeros((MAX_ORB, MAX_ORB)),
-            np.zeros((5, 5)),
-            np.zeros(N_INTERPOLATION),
-            np.zeros(N_INTERPOLATION),
-            np.zeros(N_INTERPOLATION),
-            np.zeros(N_INTERPOLATION - 1),
-            np.zeros(MAX_INTEGRAL),
-            np.zeros(MAX_INTEGRAL),
-        )
-    return _SCRATCH_CACHE[key]
-
-
-def build_h0_overlap(system):
+def build_h0_overlap(system, scratch=None):
     """
     Build the dense non-SCC Hamiltonian and overlap of one system.
 
@@ -618,6 +620,8 @@ def build_h0_overlap(system):
     ----------
     system : dftb_params.DFTBSystem
         Geometry and basis layout, carrying the parameter set it was built on.
+    scratch : PairScratch, optional
+        Working arrays to reuse; a fresh pack is allocated when not given.
 
     Returns
     -------
@@ -632,13 +636,13 @@ def build_h0_overlap(system):
     h0 = np.empty((n_orb, n_orb))
     overlap = np.empty((n_orb, n_orb))
     build_h0_overlap_kernel(
-        system.sk_set.tables(),
+        system.tables,
         system.coords,
         system.atom_species,
         system.atom_offset,
         system.n_atom,
         h0,
         overlap,
-        _h0_scratch(),
+        scratch if scratch is not None else pair_scratch(),
     )
     return h0, overlap

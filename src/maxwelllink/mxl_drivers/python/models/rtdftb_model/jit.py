@@ -6,13 +6,16 @@
 # --------------------------------------------------------------------------------------#
 
 """
-Compilation of the DFTB scalar-loop kernels, for the CPU and for the GPU.
+Compilation of the DFTB scalar-loop kernel bodies, once for the CPU and once for the GPU.
 
-The kernel bodies live next to the physics they belong to; this module only compiles
-them. :func:`kernel` registers a body and returns its ``numba.njit`` form.
-:func:`device_kernels` rebuilds every registered body against a patched copy of its
-module globals, so kernels that call other kernels resolve to the CUDA versions. One body
-serves both targets, and they cannot drift apart.
+This module holds no physics: the kernel bodies live next to the physics they belong to
+(:mod:`h0_overlap`, :mod:`scc`, :mod:`forces`, ...), and this is the mechanism that turns
+each body into both targets. :func:`kernel` registers a body and returns its
+``numba.njit`` form, which the scalar driver runs. :func:`device_kernels` rebuilds every
+registered body against a patched copy of its module globals, so kernels that call other
+kernels resolve to the CUDA versions; :mod:`kernels_gpu` composes those device functions
+into the CUDA kernels of the batched step. One body serves both targets, and they cannot
+drift apart.
 
 The one rule this imposes: a kernel may call another only by bare name, never through a
 module attribute, or the call would resolve to the CPU version on the GPU.

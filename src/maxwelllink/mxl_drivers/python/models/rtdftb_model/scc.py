@@ -2,15 +2,25 @@
 # Copyright (c) 2026 MaxwellLink                                                        #
 # This file is part of MaxwellLink. Repository: https://github.com/TaoELi/MaxwellLink   #
 # If you use this code, always credit and cite arXiv:2512.06173.                        #
+# See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
 """
 Self-consistent-charge (SCC) ground state on top of the non-SCC Hamiltonian.
 
 The SCC correction adds one number per shell to the Hamiltonian, the electrostatic
-potential of every other shell's Mulliken charge fluctuation. :func:`scf` iterates
+potential of every other shell's Mulliken charge fluctuation. :func:`scc_loop` iterates
 charges -> potential -> Hamiltonian -> eigenvectors -> charges, with DIIS mixing, until
-the charges stop moving.
+the charges stop moving; :func:`scf` is the host-side convenience around it.
+
+The loop is written once against an array module ``xp`` (``numpy`` or ``cupy``): the
+dense linear algebra -- a Cholesky factorisation, an inversion, a symmetric eigensolve --
+runs wherever the matrices live, while the small serial pieces (the Fermi filling, the
+shell charges, the DIIS mixer) run on the host. The scalar driver calls it with NumPy
+matrices; the GPU batch driver calls it once per system with CuPy matrices.
+
+The compiled kernels here are the charge, potential, Hamiltonian and energy pieces a
+real-time step needs as well; they take a real or a complex density alike.
 
 Two conventions are worth stating once. ``dq = q - q0`` counts *excess electrons*, so
 an atom that gained electrons has a positive ``dq``; and the electronic temperature is
@@ -19,18 +29,15 @@ the reported energy is the free energy ``E - TS``.
 """
 
 import math
-from collections import namedtuple
-
 import os
+from collections import namedtuple
+from dataclasses import dataclass
 
 import numpy as np
 
-try:  # inside the package
-    from .kernels_dftb import kernel
-    from .skfiles import repulsive_pair
-except (ImportError, ValueError):  # allow running as a stand-alone script
-    from kernels_dftb import kernel
-    from skfiles import repulsive_pair
+from .dftb_params import ShellLayout
+from .jit import kernel
+from .skfiles import repulsive_pair
 
 # accuracy.F90:69, 110, 106, 64 -- the tolerances the branch structure keys on.
 TOL_SAME_DIST = 1.0e-5
@@ -46,6 +53,14 @@ FERMI_CUT = 40.0
 
 # The guard DFTB+ puts on the entropy logarithms, epsilon(1.0_dp) at etemp.F90:479.
 EPSILON = 2.220446049250313e-16
+
+#: Two-phase SCF (``hybrid_precision``): iterate in FP32 until the charge error drops
+#: below this floor, then finish in FP64 to the requested tolerance. Single-precision
+#: eigenvectors floor the Mulliken error at ~1e-6, so the switch sits safely above it.
+SCF_FP32_SWITCH = 1.0e-5
+#: FP32 iterations without a factor-of-two error reduction before the FP64 phase is
+#: forced -- degenerate frontier orbitals (metals) can stall the FP32 phase.
+SCF_FP32_STALL = 8
 
 
 # ---------------------------------------------------------------------------- #
@@ -127,87 +142,6 @@ def exp_gamma_prime(r, u_a, u_b):
     return _gamma_sub_prime(r, tau_a, tau_b) + _gamma_sub_prime(r, tau_b, tau_a)
 
 
-# ---------------------------------------------------------------------------- #
-# shell bookkeeping                                                            #
-# ---------------------------------------------------------------------------- #
-#: The plain arrays of a :class:`ShellLayout`, i.e. the shell-resolved half of a
-#: kernel's arguments, the way :data:`dftb_params.SKTables` is the parameter-set half.
-#: ``n_shell`` is not a field: a kernel reads it off ``shell_atom.shape[0]``.
-ShellArrays = namedtuple("ShellArrays", "shell_atom shell_u orb_shell orb_atom q0_orb")
-
-
-class ShellLayout:
-    """
-    Flat shell list of one system: which atom each shell belongs to, its U, its
-    reference occupation, and the map from dense orbital index to shell index.
-
-    Parameters
-    ----------
-    system : dftb_params.DFTBSystem
-        Geometry and basis layout.
-    shell_resolved : bool
-        Whether every shell keeps its own Hubbard U. DFTB+ defaults to ``False``
-        (``ShellResolvedSCC = No``, parser.F90:1375), in which case every shell of a
-        species inherits the U of its s shell (parser.F90:3699). The difference is
-        invisible in 3ob, whose files list one U three times, but Ag and H in mio-1-1
-        really do carry three different values.
-
-    Attributes
-    ----------
-    n_shell : int
-        Total number of shells in the system.
-    shell_atom : numpy.ndarray of int, shape (n_shell,)
-        Atom index owning each shell.
-    shell_u : numpy.ndarray of float, shape (n_shell,)
-        Hubbard U of each shell in Hartree.
-    orb_shell : numpy.ndarray of int, shape (n_orb,)
-        Shell index owning each dense orbital.
-    orb_atom : numpy.ndarray of int, shape (n_orb,)
-        Atom index owning each dense orbital.
-    q0_orb : numpy.ndarray of float, shape (n_orb,)
-        Free-atom reference population of each orbital, the shell occupation spread
-        evenly over its ``2 * l + 1`` members (sccinit.F90:132).
-    """
-
-    def __init__(self, system, shell_resolved=False):
-        sk_set = system.sk_set
-        shell_atom = []
-        shell_u = []
-        orb_shell = []
-        orb_atom = []
-        q0_orb = []
-        for atom in range(system.n_atom):
-            sp = system.atom_species[atom]
-            for i_shell in range(sk_set.n_shell[sp]):
-                ang = sk_set.ang_shell[sp, i_shell]
-                shell_atom.append(atom)
-                if shell_resolved:
-                    shell_u.append(sk_set.hubbard_u_shell[sp, i_shell])
-                else:
-                    shell_u.append(sk_set.hubbard_u[sp])
-                for _ in range(2 * ang + 1):
-                    orb_shell.append(len(shell_atom) - 1)
-                    orb_atom.append(atom)
-                    q0_orb.append(sk_set.occupation[sp, i_shell] / (2 * ang + 1))
-        self.n_shell = len(shell_atom)
-        self.shell_atom = np.array(shell_atom, dtype=np.int64)
-        self.shell_u = np.array(shell_u)
-        self.orb_shell = np.array(orb_shell, dtype=np.int64)
-        self.orb_atom = np.array(orb_atom, dtype=np.int64)
-        self.q0_orb = np.array(q0_orb)
-
-    def arrays(self):
-        """Return this layout as a :data:`ShellArrays` pack of plain arrays."""
-
-        return ShellArrays(
-            self.shell_atom,
-            self.shell_u,
-            self.orb_shell,
-            self.orb_atom,
-            self.q0_orb,
-        )
-
-
 @kernel
 def gamma_element(coords, shell_atom, shell_u, i, j):
     """
@@ -240,30 +174,64 @@ def build_gamma(coords, shell_atom, shell_u, gamma):
 
 
 # ---------------------------------------------------------------------------- #
-# charges, potential, Hamiltonian                                              #
+# charges and the dipole                                                       #
 # ---------------------------------------------------------------------------- #
 @kernel
-def mulliken_charges(rho, overlap, q):
-    """Gross orbital populations, ``q[mu] = sum_nu rho[mu, nu] * S[mu, nu]``."""
+def orbital_charge(rho, overlap, mu, n):
+    """Mulliken gross population of one orbital, ``Re[(S rho)_mu,mu]``.
 
-    n_orb = q.shape[0]
-    for mu in range(n_orb):
-        total = 0.0
-        for nu in range(n_orb):
-            total += rho[mu, nu] * overlap[mu, nu]
-        q[mu] = total
+    ``rho`` may be the real ground-state density or the complex real-time one; the
+    imaginary part never enters a population.
+    """
+
+    total = 0.0
+    for nu in range(n):
+        total += rho[nu, mu].real * overlap[nu, mu]
+    return total
 
 
 @kernel
-def shell_charges(q, q0_orb, orb_shell, dq_shell):
-    """Sum the per-orbital excess electron count ``q - q0`` onto shells."""
+def orbital_charges(rho, overlap, q_orb, n):
+    """Mulliken gross populations of every orbital, ``q_mu = Re[(S rho)_mu,mu]``."""
+
+    for mu in range(n):
+        q_orb[mu] = orbital_charge(rho, overlap, mu, n)
+
+
+@kernel
+def shell_charges(q_orb, q0_orb, orb_shell, dq_shell):
+    """Per-shell electron excess ``dq_i = sum_{mu in i} (q_mu - q0_mu)``."""
 
     for i in range(dq_shell.shape[0]):
         dq_shell[i] = 0.0
-    for mu in range(q.shape[0]):
-        dq_shell[orb_shell[mu]] += q[mu] - q0_orb[mu]
+    for mu in range(q_orb.shape[0]):
+        dq_shell[orb_shell[mu]] += q_orb[mu] - q0_orb[mu]
 
 
+@kernel
+def atom_charges(q_orb, q0_orb, orb_atom, dq_atom):
+    """Per-atom electron excess ``dq_A = sum_{mu in A} (q_mu - q0_mu)``."""
+
+    for a in range(dq_atom.shape[0]):
+        dq_atom[a] = 0.0
+    for mu in range(q_orb.shape[0]):
+        dq_atom[orb_atom[mu]] += q_orb[mu] - q0_orb[mu]
+
+
+@kernel
+def dipole_from_charges(dq_atom, coords, dipole):
+    """Dipole in atomic units, ``mu = -sum_A R_A dq_A`` (timeprop.F90:2148)."""
+
+    for k in range(3):
+        dipole[k] = 0.0
+    for a in range(dq_atom.shape[0]):
+        for k in range(3):
+            dipole[k] -= coords[a, k] * dq_atom[a]
+
+
+# ---------------------------------------------------------------------------- #
+# potential and Hamiltonian                                                    #
+# ---------------------------------------------------------------------------- #
 @kernel
 def scc_potential_row(gamma, dq_shell, v_shell, i):
     """Row ``i`` of the shell potential ``V = gamma . dq``."""
@@ -275,14 +243,39 @@ def scc_potential_row(gamma, dq_shell, v_shell, i):
 
 
 @kernel
-def scc_potential(gamma, dq_shell, orb_shell, v_shell, v_orb):
-    """Electrostatic potential per shell and per orbital, ``V = gamma . dq``."""
+def scc_potential(gamma, dq_shell, v_shell):
+    """Electrostatic potential per shell, ``V = gamma . dq``."""
 
-    n_shell = dq_shell.shape[0]
-    for i in range(n_shell):
+    for i in range(dq_shell.shape[0]):
         scc_potential_row(gamma, dq_shell, v_shell, i)
-    for mu in range(orb_shell.shape[0]):
-        v_orb[mu] = v_shell[orb_shell[mu]]
+
+
+@kernel
+def orbital_potential(v_scc_shell, coords, field, orb_shell, orb_atom, mu):
+    """
+    Potential of one orbital: the SCC shell potential plus the external field's.
+
+    The external-field potential is ``V_A = +R_A . E(t)`` per atom, shell independent,
+    exactly as ``updateH`` builds it (timeprop.F90:1675); it folds into ``H`` through
+    the same ``0.5 S (V_mu + V_nu)`` as the SCC shift, so both are collected here.
+    """
+
+    atom = orb_atom[mu]
+    return v_scc_shell[orb_shell[mu]] + (
+        coords[atom, 0] * field[0]
+        + coords[atom, 1] * field[1]
+        + coords[atom, 2] * field[2]
+    )
+
+
+@kernel
+def orbital_potentials(v_scc_shell, coords, field, orb_shell, orb_atom, v_orb):
+    """Potential of every orbital, :func:`orbital_potential`; each is independent."""
+
+    for mu in range(v_orb.shape[0]):
+        v_orb[mu] = orbital_potential(
+            v_scc_shell, coords, field, orb_shell, orb_atom, mu
+        )
 
 
 @kernel
@@ -302,29 +295,79 @@ def scc_hamiltonian(h0, overlap, v_orb, h):
 
 
 # ---------------------------------------------------------------------------- #
-# eigenproblem and occupations                                                 #
+# energy terms                                                                 #
 # ---------------------------------------------------------------------------- #
-# :func:`solve_generalised`, :func:`diis_mix` and the :func:`scf` loop around them are
-# deliberately *not* kernels. They run once per geometry, never on the real-time step
-# path, and all their work is ``np.linalg`` -- a Cholesky factorisation, an inversion,
-# a symmetric eigensolve, a small linear solve -- which goes into multi-threaded LAPACK
-# and beats anything a hand-written scalar loop could do.
-def solve_generalised(h, overlap):
+@kernel
+def band_energy_row(rho, h0, mu, n):
+    """Row ``mu`` of ``Tr(rho H0)``."""
+
+    total = 0.0
+    for nu in range(n):
+        total += rho[mu, nu].real * h0[mu, nu]
+    return total
+
+
+@kernel
+def band_energy(rho, h0, n):
+    """``Tr(rho H0)``, the non-SCC part of the electronic energy."""
+
+    total = 0.0
+    for mu in range(n):
+        total += band_energy_row(rho, h0, mu, n)
+    return total
+
+
+@kernel
+def scc_energy(v_scc_shell, dq_shell):
+    """SCC double-counting energy ``0.5 sum_i V_i dq_i`` (scc.F90:664-693)."""
+
+    total = 0.0
+    for i in range(dq_shell.shape[0]):
+        total += v_scc_shell[i] * dq_shell[i]
+    return 0.5 * total
+
+
+@kernel
+def external_energy(dq_atom, coords, field):
+    """Energy of the excess charges in the external field, ``sum_A dq_A R_A . E``."""
+
+    total = 0.0
+    for a in range(dq_atom.shape[0]):
+        total += dq_atom[a] * (
+            coords[a, 0] * field[0] + coords[a, 1] * field[1] + coords[a, 2] * field[2]
+        )
+    return total
+
+
+@kernel
+def repulsive_sum(sk, coords, atom_species, n_atom, pair):
     """
-    Solve ``H c = eps S c`` through the Cholesky factor of the overlap.
+    Sum the repulsive pair potential over unordered atom pairs, in Hartree.
 
-    Returns the eigenvalues ascending and the eigenvectors as columns, normalised so
-    that ``C^T S C`` is the identity.
+    Every pair goes through :func:`skfiles.repulsive_pair`, the routine the *gradient*
+    uses too, so the energy and its derivative cannot come from two implementations
+    that drift apart. ``pair`` is its two-element ``(V, dV/dr)`` buffer.
     """
 
-    chol = np.linalg.cholesky(overlap)
-    inv_chol = np.linalg.inv(chol)
-    transformed = inv_chol @ h @ inv_chol.T
-    transformed = 0.5 * (transformed + transformed.T)
-    eigenvalues, vectors = np.linalg.eigh(transformed)
-    return eigenvalues, inv_chol.T @ vectors
+    total = 0.0
+    for a in range(n_atom):
+        for b in range(a + 1, n_atom):
+            e_pair, gx, gy, gz = repulsive_pair(sk, coords, atom_species, a, b, pair)
+            total += e_pair
+    return total
 
 
+def repulsive_total(system):
+    """Sum of the pair repulsive over unordered atom pairs of one system, in Hartree."""
+
+    return repulsive_sum(
+        system.tables, system.coords, system.atom_species, system.n_atom, np.zeros(2)
+    )
+
+
+# ---------------------------------------------------------------------------- #
+# occupations                                                                  #
+# ---------------------------------------------------------------------------- #
 @kernel
 def fermi_electron_count(eigenvalues, e_fermi, temperature):
     """Electrons held by the Fermi-Dirac occupations at ``e_fermi`` (etemp.F90:220)."""
@@ -451,113 +494,418 @@ def fermi_entropy(filling, temperature):
     return 2.0 * temperature * total
 
 
-@kernel
-def density_matrices(vectors, eigenvalues, filling):
-    """Density matrix ``sum_i f_i c_i c_i^T`` and its energy-weighted counterpart."""
-
-    rho = (vectors * filling) @ vectors.T
-    edm = (vectors * (filling * eigenvalues)) @ vectors.T
-    return rho, edm
-
-
-# ---------------------------------------------------------------------------- #
-# repulsive energy                                                             #
-# ---------------------------------------------------------------------------- #
-#: Scratch of :func:`repulsive_sum`; ``pair`` receives the ``(V, dV/dr)`` of one atom
-#: pair, of which only the value is used here.
-RepulsiveScratch = namedtuple("RepulsiveScratch", "pair")
-
-
-@kernel
-def repulsive_sum(sk, coords, atom_species, n_atom, scratch):
-    """
-    Sum the repulsive pair potential over unordered atom pairs, in Hartree.
-
-    Every pair goes through :func:`skfiles.repulsive_pair`, the routine the *gradient*
-    uses too, so the energy and its derivative cannot come from two implementations
-    that drift apart.
-    """
-
-    total = 0.0
-    for a in range(n_atom):
-        for b in range(a + 1, n_atom):
-            e_pair, gx, gy, gz = repulsive_pair(
-                sk, coords, atom_species, a, b, scratch.pair
-            )
-            total += e_pair
-    return total
-
-
-def repulsive_total(system):
-    """Sum of the pair repulsive over unordered atom pairs, in Hartree."""
-
-    # RTState.energies() calls this every real-time step, so the parameter pack and the
-    # two-element scratch are built once and kept on the system rather than per call.
-    cache = getattr(system, "_scc_repulsive_cache", None)
-    if cache is None:
-        cache = (system.sk_set.tables(), RepulsiveScratch(np.zeros(2)))
-        system._scc_repulsive_cache = cache
-    tables, scratch = cache
-    return repulsive_sum(
-        tables, system.coords, system.atom_species, system.n_atom, scratch
-    )
-
-
-# ---------------------------------------------------------------------------- #
-# charge mixing                                                                #
-# ---------------------------------------------------------------------------- #
-def diis_mix(history_in, history_residual, n_history, mixing, mixed):
-    """
-    Pulay (DIIS) mixing of the charge vector, the accelerator of the SCF loop.
-
-    ``history_in[i]`` is the charge vector fed into iteration ``i`` and
-    ``history_residual[i]`` the change the iteration produced. The mix is the
-    combination of the stored vectors whose residuals cancel best, which is the
-    least-squares problem ``min ||sum_i c_i r_i||`` under ``sum_i c_i = 1``. With one
-    stored vector it is plain linear mixing, so no special first iteration is needed.
-    """
-
-    if n_history == 1:
-        for j in range(mixed.shape[0]):
-            mixed[j] = history_in[0, j] + mixing * history_residual[0, j]
-        return
-
-    # Bordered normal equations: the last row and column carry the sum-to-one
-    # constraint, the last unknown is its Lagrange multiplier.
-    matrix = np.zeros((n_history + 1, n_history + 1))
-    rhs = np.zeros(n_history + 1)
-    for i in range(n_history):
-        for j in range(n_history):
-            matrix[i, j] = history_residual[i] @ history_residual[j]
-        matrix[i, n_history] = 1.0
-        matrix[n_history, i] = 1.0
-    rhs[n_history] = 1.0
-    try:
-        weights = np.linalg.solve(matrix, rhs)
-    except np.linalg.LinAlgError:  # nearly linearly dependent history
-        for j in range(mixed.shape[0]):
-            mixed[j] = (
-                history_in[n_history - 1, j]
-                + mixing * history_residual[n_history - 1, j]
-            )
-        return
-    for j in range(mixed.shape[0]):
-        total = 0.0
-        for i in range(n_history):
-            total += weights[i] * (history_in[i, j] + mixing * history_residual[i, j])
-        mixed[j] = total
-
-
 # ---------------------------------------------------------------------------- #
 # the SCF loop                                                                 #
 # ---------------------------------------------------------------------------- #
+def solve_generalised(h, overlap, xp=np, dtype=None):
+    """
+    Solve ``H c = eps S c`` through the Cholesky factor of the overlap.
+
+    Returns the eigenvalues ascending and the eigenvectors as columns, normalised so
+    that ``C^T S C`` is the identity. Both matrices are cast to ``dtype`` first when one
+    is given, which is how the FP32 phase of the hybrid SCF runs.
+    """
+
+    if dtype is not None and h.dtype != dtype:
+        h = h.astype(dtype)
+        overlap = overlap.astype(dtype)
+    chol = xp.linalg.cholesky(overlap)
+    inv_chol = xp.linalg.inv(chol)
+    transformed = inv_chol @ h @ inv_chol.T
+    transformed = 0.5 * (transformed + transformed.T)
+    eigenvalues, vectors = xp.linalg.eigh(transformed)
+    return eigenvalues, inv_chol.T @ vectors
+
+
+class DIISMixer:
+    """
+    Pulay (DIIS) mixing of the charge vector, the accelerator of the SCF loop.
+
+    Each call to :meth:`mix` stores the charge vector fed into the last iteration and
+    the change it produced, then returns the combination of the stored vectors whose
+    residuals cancel best -- the least-squares problem ``min ||sum_i c_i r_i||`` under
+    ``sum_i c_i = 1``. With one stored vector it is plain linear mixing, so no special
+    first iteration is needed. The history rolls only once the buffer is full: rolling
+    earlier would shift in slots never written, and a zero residual row makes the
+    normal equations singular.
+
+    Parameters
+    ----------
+    n_shell : int
+        Length of the charge vector.
+    history : int
+        Number of previous iterations kept.
+    mixing : float
+        Linear mixing parameter applied to every stored residual.
+    """
+
+    def __init__(self, n_shell, history=8, mixing=0.2):
+        self.history = int(history)
+        self.mixing = float(mixing)
+        self._in = np.zeros((self.history, n_shell))
+        self._residual = np.zeros((self.history, n_shell))
+        self.n_filled = 0
+
+    def reset(self):
+        """Forget the stored history (the hybrid SCF does this at its precision switch)."""
+
+        self.n_filled = 0
+
+    def mix(self, dq_in, dq_out):
+        """
+        Store ``(dq_in, dq_out - dq_in)`` and overwrite ``dq_in`` with the mixed charges.
+
+        Parameters
+        ----------
+        dq_in : numpy.ndarray of float, shape (n_shell,)
+            Charges fed into the last iteration; receives the mixed charges in place.
+        dq_out : numpy.ndarray of float, shape (n_shell,)
+            Charges the iteration produced.
+        """
+
+        if self.n_filled < self.history:
+            slot = self.n_filled
+            self.n_filled += 1
+        else:
+            self._in[:-1] = self._in[1:]
+            self._residual[:-1] = self._residual[1:]
+            slot = self.history - 1
+        self._in[slot] = dq_in
+        self._residual[slot] = dq_out - dq_in
+        n = self.n_filled
+        if n == 1:
+            dq_in[:] = self._in[0] + self.mixing * self._residual[0]
+            return
+
+        # Bordered normal equations: the last row and column carry the sum-to-one
+        # constraint, the last unknown is its Lagrange multiplier.
+        matrix = np.zeros((n + 1, n + 1))
+        matrix[:n, :n] = self._residual[:n] @ self._residual[:n].T
+        matrix[:n, n] = 1.0
+        matrix[n, :n] = 1.0
+        rhs = np.zeros(n + 1)
+        rhs[n] = 1.0
+        try:
+            weights = np.linalg.solve(matrix, rhs)[:n]
+        except np.linalg.LinAlgError:  # nearly linearly dependent history
+            dq_in[:] = self._in[n - 1] + self.mixing * self._residual[n - 1]
+            return
+        dq_in[:] = weights @ (self._in[:n] + self.mixing * self._residual[:n])
+
+
+@dataclass
 class SCCResult:
-    """Everything the SCF loop produced, in Hartree atomic units."""
+    """
+    Everything the SCF loop produced, in Hartree atomic units.
 
-    def __init__(self, **fields):
-        self.__dict__.update(fields)
+    The dense matrices (``rho``, ``edm``, ``h``, ``vectors``) live on the array module
+    the loop ran on; every vector and scalar is a host value.
+
+    Attributes
+    ----------
+    rho, edm : array, shape (n_orb, n_orb)
+        Density matrix and energy-weighted density matrix.
+    h : array, shape (n_orb, n_orb)
+        The converged SCC Hamiltonian.
+    vectors : array, shape (n_orb, n_orb)
+        Eigenvectors as columns, S-orthonormal.
+    eigenvalues, filling : numpy.ndarray of float, shape (n_orb,)
+        Level energies and occupations (0 to 2).
+    e_fermi : float
+        Fermi energy.
+    q_orb, dq_shell, v_shell, v_orb : numpy.ndarray of float
+        Gross orbital populations, shell charge excess, shell and orbital potentials.
+    gamma : array, shape (n_shell, n_shell)
+        The shell-pair interaction matrix the loop used.
+    layout : ShellLayout
+        The shell layout the charges refer to.
+    energy_h0, energy_scc, energy_repulsive, entropy_ts : float
+        Band, SCC double-counting and repulsive energies, and ``T S``.
+    energy_total, energy_mermin : float
+        Their sum, and the free energy ``E - TS`` DFTB+ reports; the two differ only
+        when a level sits at the Fermi energy.
+    n_iteration, n_iteration_fp32 : int
+        Iterations taken, and how many of them ran in single precision.
+    converged : bool
+        Whether the charge change fell below the tolerance.
+    """
+
+    rho: object
+    edm: object
+    h: object
+    vectors: object
+    eigenvalues: np.ndarray
+    filling: np.ndarray
+    e_fermi: float
+    q_orb: np.ndarray
+    dq_shell: np.ndarray
+    v_shell: np.ndarray
+    v_orb: np.ndarray
+    gamma: object
+    layout: ShellLayout
+    energy_h0: float
+    energy_scc: float
+    energy_repulsive: float
+    entropy_ts: float
+    energy_total: float
+    energy_mermin: float
+    n_iteration: int
+    n_iteration_fp32: int
+    converged: bool
 
 
+#: What one pass of the SCC loop produces from a set of shell charges.
+_SCCPass = namedtuple(
+    "_SCCPass", "v_shell v_orb h eigenvalues vectors e_fermi rho q_orb"
+)
+
+
+def _to_host(xp, array):
+    """A host NumPy copy of ``array``, whichever array module holds it."""
+
+    asnumpy = getattr(xp, "asnumpy", None)
+    return np.asarray(asnumpy(array) if asnumpy is not None else array)
+
+
+def scc_loop(
+    layout,
+    n_electron,
+    h0,
+    overlap,
+    gamma,
+    xp=np,
+    tolerance=1.0e-13,
+    max_iterations=500,
+    mixing=0.2,
+    history=8,
+    electronic_temperature_au=MIN_TEMP,
+    dq_shell_start=None,
+    hybrid_precision=False,
+    energy_repulsive=0.0,
+    verbose=False,
+):
+    """
+    Converge the SCC charges of one system whose matrices live on ``xp``.
+
+    Parameters
+    ----------
+    layout : ShellLayout
+        The shell layout the charges refer to.
+    n_electron : float
+        Number of electrons to fill.
+    h0, overlap, gamma : array
+        Non-SCC Hamiltonian, overlap and shell-pair interaction matrix, as ``xp``
+        arrays of ``float64``.
+    xp : module, default: numpy
+        Array module the dense matrices live on (``numpy`` or ``cupy``).
+    tolerance : float
+        Convergence threshold on the largest shell-charge change between iterations.
+    max_iterations : int
+        Give up after this many iterations.
+    mixing, history : float, int
+        DIIS mixing parameter and history length.
+    electronic_temperature_au : float
+        Electronic temperature of the Fermi-Dirac filling in Hartree. At the DFTB+
+        floor (1e-8, the default) the filling is the exact zero-temperature limit.
+    dq_shell_start : numpy.ndarray of float, shape (n_shell,), optional
+        Shell charges to start the loop from instead of the neutral atoms, e.g. the
+        converged charges of a nearby geometry, which cuts the iteration count of a
+        Born-Oppenheimer trajectory several-fold.
+    hybrid_precision : bool, default: False
+        Run the bulk of the iterations in FP32 and only the final stretch in FP64.
+        The two phases converge the same fixed point to the same tolerance; the
+        single-precision phase stops at :data:`SCF_FP32_SWITCH`, when it stalls, or
+        when the FP32 factorisation fails, and the DIIS history starts clean at the
+        switch (single-precision noise correlated across the FP32-era residuals
+        misleads the least squares).
+    energy_repulsive : float, default: 0.0
+        Repulsive energy of the geometry, added to the reported totals.
+    verbose : bool
+        Print the charge change of every iteration.
+
+    Returns
+    -------
+    SCCResult
+        The converged state, rebuilt once in FP64 from the converged charges so that
+        every reported quantity belongs to one and the same set of charges.
+    """
+
+    n_orb, n_shell = layout.orb_shell.shape[0], layout.n_shell
+    orb_shell = xp.asarray(layout.orb_shell)
+    dq_shell = np.zeros(n_shell)
+    if dq_shell_start is not None:
+        dq_shell[:] = dq_shell_start
+    dq_new = np.zeros(n_shell)
+    filling = np.zeros(n_orb)
+    mixer = DIISMixer(n_shell, history, mixing)
+
+    def iterate(dtype):
+        """Charges -> potential -> H -> eigenvectors -> density -> populations."""
+
+        v_shell = gamma @ xp.asarray(dq_shell)
+        v_orb = v_shell[orb_shell]
+        h = h0 + 0.5 * overlap * (v_orb[:, None] + v_orb[None, :])
+        eigenvalues, vectors = solve_generalised(h, overlap, xp, dtype)
+        eig_host = _to_host(xp, eigenvalues).astype(np.float64)
+        e_fermi = fermi_filling(
+            eig_host, n_electron, electronic_temperature_au, filling
+        )
+        rho = (vectors * xp.asarray(filling).astype(vectors.dtype)) @ vectors.T
+        q_orb = _to_host(xp, (rho * overlap.astype(rho.dtype, copy=False)).sum(axis=1))
+        return _SCCPass(v_shell, v_orb, h, eigenvalues, vectors, e_fermi, rho, q_orb)
+
+    # the two-phase schedule: with hybrid_precision the bulk of the iterations runs in
+    # FP32 and a short FP64 tail finishes to the requested tolerance, converging the
+    # same fixed point; without it, FP64 throughout (the default)
+    fp32_active = bool(hybrid_precision)
+    n_fp32 = n_iteration = 0
+    best_error, stalled = np.inf, 0
+    converged = False
+    for n_iteration in range(1, max_iterations + 1):
+        try:
+            passed = iterate(xp.float32 if fp32_active else xp.float64)
+        except np.linalg.LinAlgError:
+            if not fp32_active:
+                raise
+            # ill-conditioned in single precision: hand over to FP64 for good
+            fp32_active = False
+            mixer.reset()
+            passed = iterate(xp.float64)
+        shell_charges(
+            passed.q_orb.astype(np.float64), layout.q0_orb, layout.orb_shell, dq_new
+        )
+        error = float(np.max(np.abs(dq_new - dq_shell)))
+        if verbose:
+            print(f"    iteration {n_iteration:3d}  charge change {error:.3e}")
+        if fp32_active:
+            n_fp32 += 1
+            if error < 0.5 * best_error:
+                best_error, stalled = error, 0
+            else:
+                stalled += 1
+            if error < SCF_FP32_SWITCH or stalled >= SCF_FP32_STALL:
+                fp32_active = False
+                mixer.reset()
+        elif error < tolerance:
+            dq_shell[:] = dq_new
+            converged = True
+            break
+        mixer.mix(dq_shell, dq_new)
+
+    # Rebuild the potential, the Hamiltonian and the density from the converged charges
+    # in FP64 so that every reported quantity belongs to one and the same set of charges.
+    final = iterate(xp.float64)
+    rho, vectors = final.rho, final.vectors
+    eig_host = _to_host(xp, final.eigenvalues)
+    edm = (vectors * xp.asarray(filling * eig_host)) @ vectors.T
+    # one device-to-host copy for the potentials and the band energy together
+    host = _to_host(
+        xp, xp.concatenate((final.v_shell, final.v_orb, xp.sum(rho * h0).reshape(1)))
+    )
+    v_shell_host, v_orb_host = host[:n_shell], host[n_shell : n_shell + n_orb]
+    energy_h0 = float(host[-1])
+    energy_scc = 0.5 * float(v_shell_host @ dq_shell)
+    entropy_ts = fermi_entropy(filling, electronic_temperature_au)
+    energy_total = energy_h0 + energy_scc + energy_repulsive
+    return SCCResult(
+        rho=rho,
+        edm=edm,
+        h=final.h,
+        vectors=vectors,
+        eigenvalues=eig_host,
+        filling=filling,
+        e_fermi=float(final.e_fermi),
+        q_orb=final.q_orb.astype(np.float64),
+        dq_shell=dq_shell,
+        v_shell=v_shell_host,
+        v_orb=v_orb_host,
+        gamma=gamma,
+        layout=layout,
+        energy_h0=energy_h0,
+        energy_scc=energy_scc,
+        energy_repulsive=float(energy_repulsive),
+        entropy_ts=float(entropy_ts),
+        energy_total=energy_total,
+        energy_mermin=energy_total - entropy_ts,
+        n_iteration=n_iteration,
+        n_iteration_fp32=n_fp32,
+        converged=converged,
+    )
+
+
+def scf(
+    system,
+    h0,
+    overlap,
+    tolerance=1.0e-13,
+    max_iterations=500,
+    mixing=0.2,
+    history=8,
+    electronic_temperature_au=MIN_TEMP,
+    charge=0.0,
+    shell_resolved=False,
+    verbose=False,
+    dq_shell_start=None,
+):
+    """
+    Converge the SCC charges of one system on the host and report energies and matrices.
+
+    Parameters
+    ----------
+    system : dftb_params.DFTBSystem
+        Geometry and basis layout.
+    h0, overlap : numpy.ndarray of float, shape (n_orb, n_orb)
+        The non-SCC Hamiltonian and overlap of :func:`h0_overlap.build_h0_overlap`.
+    tolerance, max_iterations, mixing, history, electronic_temperature_au, verbose,
+    dq_shell_start
+        As in :func:`scc_loop`.
+    charge : float
+        Net charge of the system in units of ``+e``; the electron count is the
+        neutral one minus this.
+    shell_resolved : bool
+        Whether every shell keeps its own Hubbard U; DFTB+ defaults to ``False``.
+
+    Returns
+    -------
+    SCCResult
+        The converged ground state, including the repulsive energy of the geometry.
+    """
+
+    layout = (
+        ShellLayout(system, shell_resolved=True) if shell_resolved else system.layout
+    )
+    gamma = np.zeros((layout.n_shell, layout.n_shell))
+    build_gamma(system.coords, layout.shell_atom, layout.shell_u, gamma)
+    return scc_loop(
+        layout,
+        system.n_electrons() - charge,
+        h0,
+        overlap,
+        gamma,
+        tolerance=tolerance,
+        max_iterations=max_iterations,
+        mixing=mixing,
+        history=history,
+        electronic_temperature_au=electronic_temperature_au,
+        dq_shell_start=dq_shell_start,
+        energy_repulsive=repulsive_total(system),
+        verbose=verbose,
+    )
+
+
+def dipole_moment(system, q_orb, layout):
+    """Dipole moment in atomic units, ``-sum_A dq_A R_A`` (Bohr times e)."""
+
+    dq_atom = np.zeros(system.n_atom)
+    atom_charges(q_orb, layout.q0_orb, layout.orb_atom, dq_atom)
+    dipole = np.zeros(3)
+    dipole_from_charges(dq_atom, system.coords, dipole)
+    return dipole
+
+
+# ---------------------------------------------------------------------------- #
+# host utilities                                                               #
+# ---------------------------------------------------------------------------- #
 #: Thread-count setters of the BLAS builds numpy ships or links against.
 _BLAS_SET_THREADS = (
     "openblas_set_num_threads",
@@ -612,188 +960,3 @@ def limit_blas_threads(n_threads=1):
                 capped.append(os.path.basename(path))
                 break
     return capped
-
-
-def scf(
-    system,
-    h0,
-    overlap,
-    tolerance=1.0e-13,
-    max_iterations=500,
-    mixing=0.2,
-    history=8,
-    electronic_temperature_au=MIN_TEMP,
-    charge=0.0,
-    shell_resolved=False,
-    verbose=False,
-    dq_shell_start=None,
-):
-    """
-    Converge the SCC charges of one system and report energies and matrices.
-
-    Parameters
-    ----------
-    system : dftb_params.DFTBSystem
-        Geometry and basis layout.
-    h0, overlap : numpy.ndarray of float, shape (n_orb, n_orb)
-        The Gate A non-SCC Hamiltonian and overlap.
-    tolerance : float
-        Convergence threshold on the largest shell-charge change between iterations.
-    max_iterations : int
-        Give up after this many iterations.
-    mixing : float
-        Mixing parameter on the shell charges.
-    history : int
-        Number of previous iterations the DIIS mixer keeps.
-    electronic_temperature_au : float
-        Electronic temperature of the Fermi-Dirac filling in Hartree. At the DFTB+
-        floor (1e-8, the default) the filling is the exact zero-temperature limit,
-        so a warmer
-        electronic distribution is rejected rather than silently approximated.
-    charge : float
-        Net charge of the system in units of ``+e``; the electron count is the
-        neutral one minus this.
-    shell_resolved : bool
-        Whether every shell keeps its own Hubbard U; DFTB+ defaults to ``False``.
-    dq_shell_start : numpy.ndarray of float, shape (n_shell,), optional
-        Shell charges to start the loop from instead of the neutral atoms, e.g. the
-        converged charges of a nearby geometry, which cuts the iteration count of a
-        Born-Oppenheimer trajectory several-fold.
-
-    Returns
-    -------
-    SCCResult
-        Fields ``rho``, ``edm``, ``h``, ``eigenvalues``, ``filling``, ``e_fermi``,
-        ``q_orb``, ``dq_shell``, ``v_shell``, ``v_orb``, ``gamma``, ``layout``,
-        ``energy_h0``, ``energy_scc``, ``energy_repulsive``, ``entropy_ts``,
-        ``energy_total``, ``energy_mermin``, ``n_iteration`` and ``converged``.
-        ``energy_mermin`` is the free energy DFTB+ reports; it differs from
-        ``energy_total`` only when a level sits at the Fermi energy.
-    """
-
-    layout = ShellLayout(system, shell_resolved=shell_resolved)
-    n_orb = system.n_orb
-    n_shell = layout.n_shell
-    n_electron = system.n_electrons() - charge
-
-    gamma = np.zeros((n_shell, n_shell))
-    build_gamma(system.coords, layout.shell_atom, layout.shell_u, gamma)
-
-    dq_shell = np.zeros(n_shell)
-    if dq_shell_start is not None:
-        dq_shell[:] = dq_shell_start
-    dq_new = np.zeros(n_shell)
-    history_in = np.zeros((history, n_shell))
-    history_residual = np.zeros((history, n_shell))
-    v_shell = np.zeros(n_shell)
-    v_orb = np.zeros(n_orb)
-    q_orb = np.zeros(n_orb)
-    h = np.zeros((n_orb, n_orb))
-    filling = np.zeros(n_orb)
-
-    converged = False
-    n_iteration = 0
-    n_filled = 0  # DIIS history slots written so far
-    rho = np.zeros((n_orb, n_orb))
-    edm = np.zeros((n_orb, n_orb))
-    eigenvalues = np.zeros(n_orb)
-    e_fermi = 0.0
-
-    for iteration in range(max_iterations):
-        n_iteration = iteration + 1
-        scc_potential(gamma, dq_shell, layout.orb_shell, v_shell, v_orb)
-        scc_hamiltonian(h0, overlap, v_orb, h)
-        eigenvalues, vectors = solve_generalised(h, overlap)
-        e_fermi = fermi_filling(
-            eigenvalues, n_electron, electronic_temperature_au, filling
-        )
-        rho, edm = density_matrices(vectors, eigenvalues, filling)
-        mulliken_charges(rho, overlap, q_orb)
-        shell_charges(q_orb, layout.q0_orb, layout.orb_shell, dq_new)
-
-        error = 0.0
-        for i in range(n_shell):
-            diff = abs(dq_new[i] - dq_shell[i])
-            if diff > error:
-                error = diff
-        if verbose:
-            print(f"    iteration {n_iteration:3d}  charge change {error:.3e}")
-        if error < tolerance:
-            dq_shell[:] = dq_new
-            converged = True
-            break
-
-        # Append this iteration to the DIIS history, rolling only once the buffer
-        # is full. Rolling earlier would shift in slots never written, and a zero
-        # residual row makes the DIIS normal equations singular.
-        if n_filled < history:
-            slot = n_filled
-            n_filled += 1
-        else:
-            for i in range(history - 1):
-                history_in[i] = history_in[i + 1]
-                history_residual[i] = history_residual[i + 1]
-            slot = history - 1
-        history_in[slot] = dq_shell
-        for i in range(n_shell):
-            history_residual[slot, i] = dq_new[i] - dq_shell[i]
-        diis_mix(history_in, history_residual, n_filled, mixing, dq_shell)
-
-    # Rebuild the potential and the Hamiltonian from the converged charges so that
-    # every reported quantity belongs to one and the same set of charges.
-    scc_potential(gamma, dq_shell, layout.orb_shell, v_shell, v_orb)
-    scc_hamiltonian(h0, overlap, v_orb, h)
-    eigenvalues, vectors = solve_generalised(h, overlap)
-    e_fermi = fermi_filling(eigenvalues, n_electron, electronic_temperature_au, filling)
-    rho, edm = density_matrices(vectors, eigenvalues, filling)
-    mulliken_charges(rho, overlap, q_orb)
-
-    energy_h0 = float(np.sum(rho * h0))
-    energy_scc = 0.5 * float(v_shell @ dq_shell)
-    energy_repulsive = repulsive_total(system)
-    entropy_ts = fermi_entropy(filling, electronic_temperature_au)
-
-    return SCCResult(
-        rho=rho,
-        edm=edm,
-        h=h,
-        eigenvalues=eigenvalues,
-        vectors=vectors,
-        filling=filling,
-        e_fermi=e_fermi,
-        q_orb=q_orb,
-        dq_shell=dq_shell,
-        v_shell=v_shell,
-        v_orb=v_orb,
-        gamma=gamma,
-        layout=layout,
-        energy_h0=energy_h0,
-        energy_scc=energy_scc,
-        energy_repulsive=energy_repulsive,
-        entropy_ts=entropy_ts,
-        energy_total=energy_h0 + energy_scc + energy_repulsive,
-        energy_mermin=energy_h0 + energy_scc + energy_repulsive - entropy_ts,
-        n_iteration=n_iteration,
-        converged=converged,
-    )
-
-
-@kernel
-def dipole_from_charges(coords, orb_atom, q0_orb, q_orb, dipole):
-    """Dipole of one set of gross orbital populations, summed orbital by orbital."""
-
-    for k in range(3):
-        dipole[k] = 0.0
-    for mu in range(q_orb.shape[0]):
-        atom = orb_atom[mu]
-        gross = q0_orb[mu] - q_orb[mu]
-        for k in range(3):
-            dipole[k] += gross * coords[atom, k]
-
-
-def dipole_moment(system, q_orb, layout):
-    """Dipole moment in atomic units, ``sum_A (q0_A - q_A) * R_A`` (Bohr times e)."""
-
-    dipole = np.zeros(3)
-    dipole_from_charges(system.coords, layout.orb_atom, layout.q0_orb, q_orb, dipole)
-    return dipole

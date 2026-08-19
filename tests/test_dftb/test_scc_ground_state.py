@@ -195,8 +195,8 @@ sk_set = SlaterKosterSet({sk_path!r}, ["O", "H"], {{"O": "p", "H": "s"}})
 system = DFTBSystem(["O", "H", "H"],
                     [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]], sk_set)
 # the poisoning order: the bare kernel compiles before any wrapper touches it
-scc.repulsive_sum(sk_set.tables(), system.coords, system.atom_species,
-                  system.n_atom, scc.RepulsiveScratch(np.zeros(2)))
+scc.repulsive_sum(sk_set.tables, system.coords, system.atom_species,
+                  system.n_atom, np.zeros(2))
 h0, overlap = build_h0_overlap(system)
 result = scf(system, h0, overlap)
 assert result.converged

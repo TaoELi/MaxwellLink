@@ -2,6 +2,7 @@
 # Copyright (c) 2026 MaxwellLink                                                        #
 # This file is part of MaxwellLink. Repository: https://github.com/TaoELi/MaxwellLink   #
 # If you use this code, always credit and cite arXiv:2512.06173.                        #
+# See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
 """
@@ -19,10 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-try:  # inside the package
-    from .kernels_dftb import kernel
-except (ImportError, ValueError):  # allow running as a stand-alone script
-    from kernels_dftb import kernel
+from .jit import kernel
 
 MIN_NEIGH_DIST = 1.0e-2  # accuracy.F90:78, below this the repulsive is switched off
 

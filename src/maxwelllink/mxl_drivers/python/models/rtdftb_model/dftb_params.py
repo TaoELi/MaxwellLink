@@ -2,6 +2,7 @@
 # Copyright (c) 2026 MaxwellLink                                                        #
 # This file is part of MaxwellLink. Repository: https://github.com/TaoELi/MaxwellLink   #
 # If you use this code, always credit and cite arXiv:2512.06173.                        #
+# See AGENTS.md and README.md for details.                                              #
 # --------------------------------------------------------------------------------------#
 
 """
@@ -10,8 +11,10 @@ Element data, basis layout, per-pair Slater-Koster tables and the shared constan
 :class:`SlaterKosterSet` is one parameter set restricted to the elements a calculation
 uses: shell energies, Hubbard U, occupations, masses, and one interleaved radial table
 per ordered species pair. :class:`DFTBSystem` is one geometry on top of it, with the
-orbital offsets that define the dense matrix index. Both hand their arrays to the kernels
-as namedtuple packs (:data:`SKTables`, :data:`Geometry`).
+orbital offsets that define the dense matrix index, and :class:`ShellLayout` is the flat
+shell list of that system (which atom owns each shell and orbital, and the reference
+occupations). The parameter set hands its arrays to the compiled kernels as one
+:data:`SKTables` pack.
 
 The shells an element carries are set by an explicit maximum angular momentum, as in
 DFTB+, and are laid out ascending in ``l``. The unit conversions here are DFTB+'s own and
@@ -23,10 +26,7 @@ from collections import namedtuple
 
 import numpy as np
 
-try:
-    from .skfiles import SK_MAP, read_skf
-except (ImportError, ValueError):  # allow running as a stand-alone script
-    from skfiles import SK_MAP, read_skf
+from .skfiles import SK_MAP, read_skf
 
 # Unit conversions, taken from DFTB+ rather than from :mod:`maxwelllink.units`. The two
 # disagree in the last digits (DFTB+ predates CODATA-2018), and every reference value the
@@ -86,6 +86,17 @@ MAX_ANGULAR_MOMENTUM = {
     "Zn": "d",
 }
 
+#: Everything a compiled kernel needs from a :class:`SlaterKosterSet`, as plain arrays.
+#: numba accepts a namedtuple of arrays on both targets -- and as a CUDA kernel argument
+#: with device arrays in the fields -- which is what keeps the kernel signatures short.
+SKTables = namedtuple(
+    "SKTables",
+    "n_orb_species shell_of_orbital on_site_energy hubbard_u occupation mass "
+    "ang_shell n_shell pair_index tab_h tab_s tab_n_grid tab_n_integral "
+    "tab_grid_dist tab_cutoff rep_xstart rep_coeffs rep_last rep_exp rep_cutoff "
+    "rep_n_interval",
+)
+
 
 class SlaterKosterSet:
     """
@@ -135,6 +146,8 @@ class SlaterKosterSet:
         Radial grid spacing in Bohr.
     tab_cutoff : numpy.ndarray of float, shape (n_pair,)
         ``n_grid * grid_dist + 1.0`` Bohr; beyond it every integral is exactly zero.
+    tables : SKTables
+        The set as one pack of plain arrays, built once, for the compiled kernels.
     """
 
     #: Length of the polynomial tail DFTB+ appends to every radial table (Bohr).
@@ -206,6 +219,31 @@ class SlaterKosterSet:
         self._build_pair_tables()
         self._build_repulsive_tables()
 
+        # one pack for the lifetime of the set, built here rather than per kernel call
+        self.tables = SKTables(
+            self.n_orb_species,
+            self.shell_of_orbital,
+            self.on_site_energy,
+            self.hubbard_u,
+            self.occupation,
+            self.mass,
+            self.ang_shell,
+            self.n_shell,
+            self.pair_index,
+            self.tab_h,
+            self.tab_s,
+            self.tab_n_grid,
+            self.tab_n_integral,
+            self.tab_grid_dist,
+            self.tab_cutoff,
+            self.rep_xstart,
+            self.rep_coeffs,
+            self.rep_last,
+            self.rep_exp,
+            self.rep_cutoff,
+            self.rep_n_interval,
+        )
+
     def _build_pair_tables(self):
         """Interleave the .skf columns into one radial table per ordered pair."""
 
@@ -219,8 +257,7 @@ class SlaterKosterSet:
             for b in range(self.n_species):
                 columns[(a, b)] = self._pair_columns(a, b)
 
-        max_grid = max(self._files[(a, a)].n_grid for a in range(self.n_species))
-        max_grid = max(max_grid, max(f.n_grid for f in self._files.values()))
+        max_grid = max(f.n_grid for f in self._files.values())
         max_integral = max(len(c) for c in columns.values())
 
         self.tab_h = np.zeros((n_pair, max_grid, max_integral))
@@ -276,33 +313,6 @@ class SlaterKosterSet:
             self.rep_cutoff[p] = skf.spline_cutoff
             self.rep_n_interval[p] = n_interval
 
-    def tables(self):
-        """Return this set as an :data:`SKTables` pack of plain arrays for the kernels."""
-
-        return SKTables(
-            self.n_orb_species,
-            self.shell_of_orbital,
-            self.on_site_energy,
-            self.hubbard_u,
-            self.occupation,
-            self.mass,
-            self.ang_shell,
-            self.n_shell,
-            self.pair_index,
-            self.tab_h,
-            self.tab_s,
-            self.tab_n_grid,
-            self.tab_n_integral,
-            self.tab_grid_dist,
-            self.tab_cutoff,
-            self.rep_xstart,
-            self.rep_coeffs,
-            self.rep_last,
-            self.rep_exp,
-            self.rep_cutoff,
-            self.rep_n_interval,
-        )
-
     def _pair_columns(self, a, b):
         """List the (file, column) sources of the ordered pair table for (a, b)."""
 
@@ -323,21 +333,6 @@ class SlaterKosterSet:
         """Raw parsed .skf file of the ordered species pair ``(a, b)``."""
 
         return self._files[(a, b)]
-
-
-#: Everything a compiled kernel needs from a :class:`SlaterKosterSet`, as plain arrays.
-#: numba accepts a namedtuple of arrays on both targets -- and as a CUDA kernel argument
-#: with device arrays in the fields -- which is what keeps the kernel signatures short.
-SKTables = namedtuple(
-    "SKTables",
-    "n_orb_species shell_of_orbital on_site_energy hubbard_u occupation mass "
-    "ang_shell n_shell pair_index tab_h tab_s tab_n_grid tab_n_integral "
-    "tab_grid_dist tab_cutoff rep_xstart rep_coeffs rep_last rep_exp rep_cutoff "
-    "rep_n_interval",
-)
-
-#: One geometry as plain arrays, the per-driver half of a kernel's arguments.
-Geometry = namedtuple("Geometry", "coords atom_species atom_offset")
 
 
 _SK_CACHE = {}
@@ -375,18 +370,25 @@ class DFTBSystem:
     Attributes
     ----------
     coords : numpy.ndarray of float, shape (n_atom, 3)
-        Positions in Bohr.
+        Positions in Bohr; the real-time drivers move them in place.
     atom_species : numpy.ndarray of int, shape (n_atom,)
         Species index of every atom.
     atom_offset : numpy.ndarray of int, shape (n_atom + 1,)
         First dense-matrix row/column of every atom; ``atom_offset[-1]`` is ``n_orb``.
-    n_orb : int
-        Dimension of the dense H0 and S matrices.
+    n_atom, n_orb : int
+        Number of atoms and the dimension of the dense H0 and S matrices.
+    masses : numpy.ndarray of float, shape (n_atom,)
+        Atomic masses in electron masses.
+    tables : SKTables
+        The parameter set's kernel pack, ``sk_set.tables``.
+    layout : ShellLayout
+        The non-shell-resolved shell layout (the DFTB+ default), built on first use.
     """
 
     def __init__(self, elements, positions, sk_set, units="angstrom"):
         self.elements = tuple(elements)
         self.sk_set = sk_set
+        self.tables = sk_set.tables
 
         coords = np.asarray(positions, dtype=float).reshape(len(self.elements), 3)
         if units == "angstrom":
@@ -404,26 +406,16 @@ class DFTBSystem:
         self.atom_offset[1:] = np.cumsum(n_orb_atom)
         self.n_atom = len(self.elements)
         self.n_orb = int(self.atom_offset[-1])
+        self.masses = np.ascontiguousarray(sk_set.mass[self.atom_species])
+        self._layout = None
 
-    def geometry(self):
-        """Return this geometry as a :data:`Geometry` pack of plain arrays."""
+    @property
+    def layout(self):
+        """The :class:`ShellLayout` of this system with one Hubbard U per atom."""
 
-        return Geometry(self.coords, self.atom_species, self.atom_offset)
-
-    def orbital_labels(self):
-        """Human-readable ``(atom index, element, shell, m)`` label of every orbital."""
-
-        names = {
-            0: ("s",),
-            1: ("p_y", "p_z", "p_x"),
-            2: ("d_xy", "d_yz", "d_z2", "d_xz", "d_x2-y2"),
-        }
-        labels = []
-        for atom, sp in enumerate(self.atom_species):
-            for ang in self.sk_set.shells[sp]:
-                for name in names[ang]:
-                    labels.append((atom, self.elements[atom], name))
-        return labels
+        if self._layout is None:
+            self._layout = ShellLayout(self)
+        return self._layout
 
     def n_electrons(self):
         """Total number of valence electrons of the neutral system."""
@@ -432,3 +424,64 @@ class DFTBSystem:
         for sp in self.atom_species:
             total += self.sk_set.occupation[sp, : self.sk_set.n_shell[sp]].sum()
         return total
+
+
+class ShellLayout:
+    """
+    Flat shell list of one system: which atom each shell belongs to, its U, its
+    reference occupation, and the map from dense orbital index to shell index.
+
+    Parameters
+    ----------
+    system : DFTBSystem
+        Geometry and basis layout.
+    shell_resolved : bool
+        Whether every shell keeps its own Hubbard U. DFTB+ defaults to ``False``
+        (``ShellResolvedSCC = No``, parser.F90:1375), in which case every shell of a
+        species inherits the U of its s shell (parser.F90:3699). The difference is
+        invisible in 3ob, whose files list one U three times, but Ag and H in mio-1-1
+        really do carry three different values.
+
+    Attributes
+    ----------
+    n_shell : int
+        Total number of shells in the system.
+    shell_atom : numpy.ndarray of int, shape (n_shell,)
+        Atom index owning each shell.
+    shell_u : numpy.ndarray of float, shape (n_shell,)
+        Hubbard U of each shell in Hartree.
+    orb_shell : numpy.ndarray of int, shape (n_orb,)
+        Shell index owning each dense orbital.
+    orb_atom : numpy.ndarray of int, shape (n_orb,)
+        Atom index owning each dense orbital.
+    q0_orb : numpy.ndarray of float, shape (n_orb,)
+        Free-atom reference population of each orbital, the shell occupation spread
+        evenly over its ``2 * l + 1`` members (sccinit.F90:132).
+    """
+
+    def __init__(self, system, shell_resolved=False):
+        sk_set = system.sk_set
+        shell_atom = []
+        shell_u = []
+        orb_shell = []
+        orb_atom = []
+        q0_orb = []
+        for atom in range(system.n_atom):
+            sp = system.atom_species[atom]
+            for i_shell in range(sk_set.n_shell[sp]):
+                ang = sk_set.ang_shell[sp, i_shell]
+                shell_atom.append(atom)
+                if shell_resolved:
+                    shell_u.append(sk_set.hubbard_u_shell[sp, i_shell])
+                else:
+                    shell_u.append(sk_set.hubbard_u[sp])
+                for _ in range(2 * ang + 1):
+                    orb_shell.append(len(shell_atom) - 1)
+                    orb_atom.append(atom)
+                    q0_orb.append(sk_set.occupation[sp, i_shell] / (2 * ang + 1))
+        self.n_shell = len(shell_atom)
+        self.shell_atom = np.array(shell_atom, dtype=np.int64)
+        self.shell_u = np.array(shell_u)
+        self.orb_shell = np.array(orb_shell, dtype=np.int64)
+        self.orb_atom = np.array(orb_atom, dtype=np.int64)
+        self.q0_orb = np.array(q0_orb)

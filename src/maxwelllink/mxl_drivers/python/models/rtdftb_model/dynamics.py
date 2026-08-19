@@ -11,7 +11,9 @@ The RT-TDDFTB time stepper, with the nuclei frozen or moving, and the batch runn
 :class:`RTDynamics` is one DFTB+ ``doTdStep`` held as an object, so the same stepper
 serves a whole trajectory (:func:`run_kick`, :func:`run_ehrenfest`) and one socket step
 of :class:`~.rtdftb_model.RTDFTBModel`. Ehrenfest dynamics is the same step with the
-nuclear block switched on.
+nuclear block switched on; the nuclei move with velocity Verlet at the same step as the
+electrons, and :func:`bomd_equilibrate` thermalizes a geometry on the ground-state
+surface before a run.
 
 The order inside a step follows DFTB+ exactly, because the reference trajectories carry
 it: move the nuclei, rebuild ``H`` with this step's field, read the observables at
@@ -21,34 +23,60 @@ then recompute the charges, ``H`` and the Ehrenfest force at ``t + dt``.
 
 import numpy as np
 
-try:  # inside the package
-    from .ehrenfest import (
-        build_coupling,
-        ehrenfest_force,
-        kinetic_energy,
-        overlap_time_derivative,
-        velocity_verlet_next,
-    )
-    from .forces import total_force
-    from .h0_overlap import build_h0_overlap
-    from .rt import RTState
-    from .scc import MIN_TEMP, scf
-except (ImportError, ValueError):  # allow running as a stand-alone script
-    from ehrenfest import (
-        build_coupling,
-        ehrenfest_force,
-        kinetic_energy,
-        overlap_time_derivative,
-        velocity_verlet_next,
-    )
-    from forces import total_force
-    from h0_overlap import build_h0_overlap
-    from rt import RTState
-    from scc import MIN_TEMP, scf
+from .forces import (
+    coupling_kernel,
+    energy_gradient,
+    energy_weighted_density,
+    overlap_time_derivative,
+    overlap_weight,
+    real_part,
+    total_force,
+)
+from .h0_overlap import build_h0_overlap
+from .jit import kernel
+from .rt import RTState
+from .scc import MIN_TEMP, scf
 
 PROPAGATORS = ("leapfrog", "cayley", "cayley-midpoint")
 
 
+# ---------------------------------------------------------------------------- #
+# the nuclear step                                                             #
+# ---------------------------------------------------------------------------- #
+@kernel
+def nuclear_step(positions, half_velocities, accel, dt, n_atom, velocity_now):
+    """
+    One integrator call in plain arrays: ``a(t)`` in, ``r(t+dt)`` and ``v(t)`` out.
+
+    ``half_velocities`` enters as ``v(t - dt/2)`` and is updated in place to
+    ``v(t + dt/2)``; ``positions`` enters as ``r(t)`` and is updated to ``r(t+dt)``;
+    ``velocity_now`` receives ``v(t)``. DFTB+'s integrator consumes ``a(t)`` and returns
+    ``r(t+dt)`` together with ``v(t)``, so the velocity it reports lags the position it
+    reports by one step; that quirk is reproduced because the reference trajectories
+    carry it.
+    """
+
+    for a in range(n_atom):
+        for k in range(3):
+            velocity_now[a, k] = half_velocities[a, k] + 0.5 * accel[a, k] * dt
+            half_velocities[a, k] = velocity_now[a, k] + 0.5 * accel[a, k] * dt
+            positions[a, k] += half_velocities[a, k] * dt
+
+
+@kernel
+def kinetic_sum(mass, velocities, n_atom):
+    """Nuclear kinetic energy in Hartree, ``0.5 sum_A m_A v_A^2``."""
+
+    total = 0.0
+    for a in range(n_atom):
+        for k in range(3):
+            total += mass[a] * velocities[a, k] * velocities[a, k]
+    return 0.5 * total
+
+
+# ---------------------------------------------------------------------------- #
+# the stepper                                                                  #
+# ---------------------------------------------------------------------------- #
 class RTDynamics:
     """
     One system stepped in real time, with the nuclei frozen or moving.
@@ -69,10 +97,13 @@ class RTDynamics:
     ehrenfest : bool, default: False
         Whether the nuclei move.
     velocities : array-like of float, shape (n_atom, 3), optional
-        Initial velocities in atomic units; zero (a 0 K start) by default.
+        Initial velocities in atomic units; zero (a 0 K start) by default. Only used
+        when the nuclei move.
 
     Attributes
     ----------
+    state : rt.RTState
+        The electronic state and its matrices.
     time : float
         Clock at the end of the last step.
     dipole_start, dipole_end : numpy.ndarray of float, shape (3,)
@@ -83,10 +114,15 @@ class RTDynamics:
         ``(band, SCC, external, repulsive)`` energy at the start of the last step.
     energy_kinetic : float
         Nuclear kinetic energy of the last step.
+    mass : numpy.ndarray of float, shape (n_atom,)
+        Atomic masses in electron masses.
     coords_start, velocity, force_start : numpy.ndarray of float, shape (n_atom, 3)
         Geometry, velocity and Ehrenfest force at the start of the last step.
     force_end : numpy.ndarray of float, shape (n_atom, 3)
         Ehrenfest force at the end of the last step, which drives the next one.
+    half_velocity, coords_next, accel : numpy.ndarray of float, shape (n_atom, 3)
+        The velocity-Verlet carrier ``v(t + dt/2)``, the geometry ``r(t + dt)`` the
+        integrator has already produced, and the acceleration ``a(t + dt)``.
     """
 
     def __init__(
@@ -110,14 +146,10 @@ class RTDynamics:
         self.time = 0.0
 
         n_atom, n_orb = system.n_atom, self.state.n_orb
-        self.mass = np.array(
-            [system.sk_set.mass[sp] for sp in system.atom_species], dtype=float
-        )
-        self.velocity = (
-            np.zeros((n_atom, 3))
-            if velocities is None
-            else np.array(velocities, dtype=float, copy=True)
-        )
+        self.mass = system.masses
+        self.velocity = np.zeros((n_atom, 3))
+        if velocities is not None and self.ehrenfest:
+            self.velocity[:] = velocities
 
         # reported at the two ends of every step
         self.dipole_start = np.zeros(3)
@@ -125,7 +157,7 @@ class RTDynamics:
         self.energy_start = 0.0
         self.energy_end = 0.0
         self.energy_terms = (0.0, 0.0, 0.0, 0.0)
-        self.energy_kinetic = kinetic_energy(self.mass, self.velocity)
+        self.energy_kinetic = kinetic_sum(self.mass, self.velocity, n_atom)
         self.coords_start = system.coords.copy()
         self.force_start = np.zeros((n_atom, 3))
         self.force_end = np.zeros((n_atom, 3))
@@ -135,7 +167,12 @@ class RTDynamics:
         self.coords_next = system.coords.copy()
         self.accel = np.zeros((n_atom, 3))
 
-        self._scratch = {}
+        # work arrays of the Ehrenfest force and the Cayley midpoint matrices
+        self._density = np.zeros((n_orb, n_orb))
+        self._product = np.zeros((n_orb, n_orb))
+        self._weight_e = np.zeros((n_orb, n_orb))
+        self._weight = np.zeros((n_orb, n_orb))
+        self._gradient = np.zeros((n_atom, 3))
         self._overlap_start = np.zeros((n_orb, n_orb))
         self._overlap_mid = np.zeros((n_orb, n_orb))
         self._coupling_mid = np.zeros((n_orb, n_orb))
@@ -155,7 +192,7 @@ class RTDynamics:
         self.state.update_charges()
         self.state.update_hamiltonian(field)
         if self.ehrenfest:
-            self.force_end = ehrenfest_force(self.state, self._scratch)
+            self.force_end[:] = self.ehrenfest_force()
             self.half_velocity[:] = self.velocity
             self.coords_next[:] = self.system.coords + self.velocity * self.dt
         self._record_start()
@@ -176,10 +213,18 @@ class RTDynamics:
         """
 
         if self.ehrenfest:
-            self.velocity = velocity_verlet_next(
-                self.coords_next, self.half_velocity, self.accel, self.dt
+            # the integrator consumes a(t) and returns r(t+dt) together with v(t)
+            nuclear_step(
+                self.coords_next,
+                self.half_velocity,
+                self.accel,
+                self.dt,
+                self.system.n_atom,
+                self.velocity,
             )
-            self.energy_kinetic = kinetic_energy(self.mass, self.velocity)
+            self.energy_kinetic = kinetic_sum(
+                self.mass, self.velocity, self.system.n_atom
+            )
         self.state.update_hamiltonian(field)
         self._record_start()
         self._advance(field, bootstrap=False)
@@ -201,7 +246,7 @@ class RTDynamics:
 
         state, dt = self.state, self.dt
         if self.ehrenfest:
-            build_coupling(self.system, self.velocity, state.coupling)
+            self.build_coupling(self.velocity, state.coupling)
 
         if self.propagator == "leapfrog":
             if bootstrap:  # Euler bootstrap, rho_old keeps rho(0) (timeprop.F90:4815)
@@ -223,7 +268,7 @@ class RTDynamics:
             self._overlap_start[:] = state.overlap
             self._coords_mid[:] = 0.5 * (self.system.coords + self.coords_next)
             self.system.coords[:, :] = self._coords_mid
-            build_coupling(self.system, self.half_velocity, self._coupling_mid)
+            self.build_coupling(self.half_velocity, self._coupling_mid)
             self._adopt_geometry()
             self._overlap_mid[:] = 0.5 * (self._overlap_start + state.overlap)
             state.propagate_cayley(
@@ -239,8 +284,8 @@ class RTDynamics:
         self.energy_end = sum(state.energies()) + self.energy_kinetic
         self.dipole_end[:] = state.dipole
         if self.ehrenfest:
-            self.force_end = ehrenfest_force(state, self._scratch)
-            self.accel = self.force_end / self.mass[:, None]
+            self.force_end[:] = self.ehrenfest_force()
+            self.accel[:] = self.force_end / self.mass[:, None]
         self.time += dt
 
     def _adopt_geometry(self):
@@ -249,6 +294,50 @@ class RTDynamics:
         if self.ehrenfest:
             self.system.coords[:, :] = self.coords_next
             self.state.refresh_geometry()
+
+    def build_coupling(self, velocities, coupling):
+        """Fill ``coupling`` with ``D`` at the current geometry and ``velocities``."""
+
+        system = self.system
+        coupling_kernel(
+            system.tables,
+            system.coords,
+            system.atom_species,
+            system.atom_offset,
+            system.n_atom,
+            velocities,
+            coupling,
+            self.state.scratch,
+        )
+
+    def ehrenfest_force(self):
+        """
+        The Ehrenfest force on every atom in Hartree/Bohr, from the current state.
+
+        ``state.h`` and ``state.v_orb`` must already belong to the current geometry and
+        charges, i.e. ``update_charges`` and ``update_hamiltonian`` have been called.
+        Only the real part of the density enters, the energy-weighted density is built
+        from ``H`` and ``S^-1``, and the field adds ``dq_A E``.
+        """
+
+        state, n = self.state, self.state.n_orb
+        real_part(state.rho, self._density, n)
+        energy_weighted_density(
+            self._density, state.h, state.s_inv, self._product, self._weight_e, n
+        )
+        overlap_weight(self._density, self._weight_e, state.v_orb, self._weight)
+        energy_gradient(
+            self.system,
+            state.layout,
+            self._density,
+            self._weight,
+            state.dq_shell,
+            self._gradient,
+            state.scratch,
+            dq_atom=state.dq_atom,
+            field=state.field,
+        )
+        return -self._gradient
 
 
 # ---------------------------------------------------------------------------- #
@@ -376,9 +465,7 @@ def run_ehrenfest(
     Full RT-Ehrenfest trajectory: electrons propagated, nuclei moved, both at ``dt``.
 
     Same arguments as :func:`run_kick`, plus ``velocities`` for the initial nuclear
-    velocities. DFTB+'s integrator consumes ``a(t)`` and returns ``r(t+dt)`` together
-    with ``v(t)``, so the velocity it reports lags the position it reports by one step;
-    that quirk is reproduced here because the reference trajectories carry it.
+    velocities.
 
     Returns
     -------
@@ -455,6 +542,58 @@ def run_ehrenfest(
 # ---------------------------------------------------------------------------- #
 # Born-Oppenheimer pre-equilibration                                           #
 # ---------------------------------------------------------------------------- #
+def maxwell_boltzmann_velocities(kT, mass, rng):
+    """
+    Draw nuclear velocities at temperature ``kT`` with no centre-of-mass motion.
+
+    Parameters
+    ----------
+    kT : float
+        Temperature in Hartree.
+    mass : numpy.ndarray of float, shape (n_atom,)
+        Atomic masses in electron masses.
+    rng : numpy.random.Generator
+        The random stream to draw from.
+
+    Returns
+    -------
+    numpy.ndarray of float, shape (n_atom, 3)
+        Velocities in atomic units.
+    """
+
+    velocity = np.sqrt(kT / mass)[:, None] * rng.standard_normal((mass.shape[0], 3))
+    velocity -= (mass[:, None] * velocity).sum(axis=0) / mass.sum()
+    return velocity
+
+
+def langevin_coefficients(dt, kT, friction, mass):
+    """
+    The Ornstein-Uhlenbeck half-step of the OBABO integrator.
+
+    Parameters
+    ----------
+    dt : float
+        MD time step in atomic units.
+    kT : float
+        Temperature in Hartree.
+    friction : float
+        Langevin relaxation time in atomic units.
+    mass : numpy.ndarray of float, shape (n_atom,)
+        Atomic masses in electron masses.
+
+    Returns
+    -------
+    c1h : float
+        The velocity scaling ``exp(-dt / 2 tau)`` of one half-step.
+    noise : numpy.ndarray of float, shape (n_atom, 1)
+        The velocity noise amplitude of one half-step, per atom.
+    """
+
+    c1h = float(np.exp(-0.5 * dt / friction))
+    noise = np.sqrt(kT / mass[:, None] * (1.0 - c1h**2))
+    return c1h, noise
+
+
 def bomd_equilibrate(
     system,
     n_steps,
@@ -510,16 +649,11 @@ def bomd_equilibrate(
     """
 
     n_atom = system.n_atom
-    mass = np.array(
-        [system.sk_set.mass[sp] for sp in system.atom_species], dtype=float
-    )[:, None]
-    c1h = float(np.exp(-0.5 * dt / friction))  # Langevin O half-step scaling
-    noise = np.sqrt(kT / mass * (1.0 - c1h**2))  # its velocity noise, per atom
+    mass = system.masses[:, None]
+    c1h, noise = langevin_coefficients(dt, kT, friction, system.masses)
+    velocity = maxwell_boltzmann_velocities(kT, system.masses, rng)
 
-    velocity = np.sqrt(kT / mass) * rng.standard_normal((n_atom, 3))
-    velocity -= (mass * velocity).sum(axis=0) / mass.sum()  # no centre-of-mass drift
-
-    dq_shell = None
+    dq_shell = None  # the previous geometry's charges warm-start the next SCC
 
     def acceleration():
         nonlocal dq_shell
