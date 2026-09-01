@@ -24,6 +24,7 @@ from .vacuum import Vacuum
 from .bragg import BraggResonator
 from .npom import NPoM
 from .rod import PlasmonicRod
+from .rod_mod import PlasmonicRod as PlasmonicRodModified
 
 __all__ = [
     "DummyCavity",
@@ -31,5 +32,6 @@ __all__ = [
     "BraggResonator",
     "NPoM",
     "PlasmonicRod",
+    "PlasmonicRodModified",
     "CYLINDRICAL",
 ]
