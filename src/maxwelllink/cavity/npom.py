@@ -90,6 +90,7 @@ class NPoM(DummyCavity):
         resolution: float = None,
         pml_nm: float = None,
         padding_nm: float = None,
+        bottom_pml: bool = False,
     ):
         """
         Initialize the parameters of a gold nanoparticle-on-mirror cavity.
@@ -129,7 +130,9 @@ class NPoM(DummyCavity):
             Free space (nm) between the particle and the boundary layers.
             Default: 0.15 reference wavelengths, sized for a far-field probe
             at ``omega_ref``; a redder window needs more (see Notes).
-
+        bottom_pml : bool, default: False
+            Whether to add PML at bottom of the cell (along z axis). This is 
+            needed if the material is not Au (such as Air for benchmark).
         Notes
         -----
         The default cell is not good enough for linear spectrum and purcell
@@ -202,7 +205,9 @@ class NPoM(DummyCavity):
         # the cell is centered on the origin (the Meep convention), and the
         # mirror is backed by the bottom wall, so the stack sits below center:
         # film | spacer | particle | padding | PML, from the bottom up
-        span_z = film + gap + 2.0 * radius + pad + boundary
+        span_z = film + gap + 2.0 * radius + pad + boundary 
+        if bottom_pml:
+            span_z += boundary
         z_mirror = film - 0.5 * span_z  # top surface of the gold film
         z_hot = z_mirror + 0.5 * gap  # gap center, on the symmetry axis
         self.mirror_surface_z = z_mirror
@@ -238,6 +243,10 @@ class NPoM(DummyCavity):
         self.boundary_layers = [
             mp.PML(thickness=boundary, direction=mp.Z, side=mp.High)
         ] + sides
+        if bottom_pml:
+            self.boundary_layers.append(
+                mp.PML(thickness=boundary, direction=mp.Z, side=mp.Low)
+            )
 
         # the hotspot is the gap center; molecules stay inside the spacer disk
         # underneath the particle
