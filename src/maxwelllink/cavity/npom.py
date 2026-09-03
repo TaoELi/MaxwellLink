@@ -209,6 +209,8 @@ class NPoM(DummyCavity):
         if bottom_pml:
             span_z += boundary
         z_mirror = film - 0.5 * span_z  # top surface of the gold film
+        if bottom_pml:
+            z_mirror += boundary  # the mirror is above the bottom PML
         z_hot = z_mirror + 0.5 * gap  # gap center, on the symmetry axis
         self.mirror_surface_z = z_mirror
 
