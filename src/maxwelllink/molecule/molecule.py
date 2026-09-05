@@ -70,6 +70,7 @@ class Molecule:
         rescaling_factor: float = 1.0,
         store_additional_data: bool = True,
         polarization_type: Optional[str] = None,
+        remove_static_self_field=False,
     ):
         """
         Parameters
@@ -100,17 +101,27 @@ class Molecule:
         store_additional_data : bool, default: True
             Whether to store additional data history as a growing list (if True) or only keep the latest five frames (if False).
         polarization_type : str or None, optional
-            Type of polarization to use in EM FDTD propagation. Options include ``analytical``, ``numerical``, ``transverse``,
-            ``point``, ``point-raw``, ``anisotropic``, and ``uniform``.
-            Default is ``analytical``. ``analytical`` uses analytical Gaussian polarization profile;
-            ``numerical`` uses numerical Gaussian polarization profile;
-            ``transverse`` uses approximate transverse components of numerical Gaussian polarization profile from FFT;
-            ``point`` uses point dipole approximation, which might not be accurate for evaluating self-interaction;
-            ``point-raw`` uses point dipole approximation with no sub-averaging over dx^3, which can be very inaccurate for evaluating self-interaction;
-            ``anisotropic`` uses anisotropic and analytical Gaussian polarization profile [``self.sigma`` should be a list of three floats for
+            Type of polarization to use in EM FDTD propagation. Options include ``analytical``, ``analytical-finite``,
+            ``numerical``, ``transverse``, ``point``, ``point-raw``, ``anisotropic``, and ``uniform``.
+            Default is ``analytical``.
+            - ``analytical`` uses analytical Gaussian polarization profile;
+            - ``analytical-finite`` behaves like ``analytical`` but renormalizes the polarization density suitable for small finite-size molecules (such as 1 nm^3);
+            - ``numerical`` uses numerical Gaussian polarization profile (almost the same as ``analytical``);
+            - ``transverse`` uses approximate transverse components of numerical Gaussian polarization profile from FFT;
+            - ``point`` uses point dipole approximation, which might not be accurate for evaluating self-interaction;
+            - ``point-raw`` uses point dipole approximation with no sub-averaging over dx^3, which can be very inaccurate for evaluating self-interaction;
+            - ``anisotropic`` uses anisotropic and analytical Gaussian polarization profile [``self.sigma`` should be a list of three floats for
             (sigma_x, sigma_y, sigma_z) instead of a single float].
-            ``uniform`` uses a polarization profile with uniform amplitude within the specified size and zero outside, which can be used to
+            - ``uniform`` uses a polarization profile with uniform amplitude within the specified size and zero outside, which can be used to
             approximate solid-state or continous media.
+        remove_static_self_field : bool or float, default: False
+            Subtract this molecule's own electrostatic self-field from the E-field self-interaction, which
+            suppresses the large spurious population oscillations during spontaneous emission.
+            As an experimental feature, this option is currently available in MEEP for cylindrical (m=0) ``analytical-finite`` coupling only.
+            - ``True`` subtracts the self-field of a molecule in
+            vacuum;
+            - a number ``>= 1`` represents the lossless relative permittivity of the host medium the
+            molecule sits in (e.g. ``1.4**2`` for an n = 1.4 spacer, as the self-field correction depends on the surrounding medium).
 
         Raises
         ------
@@ -146,6 +157,21 @@ class Molecule:
         self.polarization_type = (
             polarization_type.lower() if polarization_type else "analytical"
         )
+
+        # static self-field subtraction
+        if remove_static_self_field:
+            self.remove_static_self_field = float(remove_static_self_field)
+            if (
+                not np.isfinite(self.remove_static_self_field)
+                or self.remove_static_self_field < 1.0
+            ):
+                raise ValueError(
+                    "remove_static_self_field must be True (vacuum) or a finite "
+                    "host relative permittivity >= 1."
+                )
+        else:
+            self.remove_static_self_field = None
+
         # reserve for sources and additional data history
         self.sources = []
         self.additional_data_history = []

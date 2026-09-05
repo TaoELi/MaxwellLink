@@ -131,7 +131,7 @@ class NPoM(DummyCavity):
             Default: 0.15 reference wavelengths, sized for a far-field probe
             at ``omega_ref``; a redder window needs more (see Notes).
         bottom_pml : bool, default: False
-            Whether to add PML at bottom of the cell (along z axis). This is 
+            Whether to add PML at bottom of the cell (along z axis). This is
             needed if the material is not Au (such as Air for benchmark).
         Notes
         -----
@@ -205,7 +205,7 @@ class NPoM(DummyCavity):
         # the cell is centered on the origin (the Meep convention), and the
         # mirror is backed by the bottom wall, so the stack sits below center:
         # film | spacer | particle | padding | PML, from the bottom up
-        span_z = film + gap + 2.0 * radius + pad + boundary 
+        span_z = film + gap + 2.0 * radius + pad + boundary
         if bottom_pml:
             span_z += boundary
         z_mirror = film - 0.5 * span_z  # top surface of the gold film

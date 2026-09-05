@@ -234,6 +234,8 @@ def _accumulate_source_amplitudes(m, amp_mu, touched):
                     add(key, amp_mu[2])
             else:
                 add((m.polarization_fingerprint_hash, "Ez"), amp_mu[2])
+                # track the deposited current for _optionally_correct_self_field
+                m._self_field_current = float(amp_mu[2])
         else:
             # A fixed x or y dipole is represented by one complex |m|=1
             # sector.  The y kernel is a -i*m rotation of the x kernel.
@@ -488,6 +490,8 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         self.dt_au = self.m.dt_au
         self.polarization_type = self.m.polarization_type
         self.azimuthal_mode = int(azimuthal_mode)
+        # host medium of the optional static self-field correction
+        self.self_field_medium_epsilon = self.m.remove_static_self_field
 
         # if polarization_type is "numerical", "transverse", "point", or "point-raw",
         # self.m.resolution must be set to a positive number.
@@ -524,10 +528,14 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         # Molecule center/size remain Cartesian; only the wrapper size is
         # converted to Meep's (r, phi, z) notation.
         if self.dimensions == mp.CYLINDRICAL:
-            if self.polarization_type not in ("analytical", "transverse"):
+            if self.polarization_type not in (
+                "analytical",
+                "analytical-finite",
+                "transverse",
+            ):
                 raise ValueError(
-                    "Cylindrical molecule coupling supports 'analytical' and "
-                    "'transverse' polarization_type only."
+                    "Cylindrical molecule coupling supports 'analytical', "
+                    "'analytical-finite', and 'transverse' polarization_type only."
                 )
             if self.azimuthal_mode not in (-1, 0, 1):
                 raise ValueError(
@@ -549,6 +557,11 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                     "Cartesian molecule size (size.x = size.y)."
                 )
             self.size = mp.Vector3(self.size.x, 0.0, self.size.z)
+        elif self.polarization_type == "analytical-finite":
+            raise ValueError(
+                "polarization_type 'analytical-finite' supports cylindrical "
+                "(m=0) molecule coupling only."
+            )
 
         self._polarization_prefactor_3d = (
             1.0 / (2.0 * np.pi) ** 1.5 / self.sigma**5 * self.rescaling_factor
@@ -580,6 +593,130 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
                 * self.rescaling_factor
             )
 
+    def _prepare_sources(self, sim):
+        """
+        Build the molecule's Meep sources.
+        """
+
+        # now we optionally renomarlize the polarization density distribution
+        # if using 'analytical-finite' based on the size of box
+        if self.polarization_type == "analytical-finite" and not hasattr(
+            self, "_finite_kernel_moment"
+        ):
+            vol = mp.Volume(size=_to_mp_v3(self.size), center=_to_mp_v3(self.center))
+            moment = sim.integrate_field_function(
+                [mp.Ez],
+                lambda R, ez: (R.z - self.center.z)
+                * (R.z - self.center.z)
+                * exp(
+                    -(R.x * R.x + (R.z - self.center.z) * (R.z - self.center.z))
+                    / (2.0 * self.sigma**2)
+                ),
+                vol,
+            ).real
+            if not np.isfinite(moment) or moment <= 0:
+                raise ValueError(
+                    "The analytical-finite kernel has zero grid support; refine the grid."
+                )
+            self._finite_kernel_moment = moment
+            self._polarization_prefactor_3d = self.rescaling_factor / moment
+
+        if not self.sources:
+            self._init_sources()
+
+        if (
+            self.polarization_type == "analytical-finite"
+            and self.self_field_medium_epsilon is not None
+            and not hasattr(self, "_self_field_coefficient")
+        ):
+            self._calibrate_static_self_field_2d_cylindrical_m0(sim)
+
+    def _calibrate_static_self_field_2d_cylindrical_m0(self, sim):
+        """
+        Measure static field contribution for a unit dipole in a small uniform host.
+
+        Basically it tries to evaluate the frequency renormalization contribution in Abraham-Lorentz model.
+
+        Now hard-coded only for 2D cylindrical situation.
+        """
+
+        epsilon = self.self_field_medium_epsilon
+        resolution = sim.resolution
+        dt = sim.fields.dt
+        # smallest grid-aligned extent (at least two cells) covering the source
+        width = (
+            np.ceil(max(self.size.x, self.size.z, 2.0 / resolution) * resolution)
+            / resolution
+        )
+        # slow enough to be quasistatic on the reference cell defined below
+        ramp_steps = int(np.ceil(8 * width * np.sqrt(epsilon) / dt))
+        ramp_time = ramp_steps * dt
+
+        def unit_current_pulse(t):
+            # raised-cosine current whose discrete time integral is one, so
+            # the deposited dipole after the pulse is exactly one Meep unit
+            if 0 < t < ramp_time:
+                return (1.0 - np.cos(2.0 * np.pi * t / ramp_time)) / ramp_time
+            return 0.0
+
+        origin_z = sim.gv.origin_z()
+        reference_center_z = (
+            origin_z + round((self.center.z - origin_z) * resolution) / resolution
+        )
+        reference = mp.Simulation(
+            cell_size=mp.Vector3(8 * width, 0, 16 * width),
+            geometry_center=mp.Vector3(z=reference_center_z),
+            dimensions=mp.CYLINDRICAL,
+            m=0,
+            resolution=resolution,
+            Courant=sim.Courant,
+            default_material=mp.Medium(epsilon=epsilon),
+            boundary_layers=[mp.PML(2 * width)],
+            sources=[
+                mp.Source(
+                    mp.CustomSource(unit_current_pulse),
+                    component=mp.Ez,
+                    center=_to_mp_v3(self.center),
+                    size=_to_mp_v3(self.size),
+                    amp_func=self.sources[0].amp_func,
+                )
+            ],
+        )
+        try:
+            reference.init_sim()
+            # run one current ramp plus three settle periods
+            for _ in range(4 * ramp_steps):
+                reference.fields.step()
+            coefficient = -self._calculate_ep_integral(reference)[2]
+            if not np.isfinite(coefficient) or coefficient <= 0:
+                raise RuntimeError(
+                    "Static self-field calibration failed; check the source grid."
+                )
+            self._self_field_coefficient = coefficient
+            self._self_field_current = 0.0
+        finally:
+            reference.reset_meep()
+
+    def _optionally_correct_self_field(self, sim, field):
+        """
+        Remove this molecule's own static self-field.
+        """
+
+        # this is possible only after calling '_calibrate_static_self_field_2d_cylindrical_m0()'
+        if not hasattr(self, "_self_field_coefficient"):
+            return field
+        time = sim.meep_time()
+        if hasattr(self, "_self_field_time"):
+            self._self_field_dipole += (
+                time - self._self_field_time
+            ) * self._self_field_current
+        else:
+            self._self_field_dipole = 0.0
+        self._self_field_time = time
+        corrected = list(field)
+        corrected[2] += self._self_field_coefficient * self._self_field_dipole
+        return corrected
+
     def _init_sources(self):
         """
         Construct Meep sources for the molecule's polarization kernel (1D/2D/3D).
@@ -589,7 +726,7 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         Sources are memoized per polarization fingerprint and component to allow
         sharing across molecules with identical spatial kernels.
         """
-        if self.polarization_type == "analytical":
+        if self.polarization_type in ("analytical", "analytical-finite"):
             self._init_sources_gaussian_analytical()
         elif self.polarization_type == "numerical":
             self._init_sources_gaussian_numerical()
@@ -1274,7 +1411,7 @@ class MoleculeMeepWrapper(MoleculeDummyWrapper):
         list of float
             Regularized field integrals ``[I_x, I_y, I_z]`` in Meep units.
         """
-        if self.polarization_type in ["analytical", "numerical"]:
+        if self.polarization_type in ["analytical", "analytical-finite", "numerical"]:
             return self._calculate_ep_integral_gaussian_analytical(sim)
         elif self.polarization_type == "transverse":
             return self._calculate_ep_integral_transverse(sim)
@@ -1808,8 +1945,7 @@ def update_molecules_no_socket(
             for idx, m in enumerate(molecules):
                 # initialize molecular drivers directly
                 m.initialize_driver(assigned_id=idx)
-                if not m.sources:
-                    m._init_sources()
+                m._prepare_sources(sim)
             unique_sources = list(
                 {id(src): src for m in molecules for src in m.sources}.values()
             )
@@ -1826,6 +1962,7 @@ def update_molecules_no_socket(
                 regularized_efield_integrals[fp] = int_ep_mu
             else:
                 int_ep_mu = regularized_efield_integrals[fp]
+            int_ep_mu = m._optionally_correct_self_field(sim, int_ep_mu)
             int_ep_au = m.em_units.efield_em_to_au(int_ep_mu)
             m.propagate(int_ep_au)
 
@@ -1891,8 +2028,7 @@ def update_molecules_no_mpi(
 
             # ensure meep sources exist & install once
             for m in molecules:
-                if not m.sources:
-                    m._init_sources()
+                m._prepare_sources(sim)
             unique_sources = list(
                 {id(src): src for m in molecules for src in m.sources}.values()
             )
@@ -1924,6 +2060,7 @@ def update_molecules_no_mpi(
                 regularized_efield_integrals[fp] = int_ep_mu
             else:
                 int_ep_mu = regularized_efield_integrals[fp]
+            int_ep_mu = m._optionally_correct_self_field(sim, int_ep_mu)
             int_ep_au = m.em_units.efield_em_to_au(int_ep_mu)
             requests[m.molecule_id] = {
                 "efield_au": int_ep_au,
@@ -2057,8 +2194,7 @@ def update_molecules(
             _ = _bcast_bool(True)  # simple sync point
 
             for m in molecules:
-                if not m.sources:
-                    m._init_sources()
+                m._prepare_sources(sim)
 
             unique_sources = list(
                 {id(src): src for m in molecules for src in m.sources}.values()
@@ -2104,6 +2240,7 @@ def update_molecules(
                 regularized_efield_integrals[fp] = int_ep_mu
             else:
                 int_ep_mu = regularized_efield_integrals[fp]
+            int_ep_mu = m._optionally_correct_self_field(sim, int_ep_mu)
             int_ep_au = m.em_units.efield_em_to_au(int_ep_mu)
             requests[m.molecule_id] = {
                 "efield_au": int_ep_au,
