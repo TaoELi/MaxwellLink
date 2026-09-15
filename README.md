@@ -100,4 +100,4 @@ If you find **MaxwellLink** helpful for your research, please cite the following
 
 ## Publications using MaxwellLink
 
-- X Ji, and TE Li. *Nonlinear Freezing of Vibrational Polariton Transport via Mesoscale Simulations*. [arXiv:2606.27463](https://arxiv.org/abs/2606.27463) (2026). [[data](https://github.com/TaoELi/maxwelllink_examples)]
+- X Ji, and TE Li. *Nonlinear Freezing of Vibrational Polariton Transport via Mesoscale Simulations*. [Nano Lett. acs.nanolett.6c03367](https://doi.org/10.1021/acs.nanolett.6c03367) (2026). [[data](https://github.com/TaoELi/maxwelllink_examples)]
