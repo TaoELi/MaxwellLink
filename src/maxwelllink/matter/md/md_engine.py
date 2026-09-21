@@ -25,9 +25,6 @@ from ..helpers import THREADS_PER_BLOCK, to_host
 from .force_fields import DummyForceField, _FORCE_FIELDS, replicate_cell
 from .kernels.kernels_integrators import build_integrator_kernels
 
-# Langevin relaxation time (fs) used for the optional pre-NVT equilibration
-_PRE_NVT_FRICTION_FS = 100.0
-
 # The per-molecule properties every MD driver records.
 _BASE_RECORD_NAMES = ("temperature_K", "energy_au")
 
@@ -92,6 +89,8 @@ class MDEngine:
         restart: bool = False,
         verbose: bool = False,
         *,
+        pre_nvt_timestep_fs: float | None = None,
+        pre_nvt_friction_fs: float = 100.0,
         num: int = 1,
         xp=np,
         label: str = "MDEngine",
@@ -155,8 +154,14 @@ class MDEngine:
             ID so that different molecules are decorrelated even at the same ``seed``.
         pre_nvt_duration_ps : float, default: 20.0
             Duration of the pre-NVT equilibration in picoseconds. It uses a Langevin
-            thermostat with a 100 fs relaxation time at ``temperature_K``, regardless
-            of the production ``thermostat``.
+            thermostat at ``temperature_K`` with ``pre_nvt_friction_fs`` damping,
+            regardless of the production ``thermostat``.
+        pre_nvt_friction_fs : float, default: 100.0
+            Pre-NVT Langevin relaxation time in femtoseconds; must be finite and
+            positive. Independent of the production ``friction_fs``.
+        pre_nvt_timestep_fs : float, optional
+            Pre-NVT timestep in femtoseconds; None uses the coupling timestep.
+            The coupling timestep is restored after equilibration.
         reset_dipole : bool, default: True
             Whether to report the dipole moment relative to its value at time zero.
         seed : int, default: 0
@@ -210,6 +215,16 @@ class MDEngine:
         self.init_velocities = bool(init_velocities)
         self.pre_nvt = bool(pre_nvt)
         self.pre_nvt_duration_ps = float(pre_nvt_duration_ps)
+        self.pre_nvt_friction_fs = float(pre_nvt_friction_fs)
+        if not np.isfinite(self.pre_nvt_friction_fs) or self.pre_nvt_friction_fs <= 0:
+            raise ValueError("pre_nvt_friction_fs must be finite and positive.")
+        self.pre_nvt_timestep_fs = (
+            None if pre_nvt_timestep_fs is None else float(pre_nvt_timestep_fs)
+        )
+        if self.pre_nvt_timestep_fs is not None and (
+            not np.isfinite(self.pre_nvt_timestep_fs) or self.pre_nvt_timestep_fs <= 0
+        ):
+            raise ValueError("pre_nvt_timestep_fs must be finite and positive.")
         self.reset_dipole = bool(reset_dipole)
         self.seed = int(seed)
         self.kT = K_TO_AU * self.temperature_K
@@ -454,7 +469,13 @@ class MDEngine:
             self._forces_on_cpu(self.zero_field)
 
         if self.pre_nvt and not restarting:
-            self.equilibrate(self.pre_nvt_duration_ps, _PRE_NVT_FRICTION_FS)
+            coupling_dt = self.dt
+            try:
+                if self.pre_nvt_timestep_fs is not None:
+                    self.dt = self.pre_nvt_timestep_fs * FS_TO_AU
+                self.equilibrate(self.pre_nvt_duration_ps, self.pre_nvt_friction_fs)
+            finally:
+                self.dt = coupling_dt
             self.t = 0.0  # reset the clock so production dynamics start fresh
 
         # Baseline subtracted from the reported dipoles, as the LAMMPS fix's
