@@ -101,3 +101,6 @@ If you find **MaxwellLink** helpful for your research, please cite the following
 ## Publications using MaxwellLink
 
 - X Ji, and TE Li. *Nonlinear Freezing of Vibrational Polariton Transport via Mesoscale Simulations*. [Nano Lett. acs.nanolett.6c03367](https://doi.org/10.1021/acs.nanolett.6c03367) (2026). [[data](https://github.com/TaoELi/maxwelllink_examples)]
+
+- Meng, G.; Li, T. E. *Molecular Electrodynamic Relaxation in Dielectric and Plasmonic Cavities* Submitted (2026).
+
