@@ -1,8 +1,11 @@
 name: Publish to PyPI
 
 on:
+  release:
+    types: [published]
   push:
     branches: [ main ]
+    tags: ["v*"]
     paths:
       - "pyproject.toml"
       - "setup.py"
@@ -23,6 +26,11 @@ permissions:
   contents: read
   id-token: write
 
+# Serialize all publishing events so a push and release cannot upload together.
+concurrency:
+  group: pypi-publish
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: Build & Publish
@@ -40,7 +48,7 @@ jobs:
       - name: Install build tooling
         run: |
           python -m pip install -U pip
-          python -m pip install build packaging
+          python -m pip install build packaging twine
 
       - name: Read package version
         id: pkg
@@ -54,6 +62,15 @@ jobs:
           version = data["project"]["version"]
           print(f"Local version: {version}")
 
+          ref = os.environ["GITHUB_REF"]
+          if ref.startswith("refs/tags/"):
+              tag = ref.removeprefix("refs/tags/")
+              if tag != f"v{version}":
+                  raise SystemExit(
+                      f"Release tag {tag!r} does not match package version {version!r}. "
+                      "Update pyproject.toml before tagging a release."
+                  )
+
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"version={version}\n")
           PY
@@ -66,7 +83,7 @@ jobs:
           python - <<'PY'
           import json
           import os
-          import sys
+          import urllib.error
           import urllib.request
 
           from packaging.version import Version
@@ -74,11 +91,14 @@ jobs:
           package = "maxwelllink"
           local = os.environ["LOCAL_VERSION"]
           try:
-              with urllib.request.urlopen(f"https://pypi.org/pypi/{package}/json") as resp:
+              with urllib.request.urlopen(
+                  f"https://pypi.org/pypi/{package}/json", timeout=30
+              ) as resp:
                   data = json.load(resp)
                   published = data["info"]["version"]
-          except Exception as exc:  # pragma: no cover - network guard
-              print(f"Could not fetch PyPI metadata: {exc}")
+          except urllib.error.HTTPError as exc:
+              if exc.code != 404:
+                  raise
               published = ""
 
           should_publish = not published or Version(local) > Version(published)
@@ -88,11 +108,18 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"publish={'true' if should_publish else 'false'}\n")
               fh.write(f"pypi_version={published}\n")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+              fh.write(f"Package version: {local}; PyPI version: {published or 'none'}.\n")
+              if not should_publish:
+                  fh.write("Publication skipped: the package version is not newer than PyPI.\n")
           PY
 
       - name: Build distributions
         if: steps.version_check.outputs.publish == 'true'
-        run: python -m build
+        run: |
+          python -m build
+          python -m twine check --strict dist/*
 
       - name: Verify mxl init/clean CLI from built wheel
         if: steps.version_check.outputs.publish == 'true'
