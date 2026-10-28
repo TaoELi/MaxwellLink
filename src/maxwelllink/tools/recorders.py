@@ -7,7 +7,7 @@
 
 """
 Run-time output of the molecular drivers, one file per driver process: per-molecule
-properties to HDF5 or NPZ, and geometries to extended XYZ.
+properties to HDF5 or NPZ, and positions and/or velocities to extended XYZ.
 """
 
 import os
@@ -202,35 +202,56 @@ class PropertyRecorder:
 
 class XYZTrajectoryWriter:
     """
-    Geometries of a run, streamed to one extended-XYZ file, one frame per molecule.
+    Positions, atomic velocities, and/or body-frame angular velocities with
+    principal moments of inertia streamed to one extended-XYZ file, with one
+    frame per independent system. Each system may contain multiple physical molecules.
 
-    Every ``record_every_steps`` steps :meth:`write` appends one frame per molecule, in
-    molecule order, so the file is time-major: with ``num`` molecules, molecule ``k``
-    (its row in ``molecule_ids``) is every ``num``-th frame from frame ``k`` --
-    ``ase.io.read(path, index=slice(k, None, num))``, or
-    :func:`maxwelllink.tools.read_xyz_trajectory`. The comment line carries
-    ``time_au``, ``step`` and ``molecule_id``; per-atom columns beyond the positions
-    (e.g. Mulliken charges) are declared in ``per_atom`` and appear in the extended-XYZ
-    ``Properties`` string. Positions are written in Angstrom.
+    Every ``record_every_steps`` steps :meth:`write` appends one frame per system,
+    in ``molecule_ids`` order. The file is time-major: with ``num`` systems, system
+    ``k`` occupies every ``num``-th frame starting at frame ``k``.
+
+    For files containing positions, those frames can be read using
+    ``ase.io.read(path, index=slice(k, None, num))`` or
+    :func:`maxwelllink.tools.read_xyz_trajectory`. The latter returns positions
+    only, including for ``traj_content="all"``, and must not be used for files
+    containing only velocities or angular velocities.
+
+    The comment line carries ``time_au``, ``step`` and ``molecule_id``. Extra
+    per-atom scalar columns (e.g. Mulliken charges) are declared in ``per_atom``;
+    all selected columns appear in the extended-XYZ ``Properties`` string.
+    Positions are written in Angstrom; atomic velocities are in Bohr per atomic
+    time. Body-frame angular velocities are in inverse atomic time and always
+    accompanied by the corresponding principal moments of inertia in electron-mass
+    times Bohr-squared units. The angular block has six columns: three angular
+    velocities followed by three moments, repeated for every atom of the molecule.
+    They are declared as ``angular_velocity_body_au:R:3`` and
+    ``principal_moments_au:R:3`` in ``Properties``.
 
     Parameters
     ----------
     path : str
         Output file; missing folders are created.
     symbols : sequence of str
-        Element symbol of every atom, in the order the positions use.
+        Element symbol of every atom, in the order used by the selected vectors.
     molecule_ids : sequence of int
-        The molecules in frame order.
+        The independent system IDs, in frame order.
     dt_au : float
-        The time step, written into the first comment of the file.
+        The time step in atomic units, written into every frame's comment line.
     record_every_steps : int, default: 1
         Write every this many steps.
     record_max_steps : int, optional
         Stop after this many records; ``None`` for no cap.
     append : bool, default: False
         Continue an existing file (a restart) instead of overwriting it.
+        The existing file must use the same ``traj_content`` and ``per_atom``
+        layout; its columns are not validated before appending.
     per_atom : sequence of str, default: ()
         Names of extra per-atom scalar columns :meth:`write` receives.
+    traj_content : str, default: "positions"
+        Content to record: "positions", "velocities", "angular_velocity_body",
+        or "all". Angular output always includes the three corresponding principal
+        moments of inertia. "all" records positions, atomic velocities, and this
+        six-column angular block.
     """
 
     def __init__(
@@ -243,6 +264,7 @@ class XYZTrajectoryWriter:
         record_max_steps=None,
         append=False,
         per_atom=(),
+        traj_content="positions",
     ):
         self.path = str(path)
         self.symbols = [str(symbol) for symbol in symbols]
@@ -255,6 +277,15 @@ class XYZTrajectoryWriter:
             None if record_max_steps is None else int(record_max_steps)
         )
         self.per_atom = tuple(str(name) for name in per_atom)
+        if traj_content not in ("positions", "velocities", "angular_velocity_body", "all",):
+            raise ValueError(
+                "traj_content must be positions, velocities, "
+                "angular_velocity_body, or all."
+            )
+
+        self.save_positions = traj_content in ("positions", "all")
+        self.save_velocities = traj_content in ("velocities", "all")
+        self.save_angular_velocity_body = traj_content in ("angular_velocity_body", "all")
         self.n_records = 0
 
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
@@ -265,17 +296,24 @@ class XYZTrajectoryWriter:
                 n_frames = sum(1 for line in handle if line.strip() == header)
             self.n_records = n_frames // max(len(self.molecule_ids), 1)
         self._handle = open(self.path, "a" if exists else "w")
-        properties = "species:S:1:pos:R:3" + "".join(
-            f":{name}:R:1" for name in self.per_atom
-        )
+        properties = "species:S:1"
+        if self.save_positions:
+            properties += ":pos:R:3"
+        if self.save_velocities:
+            properties += ":velocities_au:R:3"
+        if self.save_angular_velocity_body:
+            properties += ":angular_velocity_body_au:R:3"+":principal_moments_au:R:3"
+        properties += "".join(f":{name}:R:1" for name in self.per_atom)
         self._comment = (
             f"Properties={properties} dt_au={self.dt_au:.10g} "
             "time_au={time:.10g} step={step:d} molecule_id={mid:d}"
         )
 
-    def write(self, step_index, time_au, positions_bohr, per_atom=None):
+    def write(self, step_index, time_au, positions_bohr=None, per_atom=None, velocities_au=None,
+        angular_velocity_body_au=None):
         """
-        Append one frame per molecule if ``step_index`` falls on the recording stride.
+        Append one frame per independent system on the recording stride,
+        unless ``record_max_steps`` has been reached.
 
         Parameters
         ----------
@@ -283,10 +321,20 @@ class XYZTrajectoryWriter:
             Number of production steps taken so far, counting from one.
         time_au : float
             The time after that step, in atomic units.
-        positions_bohr : array-like of float, shape (num, n_atom, 3)
-            Every molecule's geometry in Bohr.
+        positions_bohr : array-like of float, shape (num, n_atom, 3), optional
+            Every system's atomic positions in Bohr. Required when positions
+            are selected and a frame is written.
         per_atom : dict of str to array-like of float, shape (num, n_atom), optional
             The extra per-atom columns, keyed by the names given at construction.
+        velocities_au : array-like of float, shape (num, n_atom, 3), optional
+            Every system's atomic velocities in atomic units (Bohr / atomic time).
+            Required when velocities are selected and a frame is written.
+        angular_velocity_body_au : array-like of float, shape (num, n_atom, 6), optional
+            Three molecular body-frame angular velocities followed by their three
+            principal moments of inertia, repeated for each atom of the molecule.
+            Angular velocities are in inverse atomic time; moments are in
+            electron-mass times Bohr-squared units. Required when angular output
+            is selected.
         """
 
         if int(step_index) % self.record_every_steps != 0:
@@ -297,8 +345,32 @@ class XYZTrajectoryWriter:
         ):
             return
         num, n_atom = len(self.molecule_ids), len(self.symbols)
-        positions = np.asarray(positions_bohr, dtype=float).reshape(num, n_atom, 3)
-        positions = positions / BOHR_PER_ANG
+        vector_columns = []
+
+        if self.save_positions:
+            if positions_bohr is None:
+                raise ValueError("positions_bohr is required.")
+            positions = np.asarray(positions_bohr, dtype=float).reshape(
+                num, n_atom, 3
+            )
+            vector_columns.append(positions / BOHR_PER_ANG)
+
+        if self.save_velocities:
+            if velocities_au is None:
+                raise ValueError("velocities_au is required.")
+            velocities = np.asarray(velocities_au, dtype=float).reshape(
+                num, n_atom, 3
+            )
+            vector_columns.append(velocities)
+
+        if self.save_angular_velocity_body:
+            if angular_velocity_body_au is None:
+                raise ValueError("angular_velocity_body_au is required.")
+            angular_velocity_body = np.asarray(
+                angular_velocity_body_au, dtype=float
+            ).reshape(num, n_atom, 6)  # 3 for angular velocity, 3 for principal moments
+            vector_columns.append(angular_velocity_body)
+
         extras = [
             np.asarray(per_atom[name], dtype=float).reshape(num, n_atom)
             for name in self.per_atom
@@ -309,7 +381,8 @@ class XYZTrajectoryWriter:
             lines.append(
                 self._comment.format(time=float(time_au), step=int(step_index), mid=mid)
             )
-            columns = [positions[k]] + [extra[k][:, None] for extra in extras]
+            columns = [array[k] for array in vector_columns]
+            columns += [extra[k][:, None] for extra in extras]
             values = np.hstack(columns)
             for symbol, row in zip(self.symbols, values):
                 lines.append(symbol + " " + " ".join(f"{v:.8f}" for v in row))

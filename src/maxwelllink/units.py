@@ -22,6 +22,7 @@ CM_INV_TO_EV = 1.0 / EV_TO_CM_INV
 EV_TO_AU = 1.0 / AU_TO_EV
 K_TO_AU = 3.166811563e-6  # 1 K in atomic units of energy
 AU_TO_K = 1.0 / K_TO_AU
+K_TO_CM_INV = K_TO_AU * AU_TO_CM_INV
 
 # other units
 C_NM_PER_FS = 299.792458  # speed of light in nm/fs

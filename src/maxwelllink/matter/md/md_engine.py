@@ -26,8 +26,37 @@ from .force_fields import DummyForceField, _FORCE_FIELDS, replicate_cell
 from .kernels.kernels_integrators import build_integrator_kernels
 
 # The per-molecule properties every MD driver records.
-_BASE_RECORD_NAMES = ("temperature_K", "energy_au")
+_BASE_RECORD_NAMES = ("temperature_K", "energy_au", "stretch_au", "bend_au",)
 
+_ROTATION_COMPONENT_NAMES = (
+    "kinetic_rot_1_au",
+    "kinetic_rot_2_au",
+    "kinetic_rot_3_au",
+)
+
+_FULL_RECORD_NAMES = (
+    "temperature_K",
+    "energy_au",
+    "stretch_au",
+    "bend_au",
+    "kinetic_au",
+    "potential_au",
+    "kinetic_trans_au",
+    "kinetic_rot_au",
+    *_ROTATION_COMPONENT_NAMES,
+    "kinetic_vib_au",
+    "energy_vib_au",
+)
+# Properties needed to calculate each derived quantity.
+_PROPERTY_DEPENDENCIES = {
+    "temperature_K": ("kinetic_au",),
+    "energy_au": ("kinetic_au", "potential_au"),
+    "energy_vib_au": (
+        "kinetic_vib_au",
+        "stretch_au",
+        "bend_au",
+    ),
+}
 
 @dataclass(frozen=True, eq=False)
 class MDStepResult:
@@ -89,6 +118,8 @@ class MDEngine:
         restart: bool = False,
         verbose: bool = False,
         *,
+        property_list="base",
+        traj_content="positions",
         pre_nvt_timestep_fs: float | None = None,
         pre_nvt_friction_fs: float = 100.0,
         num: int = 1,
@@ -178,9 +209,32 @@ class MDEngine:
             Turns on a run-time record of per-molecule properties written to this file every
             ``record_every_steps`` production steps: HDF5, streamed while the run goes,
             unless the name ends in ``.npz`` or ``h5py`` is missing.
+        property_list : str or list or tuple, default: "base"
+            Properties written to property_filename. Only used when
+            property_filename is set. "base" selects _BASE_RECORD_NAMES;
+            "all" selects _FULL_RECORD_NAMES. Other strings use semicolons
+            between property names. Lists and tuples are also accepted.
+            Duplicate names are removed while preserving their first occurrence.
         traj_filename : str, optional
-            Turns on a geometry trajectory in extended XYZ (Angstrom), one frame per
-            molecule every ``record_every_steps`` steps.
+            Extended-XYZ output with one frame per independent system every
+            ``record_every_steps`` production steps. Positions are in Angstrom,
+            atomic velocities in Bohr per atomic time, and body-frame angular
+            velocities in inverse atomic time. Angular output automatically
+            includes the three corresponding principal moments of inertia in
+            electron-mass times Bohr-squared units. A system may contain multiple
+            physical molecules; each molecule's six values are repeated for all
+            its atoms.
+        traj_content : str, default: "positions"
+            Content to include in the trajectory file: "positions", "velocities",
+            "angular_velocity_body", or "all". Angular output contains three
+            angular-velocity components followed by their three principal moments
+            of inertia. "all" includes positions, atomic velocities, and these
+            six angular-output columns.
+            Only used when ``traj_filename`` is set. Velocities and angular
+            velocities are sampled before the final Langevin O half-step, at the
+            same state as the kinetic properties. Body-frame components use
+            instantaneous principal axes ordered by decreasing moment of inertia;
+            their signs and degenerate directions are not tracked between frames.
         record_every_steps : int, default: 10
             Record every this many production steps, for both files.
         record_max_steps : int, optional
@@ -238,6 +292,17 @@ class MDEngine:
             None if property_filename is None else str(property_filename)
         )
         self.traj_filename = None if traj_filename is None else str(traj_filename)
+        self.traj_content = str(traj_content).strip().lower()
+        if self.traj_content not in ("positions", "velocities", "angular_velocity_body", "all"):
+            raise ValueError("traj_content must be positions, velocities, angular_velocity_body, or all.")
+        self._write_trajectory_velocities = (
+            self.traj_filename is not None
+            and self.traj_content in ("velocities", "all")
+        )
+        self._write_angular_velocity_body = (
+            self.traj_filename is not None
+            and self.traj_content in ("angular_velocity_body", "all")
+        )
         self.record_every_steps = int(record_every_steps)
         self.record_max_steps = record_max_steps
         self._recorder = None
@@ -327,8 +392,51 @@ class MDEngine:
         self.n_atoms = self.ff.n_atoms
         self.x0 = np.ascontiguousarray(self.ff.positions, dtype=float)
         self.n_terms = len(self.ff.reported_term_names)
-        # the force field's energy terms recorded next to the base properties
-        self.record_names = _BASE_RECORD_NAMES + tuple(self.ff.reported_term_names)
+
+        # Disable property recording unless a filename is provided.
+        self.record_names = ()
+        self.compute_names = ()
+
+        if self.property_filename is not None:
+            # Parse the requested output properties.
+            if isinstance(property_list, str):
+                option = property_list.strip()
+                if option.lower() == "base": requested_names = _BASE_RECORD_NAMES
+                elif option.lower() == "all": requested_names = _FULL_RECORD_NAMES
+                else: requested_names = option.split(";")
+            elif isinstance(property_list, (list, tuple)):
+                requested_names = property_list
+            else:
+                raise TypeError("property_list must be a string, a list or a tuple.")
+
+            # Check types before stripping whitespace and removing duplicates.
+            if any(not isinstance(name, str) for name in requested_names):
+                raise TypeError("Every property name must be a string.")
+
+            # Preserve the first occurrence of each property.
+            requested_names = tuple(dict.fromkeys(name.strip() for name in requested_names))
+
+            if not requested_names or any(not name for name in requested_names):
+                raise ValueError("property_list contains no name or an empty name.")
+
+            unknown_names = tuple(name for name in requested_names if name not in _FULL_RECORD_NAMES)
+            if unknown_names:
+                raise ValueError(
+                    f"Unknown properties: {unknown_names}. "
+                    f"Allowed properties: {_FULL_RECORD_NAMES}"
+                )
+
+            # Store the output tuple in the requested order.
+            self.record_names = requested_names
+
+            # Add each property's dependencies before the property itself.
+            compute_names = ()
+            for name in self.record_names:
+                compute_names += ( _PROPERTY_DEPENDENCIES.get(name, ()) + (name,))
+
+            # Store the calculation tuple with ordered deduplication.
+            self.compute_names = tuple(dict.fromkeys(compute_names))
+
         # element symbols of the geometry, for the trajectory file
         self.symbols = (
             list(self.ff.molecule_symbols) * self.n_molecules or ["X"] * self.n_atoms
@@ -437,9 +545,28 @@ class MDEngine:
         self._dipole_force = xp.zeros((n, 3), dtype=xp.float64)  # mu at the force time
         self._energy = xp.zeros(n, dtype=xp.float64)
 
+        # Columns used to store calculated properties.
+        self._property_columns = {name: column for column, name in enumerate(self.compute_names)}
+        self._property_values = xp.empty((n, len(self.compute_names)), dtype=xp.float64)
+        # Columns selected for output, in the requested order.
+        self._record_columns = tuple(self._property_columns[name] for name in self.record_names)
+        # Columns of the existing force-field energy terms.
+        self._term_columns = {name: column for column, name in enumerate(self.ff.reported_term_names)}
+
+        self._gpu_property_momenta = None
         if self._on_gpu:
             from numba import cuda
             from numba.cuda.random import init_xoroshiro128p_states, xoroshiro128p_dtype
+            if any(
+                name in self._property_columns
+                for name in (
+                    "kinetic_trans_au",
+                    "kinetic_rot_au",
+                    "kinetic_vib_au",
+                    *_ROTATION_COMPONENT_NAMES,
+                )
+            ) or self._write_trajectory_velocities or self._write_angular_velocity_body:
+                self._gpu_property_momenta = xp.empty_like(self.p)
 
             self.kernels = build_integrator_kernels()
             self.mass_flat = xp.asarray(mass.ravel())  # the kernels index by atom
@@ -511,9 +638,79 @@ class MDEngine:
                 self.symbols,
                 self.molecule_ids,
                 self.dt,
+                traj_content=self.traj_content,
                 **output,
             )
             print(f"[{self._label}] Writing the trajectory to {self._trajectory.path}")
+
+    def _should_record_properties(self, step_index):
+        """Check whether this step needs a property record."""
+        recorder = self._recorder
+        return (
+            recorder is not None
+            and step_index % self.record_every_steps == 0
+            and (
+                recorder.record_max_steps is None
+                or recorder.n_records < recorder.record_max_steps
+            )
+        )
+
+    def _should_record_trajectories(self, step_index):
+        """Check whether this step needs a trajectory record."""
+        trajectory = self._trajectory
+        return (
+            trajectory is not None
+            and step_index % self.record_every_steps == 0
+            and (
+                trajectory.record_max_steps is None
+                or trajectory.n_records < trajectory.record_max_steps
+            )
+        )
+
+    def _complete_property_values(self):
+        """Fill existing energy results and derived properties."""
+        values = self._property_values
+        columns = self._property_columns
+
+        for name in self.compute_names:
+            column = columns[name]
+
+            if name in (
+                "kinetic_au",
+                "kinetic_trans_au",
+                "kinetic_rot_au",
+                "kinetic_vib_au",
+                *_ROTATION_COMPONENT_NAMES,
+            ):
+                # These columns are filled during integration.
+                continue
+
+            elif name == "potential_au":
+                values[:, column] = self.potential
+
+            elif name == "energy_au":
+                values[:, column] = self._energy
+
+            elif name in self._term_columns:
+                values[:, column] = self._terms[:, self._term_columns[name]]
+
+            elif name == "temperature_K":
+                values[:, column] = (
+                    2.0 * values[:, columns["kinetic_au"]]
+                    / (3.0 * self.n_atoms)
+                    / K_TO_AU
+                )
+
+            elif name == "energy_vib_au":
+                values[:, column] = (
+                    values[:, columns["kinetic_vib_au"]]
+                    + values[:, columns["stretch_au"]]
+                    + values[:, columns["bend_au"]]
+                )
+
+    def _gather_property_values(self):
+        """Select output columns and return a NumPy array."""
+        return to_host(self._property_values[:, list(self._record_columns)])
 
     # ----------------------- one OBABO step under E-field ---------------------------
 
@@ -562,7 +759,7 @@ class MDEngine:
                 self.F[d] = forces
                 self.potential[d] = potential
 
-    def _step_on_cpu(self, efield, c1h, noise):
+    def _step_on_cpu(self, efield, c1h, noise, sample_properties=False, sample_trajectory=False):
         """
         Advance every system by one OBABO step vectorized over the batch.
 
@@ -574,6 +771,20 @@ class MDEngine:
             Langevin O half-step scaling; ``1.0`` disables the thermostat.
         noise : numpy.ndarray of float, shape (na, 1)
             Momentum noise amplitude of the Langevin half-step per atom.
+        sample_properties : bool, default: False
+            Fill selected kinetic-property columns before the final O half-step.
+        sample_trajectory : bool, default: False
+            Prepare the selected trajectory arrays before the final O half-step.
+
+        Returns
+        -------
+        trajectory_velocities : numpy.ndarray or None
+            Pre-O atomic velocities, shape ``(num, n_atoms, 3)``; ``None`` when
+            atomic velocities are not selected for this step.
+        angular_velocity_body : numpy.ndarray or None
+            Pre-O molecular trajectory data, shape ``(num, n_molecules, 6)``:
+            three body-frame angular velocities followed by their three principal
+            moments of inertia. ``None`` when angular output is not selected.
         """
 
         dt, mass = self.dt, self.mass
@@ -601,9 +812,27 @@ class MDEngine:
         kinetic = 0.5 * np.sum(self.p**2 / mass, axis=(1, 2))
         self._energy[:] = kinetic + self.potential
 
+        trajectory_velocities = None
+        angular_velocity_body = None
+
+        if sample_properties:
+            if "kinetic_au" in self._property_columns:
+                self._property_values[:, self._property_columns["kinetic_au"]] = kinetic
+            
+        if sample_properties or (sample_trajectory and self._write_angular_velocity_body):
+            angular_velocity_body = self._compute_molecular_kinetic(
+                self.p,
+                sample_trajectory=sample_trajectory,
+            )
+
+        if sample_trajectory and self._write_trajectory_velocities:
+            trajectory_velocities = self.p / mass
+        
         if c1h < 1.0:  # O
             self._langevin_half_kick_on_cpu(c1h, noise)
 
+        return trajectory_velocities, angular_velocity_body
+    
     def _langevin_half_kick_on_cpu(self, c1h, noise):
         """
         Apply one Ornstein-Uhlenbeck half-step to the momenta of every system.
@@ -623,7 +852,7 @@ class MDEngine:
         for d, rng in enumerate(self._rngs):
             self.p[d] = c1h * self.p[d] + noise * rng.standard_normal(shape)
 
-    def _step_on_gpu(self, efield, c1h, noise):
+    def _step_on_gpu(self, efield, c1h, noise, sample_properties=False, sample_trajectory=False):
         """
         Advance every system by one OBABO step with four kernel launches.
 
@@ -635,10 +864,30 @@ class MDEngine:
             Langevin O half-step scaling; ``1.0`` disables the thermostat.
         noise : numpy.ndarray of float, shape (na, 1)
             Momentum noise amplitude of the Langevin half-step per atom.
+        sample_properties : bool, default: False
+            Fill selected property columns using the state before the final
+            Langevin O half-step.
+        sample_trajectory : bool, default: False
+            Prepare selected trajectory arrays from the pre-O momentum copy.
+
+        Returns
+        -------
+        trajectory_velocities : cupy.ndarray or None
+            Pre-O atomic velocities, shape ``(num, n_atoms, 3)``; ``None`` when
+            atomic velocities are not selected for this step.
+        angular_velocity_body : cupy.ndarray or None
+            Pre-O molecular trajectory data, shape ``(num, n_molecules, 6)``:
+            three body-frame angular velocities followed by their three principal
+            moments of inertia. ``None`` when angular output is not selected.
         """
 
         noise_dev = self.xp.asarray(noise.ravel())
         thermostat = c1h < 1.0
+        
+        kinetic_column = (self._property_columns.get("kinetic_au", -1) if sample_properties else -1)
+        sample_molecular = ((sample_properties or sample_trajectory) and self._gpu_property_momenta is not None)
+        property_momenta = (self._gpu_property_momenta if sample_molecular else self.p)
+
         self.kernels["pre"][self.num, THREADS_PER_BLOCK](
             self.x,
             self.p,
@@ -669,7 +918,154 @@ class MDEngine:
             self._dipole_half,
             self._dipole_force,
             self._energy,
+            kinetic_column,
+            self._property_values,
+            sample_molecular,
+            property_momenta,
         )
+
+        trajectory_velocities = None
+        angular_velocity_body = None
+
+        if sample_properties or sample_trajectory:
+            from numba import cuda
+
+            cuda.synchronize()
+
+            if sample_properties or (sample_trajectory and self._write_angular_velocity_body):
+                angular_velocity_body = self._compute_molecular_kinetic(
+                    property_momenta,
+                    sample_trajectory=sample_trajectory,
+                )
+            if sample_trajectory and self._write_trajectory_velocities:
+                trajectory_velocities = property_momenta / self.mass
+
+        return trajectory_velocities, angular_velocity_body
+    
+    def _compute_molecular_kinetic(self, momenta, sample_trajectory=False):
+        """Fill kinetic properties and optionally return angular velocities with inertia.
+
+        Parameters
+        ----------
+        momenta : numpy.ndarray or cupy.ndarray
+            Atomic momenta before the final Langevin O half-step, with shape
+            ``(num, n_atoms, 3)``. This array is only read.
+        sample_trajectory : bool, default: False
+            Whether this step needs a trajectory frame. Angular velocities and
+            principal moments are returned only when angular output is also
+            selected by ``traj_content``.
+
+        Returns
+        -------
+        numpy.ndarray or cupy.ndarray or None
+            Molecular trajectory data, shape ``(num, n_molecules, 6)``: the first
+            three columns are body-frame angular velocities in inverse atomic
+            time, and the last three are principal moments of inertia in
+            electron-mass times Bohr-squared units. Both follow instantaneous
+            principal axes ordered by decreasing moment of inertia. Inactive
+            axes have zero angular velocity; the moments retain their original
+            eigenvalues. The basis is not made continuous between frames.
+            Returns ``None`` when angular output is not selected for this step.
+        """
+
+        xp = self.xp
+        columns = self._property_columns
+        values = self._property_values
+
+        need_trans = "kinetic_trans_au" in columns
+        need_rot_components = any(name in columns for name in _ROTATION_COMPONENT_NAMES)
+        need_rot = (
+            "kinetic_rot_au" in columns
+            or need_rot_components
+            or (sample_trajectory and self._write_angular_velocity_body)
+        )
+        need_vib = "kinetic_vib_au" in columns
+
+        if not (need_trans or need_rot or need_vib):
+            return
+
+        atoms_per_molecule = self.n_atoms // self.n_molecules
+        shape = (self.num, self.n_molecules, atoms_per_molecule, 3)
+
+        momentum = momenta.reshape(shape)
+        mass = self.mass.reshape(self.n_molecules, atoms_per_molecule)
+        total_mass = mass.sum(axis=1)
+
+        # Molecular center-of-mass velocity.
+        velocity_com = (momentum.sum(axis=2) / total_mass[None, :, None])
+
+        if need_trans:
+            energy_molecule = (0.5 * total_mass[None, :] * xp.sum(velocity_com**2, axis=-1))
+            values[:, columns["kinetic_trans_au"]] = energy_molecule.sum(axis=1)
+
+        if not (need_rot or need_vib):
+            return
+
+        position = self.x.reshape(shape)
+
+        # Reconstruct molecules without changing the simulation positions.
+        if self.ff.box is not None:
+            box = xp.asarray(self.ff.box).reshape(1, 1, 1, 3)
+            anchor = position[:, :, :1, :]
+            displacement = position - anchor
+            position = anchor + (displacement - box * xp.rint(displacement / box))
+
+        mass_weights = mass[None, :, :, None]
+        position_com = xp.sum(position * mass_weights, axis=2) / total_mass[None, :, None]
+        relative_position = position - position_com[:, :, None, :]
+        relative_velocity = momentum / mass_weights - velocity_com[:, :, None, :]
+
+        x = relative_position[..., 0]
+        y = relative_position[..., 1]
+        z = relative_position[..., 2]
+        weights = mass[None, :, :]
+
+        inertia = xp.empty((self.num, self.n_molecules, 3, 3), dtype=xp.float64)
+        inertia[..., 0, 0] = xp.sum(weights * (y*y + z*z), axis=-1)
+        inertia[..., 1, 1] = xp.sum(weights * (x*x + z*z), axis=-1)
+        inertia[..., 2, 2] = xp.sum(weights * (x*x + y*y), axis=-1)
+        inertia[..., 0, 1] = inertia[..., 1, 0] = -xp.sum(weights * x * y, axis=-1)
+        inertia[..., 0, 2] = inertia[..., 2, 0] = -xp.sum(weights * x * z, axis=-1)
+        inertia[..., 1, 2] = inertia[..., 2, 1] = -xp.sum(weights * y * z, axis=-1)
+
+        angular_momentum = xp.sum(xp.cross(relative_position, mass_weights * relative_velocity), axis=2)
+
+        # Principal axes ordered by decreasing moment of inertia.
+        principal_moments, principal_axes = xp.linalg.eigh(inertia)
+        principal_moments = principal_moments[..., ::-1]
+        principal_axes = principal_axes[..., :, ::-1]
+
+        # Use the same relative cutoff as the previous pseudoinverse.
+        valid = principal_moments > 1e-10 * xp.maximum(principal_moments[..., :1], 0.0)
+        safe_moments = xp.where(valid, principal_moments, 1.0)
+
+        # Angular momentum and angular velocity in the principal-axis frame.
+        angular_momentum_body = (xp.swapaxes(principal_axes, -1, -2) @ angular_momentum[..., None])[..., 0]
+
+        angular_velocity_body = xp.where(valid, angular_momentum_body / safe_moments, 0.0)
+
+        # Transform back for the existing vibrational-velocity calculation.
+        angular_velocity = (principal_axes @ angular_velocity_body[..., None])[..., 0]
+
+        if need_rot_components:
+            component_energy = 0.5 * angular_momentum_body * angular_velocity_body
+            for axis, name in enumerate(_ROTATION_COMPONENT_NAMES):
+                if name in columns:
+                    values[:, columns[name]] = component_energy[..., axis].sum(axis=1)
+
+        if "kinetic_rot_au" in columns:
+            energy_molecule = 0.5 * xp.sum(angular_velocity * angular_momentum, axis=-1)
+            values[:, columns["kinetic_rot_au"]] = energy_molecule.sum(axis=1)
+
+        if need_vib:
+            rotational_velocity = xp.cross(angular_velocity[:, :, None, :], relative_position)
+            vibrational_velocity = relative_velocity - rotational_velocity
+            energy_molecule = 0.5 * xp.sum(weights * xp.sum(vibrational_velocity**2, axis=-1), axis=-1)
+            values[:, columns["kinetic_vib_au"]] = energy_molecule.sum(axis=1)
+
+        if sample_trajectory and self._write_angular_velocity_body:
+            # Pack only the trajectory output; energy calculations above use 3-component omega.
+            return xp.concatenate((angular_velocity_body, principal_moments), axis=-1)
 
     def step(self, efield_au):
         """
@@ -702,33 +1098,66 @@ class MDEngine:
                 f"efield_au must have shape ({self.num}, 3); got {tuple(field.shape)}."
             )
 
-        field = self.xp.asarray(field)  # host -> device (one copy)
-        if self._on_gpu:
-            self._step_on_gpu(field, self.c1h, self.noise)
-        else:
-            self._step_on_cpu(field, self.c1h, self.noise)
+        next_step = self._step_index + 1
+        sample_properties = self._should_record_properties(next_step)
+        sample_trajectory = self._should_record_trajectories(next_step)
+
+        field = self.xp.asarray(field)
+        step_method = self._step_on_gpu if self._on_gpu else self._step_on_cpu
+        trajectory_velocities, angular_velocity_body = step_method(
+            field,
+            self.c1h,
+            self.noise,
+            sample_properties=sample_properties,
+            sample_trajectory=sample_trajectory,
+        )
+
         self._dipole_half -= self.mu_initial  # report relative to time zero
         self._dipole_force -= self.mu_initial
         self.t += self.dt
 
-        # the trajectory record: T = 2 K / (3 N k_B) with K = E - U the kinetic
-        # energy at the force time, the total energy, then the force field's terms
-        self._step_index += 1
-        if self._recorder is not None or self._trajectory is not None:
-            if self._step_index % self.record_every_steps == 0:
-                if self._recorder is not None:
-                    energy = to_host(self._energy)
-                    potential = to_host(self.potential)
-                    temperature = (
-                        2.0 * (energy - potential) / (3.0 * self.n_atoms) / K_TO_AU
-                    )
-                    self._recorder.record(
-                        self._step_index,
-                        self.t,
-                        np.column_stack((temperature, energy, to_host(self._terms))),
-                    )
-                if self._trajectory is not None:
-                    self._trajectory.write(self._step_index, self.t, to_host(self.x))
+        self._step_index = next_step
+
+        # Selected properties, shared by CPU and GPU.
+        if sample_properties:
+            self._complete_property_values()
+            values = self._gather_property_values()
+
+            self._recorder.record(
+                self._step_index,
+                self.t,
+                values,
+            )
+
+        # Independent trajectory output from the pre-O state.
+        if sample_trajectory:
+            positions = None
+            velocities = None
+            angular_velocity_atoms = None
+
+            if self.traj_content in ("positions", "all"):
+                positions = to_host(self.x)
+
+            if self.traj_content in ("velocities", "all"):
+                velocities = to_host(trajectory_velocities)
+
+            if angular_velocity_body is not None:
+                # Repeat each molecule's [omega_1, omega_2, omega_3, I_1, I_2, I_3].
+                atoms_per_molecule = self.n_atoms // self.n_molecules
+                angular_velocity_atoms = np.repeat(
+                    to_host(angular_velocity_body),
+                    atoms_per_molecule,
+                    axis=1,
+                )
+
+            self._trajectory.write(
+                self._step_index,
+                self.t,
+                positions_bohr=positions,
+                velocities_au=velocities,
+                angular_velocity_body_au=angular_velocity_atoms,
+            )
+
         return MDStepResult(
             amplitude_au=to_host(self._amplitude),
             dipole_half_au=to_host(self._dipole_half),
@@ -921,6 +1350,8 @@ class MDEngine:
         self.close_outputs()
         self.x = self.p = self.F = None
         self._terms = None
+        self._property_values = None
+        self._gpu_property_momenta = None
         self._amplitude = self._dipole_half = self._dipole_force = self._energy = None
         self.mu_initial = None
         self.potential = None

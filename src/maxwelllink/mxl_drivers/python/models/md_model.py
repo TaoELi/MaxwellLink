@@ -56,6 +56,9 @@ class MDModel(DummyModel):
         restart: bool = False,
         verbose: bool = False,
         backend: str = "cpu",
+        *,
+        property_list="base",
+        traj_content="positions",
     ):
         """
         Initialize the classical MD driver.
@@ -140,8 +143,13 @@ class MDModel(DummyModel):
             ``record_every_steps`` production steps: HDF5, streamed while the run goes,
             unless the name ends in ``.npz`` or ``h5py`` is missing. 
         traj_filename : str, optional
-            Turns on a geometry trajectory in extended XYZ (Angstrom), one frame per
-            molecule every ``record_every_steps`` steps.
+            Runtime extended-XYZ output with one frame per independent system
+            every ``record_every_steps`` production steps. Positions are in
+            Angstrom, atomic velocities in Bohr per atomic time, and body-frame
+            angular velocities in inverse atomic time. Angular output automatically
+            includes the corresponding principal moments of inertia in electron-mass
+            times Bohr-squared units. Each molecule's six angular-output values
+            are repeated for all its atoms.
         record_every_steps : int, default: 10
             Record every this many production steps, for both files.
         record_max_steps : int, optional
@@ -159,6 +167,16 @@ class MDModel(DummyModel):
             reaches a CUDA device. The GPU integrator assigns one CUDA block
             per system, so a single socket driver usually runs fastest on the
             CPU.
+        property_list : str or list or tuple, default: "base"
+            Select "base", "all", or semicolon-separated property names.
+            Lists and tuples are also accepted. Only used when
+            ``property_filename`` is set.
+        traj_content : str, default: "positions"
+            Content to record: "positions", "velocities", "angular_velocity_body",
+            or "all". Angular output contains three angular velocities followed
+            by three principal moments of inertia. "all" includes positions,
+            atomic velocities, and these six angular-output columns. Velocities
+            and angular data are sampled before the final Langevin O half-step.
         """
 
         super().__init__(verbose, checkpoint, restart)
@@ -184,7 +202,9 @@ class MDModel(DummyModel):
             seed=seed,
             force_evaluator=force_evaluator,
             property_filename=property_filename,
+            property_list=property_list,
             traj_filename=traj_filename,
+            traj_content=traj_content,
             record_every_steps=record_every_steps,
             record_max_steps=record_max_steps,
             checkpoint=checkpoint,

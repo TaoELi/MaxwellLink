@@ -165,6 +165,13 @@ class MD:
         force_evaluator: str = "auto",
         seed: int = 0,
         verbose: bool = False,
+        *,
+        property_filename=None,
+        property_list="base",
+        traj_filename=None,
+        traj_content="positions",
+        record_every_steps: int = 10,
+        record_max_steps=None,
     ):
         """
         Initialize the MD Engine.
@@ -214,6 +221,30 @@ class MD:
             Random seed (initial velocities and Langevin noise).
         verbose : bool, default: False
             Print a short note when the cell is initialized.
+        property_filename : str, optional
+            Filename for the property file.
+        property_list : str or list or tuple, default: "base"
+            Select "base", "all", or semicolon-separated property names.
+            Lists and tuples are also accepted. Only used when
+            ``property_filename`` is set.
+        traj_filename : str, optional
+            Runtime extended-XYZ output with one frame per independent system.
+            Positions are in Angstrom, atomic velocities in Bohr per atomic time,
+            and molecular body-frame angular velocities in inverse atomic time.
+            Angular output automatically includes the corresponding principal
+            moments of inertia in electron-mass times Bohr-squared units. Each
+            molecule's six angular-output values are repeated for all its atoms.
+        traj_content : str, default: "positions"
+            Content to record: "positions", "velocities", "angular_velocity_body",
+            or "all". Angular output contains three angular velocities followed
+            by three principal moments of inertia. "all" includes positions,
+            atomic velocities, and these six angular-output columns. Velocities
+            and angular data are sampled before the final Langevin O half-step.
+        record_every_steps : int, default: 10
+            Record the property and trajectory files every this many production
+            steps, independently of the arrays returned by ``run()``.
+        record_max_steps : int, optional
+            Maximum number of records in each output file; ``None`` for no cap.
         """
         self.backend, self.xp = resolve_backend(backend)
         self.dt_fs = float(dt_fs)
@@ -240,6 +271,12 @@ class MD:
             reset_dipole=True,
             seed=seed,
             force_evaluator=force_evaluator,
+            property_filename=property_filename,
+            property_list=property_list,
+            traj_filename=traj_filename,
+            traj_content=traj_content,
+            record_every_steps=record_every_steps,
+            record_max_steps=record_max_steps,
             num=1,
             xp=self.xp,
             label="matter.MD",

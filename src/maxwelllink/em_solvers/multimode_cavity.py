@@ -146,7 +146,8 @@ class FabryPerotCavity:
         n_mode_y: int = 1,
         abc_cutoff: Optional[list] | float = [0.0, 0.0],
         save_mode_functions: bool = False,
-        mode_start_index: int = 1,
+        mode_start_index_x: int = 1,
+        mode_start_index_y: int = 1,
         density_profile: Optional[np.ndarray] = None,
     ):
         r"""
@@ -182,8 +183,12 @@ class FabryPerotCavity:
             Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If None, no absorbing boundary condition is applied. If a list is provided, it should contain two values representing the cutoff distances for x and y axes respectively. If a single float value is provided, it will be applied to both axes.
         save_mode_functions : bool, default: False
             Whether to save the cavity mode functions evaluated at the molecular grid points. Setting this to True can consume more memory but may speed up the simulation if the mode functions are needed multiple times.
-        mode_start_index : int, default: 1
-            The starting index for the cavity modes. If 1 (previous behavior), the modes are indexed from 1 to n_mode_x/y. If 0 (excluding 2D artifacts), the modes are indexed from 0 to n_mode_x/y - 1.
+        mode_start_index_x : int, default: 1
+            The starting index for the cavity modes along the x-axis. If 1 (previous behavior), the modes are indexed from 1 to n_mode_x. If 0 (excluding 2D artifacts), the modes are indexed from 0 to n_mode_x - 1.
+        mode_start_index_y : int, default: 1
+            The starting index for the cavity modes along the y-axis. If 1 (previous behavior), the modes are indexed from 1 to n_mode_y. If 0 (excluding 2D artifacts), the modes are indexed from 0 to n_mode_y - 1.
+        density_profile: Optional[np.ndarray] = None
+            The density profile of the molecular bath, represented as a 2D array. If provided, this will be used to weight the molecular grid points when calculating the cavity mode functions.
         """
         if frequency_au is None:
             raise ValueError("frequency_au must be provided.")
@@ -248,7 +253,7 @@ class FabryPerotCavity:
         self.n_grid_y = len(y_grid_1d)
         self.n_grid = self.n_grid_x * self.n_grid_y
 
-        self.density_profile = None
+        self.coupling_weights = None
 
         if density_profile is not None:
 
@@ -286,13 +291,14 @@ class FabryPerotCavity:
         # generate 2D grid points of kx, ky in units of 1/Lx, 1/Ly
         self.n_mode_x = n_mode_x
         self.n_mode_y = n_mode_y
-        self.mode_start_index = mode_start_index
+        self.mode_start_index_x = mode_start_index_x
+        self.mode_start_index_y = mode_start_index_y
         # the original code indeces the modes from 1 to n_mode_x/y
         # kx_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_x)])
         # ky_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_y)])
         # let's update the index from 0 to n_mode_x/y [fix the 2D gaussian pulse issue]
-        kx_grid_1d = np.pi * np.array([i + mode_start_index for i in range(n_mode_x)])
-        ky_grid_1d = np.pi * np.array([i + mode_start_index for i in range(n_mode_y)])
+        kx_grid_1d = np.pi * np.array([i + mode_start_index_x for i in range(n_mode_x)])
+        ky_grid_1d = np.pi * np.array([i + mode_start_index_y for i in range(n_mode_y)])
         kx_grid_2d, ky_grid_2d = np.meshgrid(kx_grid_1d, ky_grid_1d)
         kx_grid_2d = np.reshape(kx_grid_2d, -1)
         ky_grid_2d = np.reshape(ky_grid_2d, -1)
@@ -339,15 +345,14 @@ class FabryPerotCavity:
         # the factorised mode functions, (n_mode_x, n_grid_x) and (n_mode_y, n_grid_y);
         # the sine rows of l = 0 vanish, the cosine rows carry the sqrt(2)
         self.Cx = np.cos(np.outer(kx_grid_1d, x_grid_1d))
-        # comment out the line below if switched back to the original indexing from 1 to n_mode_x/y
-        if self.mode_start_index == 0:
-            self.Cx[0] *= np.sqrt(0.5)
         self.Sy = np.sin(np.outer(ky_grid_1d, y_grid_1d))
         self.Sx = np.sin(np.outer(kx_grid_1d, x_grid_1d))
         self.Cy = np.cos(np.outer(ky_grid_1d, y_grid_1d))
         # comment out the line below if switched back to the original indexing from 1 to n_mode_x/y
-        if self.mode_start_index == 0:
+        if self.mode_start_index_y == 0:
             self.Cy[0] *= np.sqrt(0.5)
+        if self.mode_start_index_x == 0:
+            self.Cx[0] *= np.sqrt(0.5)
         self.mode_prefactor = 2.0
 
         self.varepsilon_k = self.coupling_strength * self.omega_k / np.min(self.omega_k)
@@ -849,6 +854,7 @@ class MultiModeSimulation(DummyEMSimulation):
         """
         mu_dot_f = np.zeros((self.n_mode_y, self.n_mode_x, 3), dtype=mu.dtype)
         mu_grid = mu.reshape(self.n_grid_y, self.n_grid_x, 3)
+        mu_grid = mu_grid * self.coupling_weights[:, :, None]
         mu_dot_f[:, :, 0] = self.mode_prefactor * self.Sy @ mu_grid[:, :, 0] @ self.Cx.T
         mu_dot_f[:, :, 1] = self.mode_prefactor * self.Cy @ mu_grid[:, :, 1] @ self.Sx.T
         return mu_dot_f.reshape(self.n_mode, 3)
@@ -888,6 +894,7 @@ class MultiModeSimulation(DummyEMSimulation):
             efield[:, :, 1] = (
                 self.mode_prefactor * self.Cy.T @ v_mode[:, :, 1] @ self.Sx
             )
+        efield *= self.coupling_weights[:, :, None]
         return efield.reshape(self.n_grid, 3)
 
     def _calc_acceleration(
@@ -957,7 +964,7 @@ class MultiModeSimulation(DummyEMSimulation):
         assert efield_vec.shape == mu.shape
         return efield_vec
 
-    def _calc_photonic_energy(self, pc, qc) -> np.ndarray:
+    def _calc_bare_photonic_energy(self, pc, qc) -> np.ndarray:
         r"""
         Calculate the energy of the all photonic modes.
 
@@ -972,17 +979,51 @@ class MultiModeSimulation(DummyEMSimulation):
 
         Returns
         -------
-        photonic_energy : numpy.ndarray of float, shape (n_mode,)
+        bare_photonic_energy : numpy.ndarray of float, shape (n_mode,)
             Energy of each cavity mode.
         """
         kinetic_energy = 0.5 * pc**2
         potential_energy = 0.5 * self.omega_k2[:, None] * qc**2
-        photonic_energy = np.sum(
+        bare_photonic_energy = np.sum(
             (kinetic_energy + potential_energy) * self.axis, axis=1
         )
-        return photonic_energy
+        return bare_photonic_energy
 
-    def _calc_energy(self, pc, qc, mu) -> float:
+    def _calc_photonic_energy_with_dse(self, pc, qc, mu) -> np.ndarray:
+        """
+        Calculate the total energy of each cavity photon coupled to the molecular system.
+
+        Parameters
+        ----------
+        pc : numpy.ndarray of float, shape (n_mode, 3)
+            Current cavity mode momentum with shape (n_mode,3).
+        qc : numpy.ndarray of float, shape (n_mode, 3)
+            Current cavity mode coordinate with shape (n_mode,3).
+        mu : numpy.ndarray of float, shape (n_grid, 3)
+            Current total molecular dipole along the coupling axis with shape (n_grid,3).
+
+        Returns
+        -------
+        photonic_energy_with_dse : numpy.ndarray of float, shape (n_mode,)
+            Energy of each cavity mode.
+        """
+        kinetic_energy = 0.5 * pc**2
+        # mu_dot_f = np.einsum("ijk, jk->ik", self.ftilde_k, mu)
+        mu_dot_f = self._calc_mu_dot_f_subspace(mu)
+        potential_energy = (
+            0.5 * self.omega_k2[:, None] * qc**2
+            + self.varepsilon_k[:, None] * qc * mu_dot_f
+        )
+
+        if self.include_dse:
+            potential_energy += 0.5 * self.dse_coeff[:, None] * mu_dot_f**2
+
+        photonic_energy_with_dse = np.sum(
+            (kinetic_energy + potential_energy) * self.axis, axis=1
+        )
+        return photonic_energy_with_dse
+
+    def _calc_total_energy(self, pc, qc, mu) -> float:
         """
         Calculate the total energy of the cavity + molecular system.
 
@@ -1478,10 +1519,7 @@ class MultiModeSimulation(DummyEMSimulation):
         self,
         steps: Optional[int] = None,
         record_history: bool = True,
-        record_to_disk: bool = False,
-        disk_folder_address: Optional[str] = None,
-        npz_filename: Optional[str] = None,
-        h5_filename: Optional[str] = None,
+        record_filename: Optional[str] = None,
         record_max_steps: Optional[int] = None,
         record_every_steps: int = 1,
         record_list: Optional[list] = None,
@@ -1548,13 +1586,14 @@ class MultiModeSimulation(DummyEMSimulation):
                     "photon_drive",
                     "molecule_pulse",
                     "energy",
-                    "photonic_energy",
+                    "bare_photonic_energy",
+                    "photonic_energy_with_dse",
                     "effective_efield",
                     "molecule_response",
                     "molecule_dipole",
                 ]:
                     raise ValueError(
-                        f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'photon_drive', 'molecule_pulse', 'energy', 'photonic_energy', 'effective_efield', 'molecule_response', 'molecule_dipole'."
+                        f"Invalid record_list item: {item}. Must be one of 'all', 'time', 'qc', 'pc', 'photon_drive', 'molecule_pulse', 'energy', 'bare_photonic_energy', 'photonic_energy_with_dse', 'effective_efield', 'molecule_response', 'molecule_dipole'."
                     )
 
             if record_list == ["all"]:
@@ -1565,7 +1604,8 @@ class MultiModeSimulation(DummyEMSimulation):
                     "photon_drive",
                     "molecule_pulse",
                     "energy",
-                    "photonic_energy",
+                    "bare_photonic_energy",
+                    "photonic_energy_with_dse",
                     "effective_efield",
                     "molecule_response",
                     "molecule_dipole",
@@ -1582,7 +1622,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
         if self.record_history:
 
-            if self.record_to_disk and disk_folder_address is not None:
+            if self.record_to_disk and self.disk_folder_address is not None:
 
                 def pulse_record_dim(pulse):
                     shape = np.asarray(pulse(self.time), dtype=float).shape
@@ -1602,7 +1642,8 @@ class MultiModeSimulation(DummyEMSimulation):
                     "photon_drive": photon_drive_dim,
                     "molecule_pulse": molecule_pulse_dim,
                     "energy": 1,
-                    "photonic_energy": self.pc.shape[0],
+                    "bare_photonic_energy": self.pc.shape[0],
+                    "photonic_energy_with_dse": self.pc.shape[0],
                     "effective_efield": self.dmudt.shape,
                     "molecule_response": self.dmudt.shape,
                     "molecule_dipole": self.dmudt.shape,
@@ -1610,7 +1651,7 @@ class MultiModeSimulation(DummyEMSimulation):
 
                 if self.file_format == "npz":
 
-                    TEMP_DIR = os.path.join(disk_folder_address, "temp_memmap")
+                    TEMP_DIR = os.path.join(self.disk_folder_address, "temp_memmap")
                     self.temp_dir = TEMP_DIR
                     if os.path.exists(TEMP_DIR):
                         print(
@@ -1638,7 +1679,7 @@ class MultiModeSimulation(DummyEMSimulation):
                     import h5py
 
                     self.h5_file = h5py.File(
-                        os.path.join(disk_folder_address, self.filename), "w"
+                        os.path.join(self.disk_folder_address, self.filename), "w"
                     )
                     self.datasets = {}
                     for name in self.record_list:
@@ -1649,11 +1690,6 @@ class MultiModeSimulation(DummyEMSimulation):
                         self.datasets[name] = self.h5_file.create_dataset(
                             name, shape=shape, dtype=np.float64, maxshape=shape
                         )
-
-            elif self.record_to_disk and self.disk_folder_address is None:
-                raise ValueError(
-                    "disk_folder_address must be provided when record_to_disk is True."
-                )
 
             else:
 
@@ -1669,8 +1705,10 @@ class MultiModeSimulation(DummyEMSimulation):
                     self.molecule_pulse_history = []
                 if "energy" in self.record_list:
                     self.energy_history = []
-                if "photonic_energy" in self.record_list:
-                    self.photonic_energy_history = []
+                if "bare_photonic_energy" in self.record_list:
+                    self.bare_photonic_energy_history = []
+                if "photonic_energy_with_dse" in self.record_list:
+                    self.photonic_energy_with_dse_history = []
                 if "effective_efield" in self.record_list:
                     self.effective_efield_history = []
                 if "molecule_response" in self.record_list:
@@ -1738,10 +1776,7 @@ class MultiModeSimulation(DummyEMSimulation):
         until: Optional[float] = None,
         steps: Optional[int] = None,
         record_history: bool = True,
-        record_to_disk: bool = False,
-        disk_folder_address: Optional[str] = None,
-        npz_filename: Optional[str] = None,
-        h5_filename: Optional[str] = None,
+        record_filename: Optional[str] = None,
         record_max_steps: Optional[int] = None,
         record_every_steps: int = 1,
         record_list: Optional[list] = None,
@@ -1757,17 +1792,14 @@ class MultiModeSimulation(DummyEMSimulation):
             Number of steps to execute. ``until`` must be ``None``,
         record_history : bool, default: True
             Record time, field, velocity, drive, and molecular response histories.
-        record_to_disk : bool, default: False
-            Whether to save the history data to disk in HDF5 format. If False, the history data will be stored in memory.
-        disk_folder_address : str, optional
-            Folder path for saving history data when ``record_to_disk`` is True.
-        npz_filename : str, optional
-            Name of the .npz file to save the simulation results to when ``record_to_disk`` is True.
-        h5_filename : str, optional
-            Name of the .h5 file to save the simulation results to when ``record_to_disk`` is True.
+        record_filename : str or path-like, optional
+            Output path for recorded simulation data. When omitted, data are
+            retained in memory. Relative paths are resolved against the current
+            working directory. The suffix must be either ``.npz`` or ``.h5``.
         record_max_steps : int, optional
-            Upper bound for the on-disk history length when ``record_to_disk`` is
-            True. If ``None``, the HDF5 datasets grow dynamically.
+            Maximum number of recorded history entries for all storage modes,
+            including in-memory (list), NPZ, and HDF5 storage. If ``None``, the number
+            is inferred from ``steps`` and ``record_every_steps``.
         record_every_steps : int, default: 1
             Number of steps to record data every ``record_every_steps`` steps.
         record_list : list of str, optional
@@ -1785,10 +1817,7 @@ class MultiModeSimulation(DummyEMSimulation):
         self.storage_initialization(
             steps=steps,
             record_history=record_history,
-            record_to_disk=record_to_disk,
-            disk_folder_address=disk_folder_address,
-            npz_filename=npz_filename,
-            h5_filename=h5_filename,
+            record_filename=record_filename,
             record_max_steps=record_max_steps,
             record_every_steps=record_every_steps,
             record_list=record_list,

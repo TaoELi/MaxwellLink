@@ -93,6 +93,10 @@ def build_integrator_kernels():
         mu_half,
         mu_force,
         energy,
+        kinetic_column,
+        property_values,
+        sample_molecular,
+        property_momenta,
     ):
         """Second half-kick, the dipole and energy reductions, then the thermostat."""
 
@@ -111,6 +115,10 @@ def build_integrator_kernels():
             i = e // 3
             c = e - 3 * i
             p[d, i, c] += half_dt * F[d, i, c]
+
+            if sample_molecular:
+                property_momenta[d, i, c] = p[d, i, c]
+
         cuda.syncthreads()
 
         # Dipole and kinetic reductions. Effective atomic charges make the dipole a
@@ -179,6 +187,9 @@ def build_integrator_kernels():
             mu_force[d, 1] = acc[7]
             mu_force[d, 2] = acc[8]
             energy[d] = acc[9] + potential[d]
+
+            if kinetic_column >= 0:
+                property_values[d, kinetic_column] = acc[9]
 
     _INTEGRATOR_KERNELS = {"pre": k_pre, "post": k_post}
     return _INTEGRATOR_KERNELS
