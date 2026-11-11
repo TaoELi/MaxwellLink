@@ -104,3 +104,4 @@ If you find **MaxwellLink** helpful for your research, please cite the following
 
 - Meng, G.; Li, T. E. *Molecular Electrodynamic Relaxation in Dielectric and Plasmonic Cavities* Submitted (2026).
 
+
