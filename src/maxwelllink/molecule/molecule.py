@@ -221,8 +221,12 @@ class Molecule:
             # register with the hub on rank 0
             if am_master():
                 self.molecule_id = self.hub.register_molecule_return_id()
-                print(
-                    f"[Init Molecule] Under socket mode, registered molecule with ID {self.molecule_id}"
+                (
+                    print(
+                        f"[Init Molecule] Under socket mode, registered molecule with ID {self.molecule_id}"
+                    )
+                    if self.molecule_id == 0
+                    else None
                 )
             # if using mpi, we also need to broadcast the molecule_id to other ranks
             self.molecule_id = mpi_bcast_from_master(self.molecule_id)
@@ -232,9 +236,9 @@ class Molecule:
                 raise ValueError(
                     f"[Init Molecule] Unsupported driver: {self.driver}, only supports {list(__drivers__.keys())}"
                 )
-            print(
-                f"[Init Molecule] Operating in non-socket mode, using driver: {self.driver}"
-            )
+            # print(
+            #    f"[Init Molecule] Operating in non-socket mode, using driver: {self.driver}"
+            # )
             # now we initialize the driver
             try:
                 self.d_f = __drivers__[self.driver](**driver_kwargs)

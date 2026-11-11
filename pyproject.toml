@@ -14,7 +14,10 @@ dependencies = [
   "numpy>=1.24",
   "scipy>=1.10",
   "cmake>=3.18",
-  "requests>=2.31"
+  "requests>=2.31",
+  "orjson>=3",
+  # for built-in MD model and GPU path
+  "numba>=0.59"
 ]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -69,6 +72,7 @@ include = ["maxwelllink*", "mxl_drivers*"]
 [tool.setuptools.package-data]
 "maxwelllink" = ["_workspace_payload/*", "_workspace_payload/**/*"]
 "maxwelllink.mxl_drivers.lammps" = ["fix_maxwelllink.*", "README.md"]
+"maxwelllink.matter.md.force_fields" = ["data/*.xyz"]
 
 [project.optional-dependencies]
 dev = [
@@ -76,6 +80,16 @@ dev = [
   "black>=24.3",
   "flake8>=7.0",
   "pre-commit>=3.6",
+]
+# GPU cuda support
+gpu-cuda11 = [
+  "cupy-cuda11x>=13",
+]
+gpu-cuda12 = [
+  "cupy-cuda12x>=13",
+]
+gpu-cuda13 = [
+  "cupy-cuda13x>=13",
 ]
 docs = [
   "sphinx>=7.2",

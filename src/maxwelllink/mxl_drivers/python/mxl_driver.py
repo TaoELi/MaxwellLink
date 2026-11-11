@@ -108,6 +108,9 @@ def _read_value(s):
     """
 
     s = s.strip()
+    if s.startswith("[") and s.endswith("]"):  # a list, e.g. "[0,8.28e-4,0]"
+        inner = s[1:-1].strip()
+        return [_read_value(item) for item in _split_top_level(inner)] if inner else []
     for cast in (int, float):
         try:
             return cast(s)
@@ -120,6 +123,22 @@ def _read_value(s):
     return s
 
 
+def _split_top_level(text):
+    """Split ``text`` on the commas that are not inside square brackets."""
+
+    items, depth, start = [], 0, 0
+    for i, char in enumerate(text):
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items.append(text[start:i])
+            start = i + 1
+    items.append(text[start:])
+    return items
+
+
 def _read_args_kwargs(input_str):
     """
     Parse a comma-separated string into positional and keyword arguments.
@@ -128,7 +147,8 @@ def _read_args_kwargs(input_str):
     ----------
     input_str : str
         Comma-separated tokens. Positional values are bare; keyword values use
-        ``key=value``. Booleans accept ``true``/``false`` (case-insensitive).
+        ``key=value``. Booleans accept ``true``/``false`` (case-insensitive); a
+        value in square brackets, ``key=[0,8.28e-4,0]``, is a list.
 
     Returns
     -------
@@ -138,7 +158,7 @@ def _read_args_kwargs(input_str):
 
     args = []
     kwargs = {}
-    tokens = input_str.split(",")
+    tokens = _split_top_level(input_str)  # commas inside [...] belong to a list value
     for token in tokens:
         token = token.strip()
         if "=" in token:
@@ -267,6 +287,9 @@ def run_driver(
                 break
         else:
             raise RuntimeError(f"Unexpected header: {msg!r}")
+
+    # let the model close what it holds open (e.g. a trajectory file)
+    driver.close()
 
 
 def mxl_driver_main():

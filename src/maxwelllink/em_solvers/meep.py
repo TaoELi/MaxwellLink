@@ -13,13 +13,13 @@ source construction and field integrations.
 """
 
 from __future__ import annotations
-import json
 import numpy as np
 from math import exp
 from typing import Optional, Dict, List
 import atexit
 
 from ..sockets import SocketHub
+from ..tools.fast_json import json_loads
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper
 from ..molecule import Molecule, Vector3
 from ..units import EV_TO_CM_INV, FS_TO_AU
@@ -2098,9 +2098,7 @@ def update_molecules_no_mpi(
             extra_blob = responses[m.molecule_id].get("extra", b"")
             if extra_blob:
                 try:
-                    m.additional_data_history.append(
-                        json.loads(extra_blob.decode("utf-8"))
-                    )
+                    m.additional_data_history.append(json_loads(extra_blob))
                 except Exception:
                     pass
 
@@ -2130,8 +2128,6 @@ def update_molecules(
     callable
         A step function compatible with ``meep.Simulation.run``.
     """
-
-    import json as _json
 
     # detect MPI
     try:
@@ -2296,9 +2292,7 @@ def update_molecules(
                 extra_blob = extras_by_id.get(m.molecule_id, b"")
                 if extra_blob:
                     try:
-                        m.additional_data_history.append(
-                            _json.loads(extra_blob.decode("utf-8"))
-                        )
+                        m.additional_data_history.append(json_loads(extra_blob))
                     except Exception:
                         pass
 

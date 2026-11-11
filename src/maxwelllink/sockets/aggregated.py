@@ -68,6 +68,7 @@ from .protocol import (  # noqa: F401  re-exported for backward compatibility
     _recv_exact_into,
     _recv_msg,
     _recv_msg_with_timeout,
+    _resolve_step_records,
     _send_aggregate_hello,
     _send_aggregate_init,
     _send_bytes,
@@ -115,6 +116,15 @@ class _AggregateGroupState:
         Reusable encoder for outgoing AGGSTEP fan-out frames.
     result_codec : _ResultCodec
         Reusable decoder for incoming AGGRESULT reply frames.
+    columnar : bool
+        Whether this group's bridge was asked for the columnar result
+        frame, which only batch bridges can answer.
+    step_mids : numpy.ndarray or None
+        Molecule IDs of the block step frame, in the order the bridge uses;
+        also the index that gathers their fields out of the grid array.
+    step_records : bytes
+        Packed ``(molecule_id, field_idx)`` table of that frame, empty
+        unless the bridge takes block frames.
     """
 
     group_id: str
@@ -123,6 +133,35 @@ class _AggregateGroupState:
     bridge: Optional[_ClientState] = None
     step_codec: _StepCodec = field(default_factory=_StepCodec)
     result_codec: _ResultCodec = field(default_factory=_ResultCodec)
+    columnar: bool = False
+    step_mids: Optional[np.ndarray] = None
+    step_records: bytes = b""
+    _sorted_ids: Optional[np.ndarray] = None
+
+    def sorted_molecule_ids(self, expected_ids) -> np.ndarray:
+        """
+        Return this group's molecule IDs, sorted, as an int32 array.
+
+        Cached because the membership is fixed for the run, so the columnar
+        reply can be validated with one array comparison per step instead of
+        building a set of tens of thousands of Python ints.
+
+        Parameters
+        ----------
+        expected_ids : set[int]
+            Molecule IDs the group serves.
+
+        Returns
+        -------
+        numpy.ndarray of int32, shape (n,)
+            The IDs in ascending order.
+        """
+
+        if self._sorted_ids is None or self._sorted_ids.shape[0] != len(expected_ids):
+            self._sorted_ids = np.sort(
+                np.fromiter(expected_ids, dtype="<i4", count=len(expected_ids))
+            )
+        return self._sorted_ids
 
     # -- channel helpers ---------------------------------------------------
     #
@@ -467,17 +506,47 @@ def _coerce_remote_bridge_specs(payload: Mapping) -> list[RemoteBridgeSpec]:
 # ---------------------------------------------------------------------------
 
 
-def run_bridge_node(info="aggregation.json", *, idx: int = 0) -> None:
+def run_bridge_node(
+    info="aggregation.json",
+    *,
+    idx: int = 0,
+    backend: Optional[str] = None,
+    model: Optional[str] = None,
+    driver_args=None,
+    driver_kwargs: Optional[Mapping] = None,
+    model_backend: Optional[str] = None,
+) -> None:
     """
     Run one bridge node from a manifest written by ``init_remote_bridges``.
 
     Parameters
     ----------
     info : str or path-like, default: ``"aggregation.json"``
-        JSON manifest written by :meth:`AggregatedSocketHub.init_remote_bridges`.
+        JSON manifest written by an aggregate hub's ``init_remote_bridges``.
     idx : int, default: 0
         Zero-based bridge index identifying which bridge entry in ``info`` this
         node should start.
+    model : str or None, optional
+        When given, this bridge serves the whole group with one in-process
+        **batch** driver named ``model`` (a driver-registry key such as
+        ``"sho"``) instead of fanning out to individual socket drivers.  When
+        ``None`` (the default) the original downstream-socket bridge is used and
+        the manifest topology is unchanged.
+    backend : str or None, optional
+        Batch backend when ``model`` is given: ``"cpu"`` (default) runs one
+        scalar driver object per molecule in a loop; ``"gpu"`` runs one
+        vectorized batch model.  Ignored when ``model`` is ``None``.
+    driver_args : sequence or None, optional
+        Positional arguments for the batch model (bare ``mxl_bridge --param``
+        tokens), forwarded exactly as ``mxl_driver`` forwards them.
+    driver_kwargs : mapping or None, optional
+        Keyword arguments for the batch model (``key=value`` ``mxl_bridge
+        --param`` tokens).
+    model_backend : {'cpu', 'gpu', None}, optional
+        Backend of a vectorized batch model (``backend="gpu"``).  ``None``
+        (production) means ``'gpu'``, which requires CuPy in the bridge
+        process; ``'cpu'`` runs the same vectorized model on the host (tests,
+        CUDA-less machines).  Ignored by the ``backend="cpu"`` scalar loop.
 
     Raises
     ------
@@ -502,14 +571,35 @@ def run_bridge_node(info="aggregation.json", *, idx: int = 0) -> None:
             f"Available bridge indices: {available}."
         ) from exc
 
-    bridge = LocalSocketHubBridge(
-        group_id=spec.group_id,
-        upstream_host=str(payload["hub_host"]),
-        upstream_port=int(payload["hub_port"]),
-        timeout=float(payload.get("timeout", 60.0)),
-        latency=float(payload.get("latency", 0.01)),
-        local_unixsocket=spec.unixsocket,
-    )
+    if model is None:
+        bridge = LocalSocketHubBridge(
+            group_id=spec.group_id,
+            upstream_host=str(payload["hub_host"]),
+            upstream_port=int(payload["hub_port"]),
+            timeout=float(payload.get("timeout", 60.0)),
+            latency=float(payload.get("latency", 0.01)),
+            local_unixsocket=spec.unixsocket,
+        )
+    else:
+        normalized_backend = str(backend or "cpu").strip().lower()
+        batch_common = dict(
+            group_id=spec.group_id,
+            upstream_host=str(payload["hub_host"]),
+            upstream_port=int(payload["hub_port"]),
+            driver=str(model),
+            driver_args=tuple(driver_args or ()),
+            driver_kwargs=dict(driver_kwargs or {}),
+            timeout=float(payload.get("timeout", 60.0)),
+            latency=float(payload.get("latency", 0.01)),
+        )
+        if normalized_backend == "cpu":
+            bridge = CPUBatchBridge(**batch_common)
+        elif normalized_backend == "gpu":
+            bridge = GPUBatchBridge(model_backend=model_backend, **batch_common)
+        else:
+            raise ValueError(
+                f"Unsupported batch backend {backend!r}; use 'cpu' or 'gpu'."
+            )
     thread = bridge.start()
 
     try:
@@ -541,7 +631,14 @@ def mxl_bridge_main(argv: list[str] | None = None) -> int:
 
     Examples
     --------
-    ``mxl_bridge --info aggregation.json --idx 0``
+    Individual downstream drivers (original behavior)::
+
+        mxl_bridge --info aggregation.json --idx 0
+
+    One in-process batch driver for the whole group::
+
+        mxl_bridge --info aggregation.json --idx 0 --backend gpu \\
+            --model sho --param "omega=0.21,mu0=187,orientation=2"
     """
 
     parser = argparse.ArgumentParser(
@@ -559,9 +656,55 @@ def mxl_bridge_main(argv: list[str] | None = None) -> int:
         default=0,
         help="Zero-based bridge index within the aggregation manifest.",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help=(
+            "Molecular model for an in-process batch driver (a driver-registry "
+            "name such as 'sho'). When given, this bridge serves the whole group "
+            "with one batch model instead of individual downstream drivers."
+        ),
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="cpu",
+        choices=["cpu", "gpu"],
+        help=(
+            "Batch execution style when --model is given: 'cpu' (default) loops "
+            "one scalar driver object per molecule; 'gpu' runs one vectorized "
+            "batch model for the whole group (whose own compute device is "
+            "chosen separately and defaults to CUDA through CuPy)."
+        ),
+    )
+    parser.add_argument(
+        "--param",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated batch-model parameters, e.g. "
+            "'omega=0.21,mu0=187,orientation=2' (same syntax as mxl_driver "
+            "--param). Only used together with --model."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    run_bridge_node(info=args.info, idx=args.idx)
+    driver_args = None
+    driver_kwargs = None
+    if args.model is not None:
+        from maxwelllink.mxl_drivers.python.mxl_driver import _read_args_kwargs
+
+        driver_args, driver_kwargs = _read_args_kwargs(args.param)
+
+    run_bridge_node(
+        info=args.info,
+        idx=args.idx,
+        backend=args.backend,
+        model=args.model,
+        driver_args=driver_args,
+        driver_kwargs=driver_kwargs,
+    )
     return 0
 
 
@@ -773,6 +916,15 @@ class AggregatedSocketHub(SocketHub):
         )
         self._groups: Dict[str, _AggregateGroupState] = {}
         self._molecule_to_group: Dict[int, str] = {}
+        # Result frame requested from batch bridges: "full" (amp + JSON extra),
+        # "amps_only", or "columnar". Subclasses that discard the extra override
+        # this; solvers that want the columnar frame call
+        # ``request_columnar_extras``.
+        self._bridge_result_format = "full"
+        self._bridge_extra_keys: tuple[str, ...] = ()
+        # Columnar replies of the last step_barrier, keyed by group id. Empty
+        # unless the columnar result format was negotiated.
+        self.last_columnar: Dict[str, tuple] = {}
         self._bridge_connect_host = (
             "127.0.0.1" if host in (None, "", "0.0.0.0") else str(host)
         )
@@ -1285,6 +1437,7 @@ class AggregatedSocketHub(SocketHub):
                 continue
             with self._lock:
                 st.extras["aggregate_group"] = group_id
+                st.extras["batch_bridge"] = bool(hello.get("batch", False))
 
     def _progress_group_binds(self) -> None:
         """
@@ -1333,11 +1486,30 @@ class AggregatedSocketHub(SocketHub):
         if st is None or not st.alive:
             return False
 
+        # A bridge that fans out to individual drivers cannot pack its reply
+        # into columns, so it keeps receiving the per-molecule frame.
+        result_format = self._bridge_result_format
+        if result_format == "columnar" and not st.extras.get("batch_bridge"):
+            result_format = "full"
+        group.columnar = result_format == "columnar"
+        if group.columnar:
+            # Record table of the block step frame, in the molecule-id order the
+            # bridge takes from these payloads. The membership is fixed from here
+            # on, so the table and the gather index are built once.
+            group.step_mids = np.fromiter(
+                init_payloads, dtype="<i4", count=len(init_payloads)
+            )
+            group.step_records = np.column_stack(
+                (group.step_mids, np.arange(group.step_mids.size, dtype="<i4"))
+            ).tobytes()
+
         try:
             _send_aggregate_init(
                 st.sock,
                 group_id=group_id,
                 init_payloads=init_payloads,
+                result_format=result_format,
+                extra_keys=self._bridge_extra_keys,
             )
             msg = _recv_msg_with_timeout(st.sock, self.timeout)
             if msg != AGGREADY:
@@ -1351,6 +1523,27 @@ class AggregatedSocketHub(SocketHub):
                 st.initialized = True
                 return True
         return False
+
+    def request_columnar_extras(self, keys) -> None:
+        """
+        Ask batch bridges for their additional data as one packed block.
+
+        Instead of one JSON document per molecule, a bridge then returns the
+        named fields as an ``(n, len(keys))`` float64 array, which
+        :meth:`step_barrier` leaves in :attr:`last_columnar` rather than in its
+        per-molecule return value. Bridges that serve individual socket drivers
+        ignore the request and keep replying molecule by molecule.
+
+        Call before the bridges bind; the request travels with AGGINIT.
+
+        Parameters
+        ----------
+        keys : sequence of str
+            Additional-data field names, in the column order to receive them.
+        """
+
+        self._bridge_extra_keys = tuple(str(key) for key in keys)
+        self._bridge_result_format = "columnar" if self._bridge_extra_keys else "full"
 
     def wait_until_bound(self, init_payloads: dict, require_init=True, timeout=None):
         """
@@ -1463,7 +1656,10 @@ class AggregatedSocketHub(SocketHub):
         return grouped_requests
 
     def _send_step_to_group(
-        self, group_id: str, group_request: Dict[int, dict]
+        self,
+        group_id: str,
+        group_request: Optional[Dict[int, dict]] = None,
+        fields: Optional[np.ndarray] = None,
     ) -> bool:
         """
         Send one grouped fan-out step to a single bridge.
@@ -1472,8 +1668,12 @@ class AggregatedSocketHub(SocketHub):
         ----------
         group_id : str
             Aggregate group to send to.
-        group_request : dict[int, dict]
+        group_request : dict[int, dict], optional
             Mapping from molecule ID to its ``{"efield_au": ndarray}`` request.
+        fields : numpy.ndarray of float, shape (n_grid, 3), optional
+            Fields of every molecule, indexed by molecule ID. When given, this
+            group's rows are packed into one block frame and ``group_request``
+            is not used.
 
         Returns
         -------
@@ -1488,7 +1688,12 @@ class AggregatedSocketHub(SocketHub):
             self._pause()
             return False
         try:
-            group.step_codec.send(st.sock, group_request)
+            if fields is None:
+                group.step_codec.send(st.sock, group_request)
+            else:
+                group.step_codec.send_block(
+                    st.sock, group.step_records, fields[group.step_mids]
+                )
         except (socket.timeout, _SocketClosed, OSError):
             self._mark_group_dead(group_id, reason="send")
             return False
@@ -1531,6 +1736,9 @@ class AggregatedSocketHub(SocketHub):
         if remaining <= 0.0:
             return None
 
+        if group.columnar:
+            return self._collect_group_columnar(group_id, group, expected_ids, deadline)
+
         try:
             group_responses = group.recv_result(deadline)
         except (socket.timeout, RuntimeError, _SocketClosed, OSError):
@@ -1546,8 +1754,58 @@ class AggregatedSocketHub(SocketHub):
             )
         return group_responses
 
+    def _collect_group_columnar(self, group_id, group, expected_ids, deadline):
+        """
+        Receive one group's reply as columns and stash it in ``last_columnar``.
+
+        Parameters
+        ----------
+        group_id : str
+            Aggregate group to read a reply from.
+        group : _AggregateGroupState
+            That group's state, holding the bridge socket and its codec.
+        expected_ids : set[int]
+            Molecule IDs the reply must contain, exactly.
+        deadline : float
+            Absolute ``time.time()`` deadline for the receive.
+
+        Returns
+        -------
+        dict or None
+            An empty mapping on success -- the arrays go to
+            :attr:`last_columnar`, so nothing is built per molecule -- or
+            ``None`` if the bridge died or the deadline passed.
+
+        Raises
+        ------
+        RuntimeError
+            If the bridge returns a molecule-id set other than ``expected_ids``
+            (the group is also marked dead in that case).
+        """
+
+        try:
+            mids, amps, extra_lens, extras = group.recv_result_block(deadline)
+        except (socket.timeout, RuntimeError, _SocketClosed, OSError):
+            self._mark_group_dead(group_id, reason="recv")
+            return None
+
+        if not np.array_equal(np.sort(mids), group.sorted_molecule_ids(expected_ids)):
+            self._mark_group_dead(group_id, reason="protocol")
+            raise RuntimeError(
+                f"Aggregate group {group_id!r} returned molecule ids "
+                f"{sorted(mids.tolist())}, expected {sorted(expected_ids)}."
+            )
+
+        n_keys = len(self._bridge_extra_keys)
+        block = np.frombuffer(extras, dtype=np.float64).reshape(len(mids), n_keys)
+        self.last_columnar[group_id] = (mids, amps, block)
+        return {}
+
     def step_barrier(
-        self, requests: Dict[int, dict], timeout: Optional[float] = None
+        self,
+        requests: Dict[int, dict],
+        timeout: Optional[float] = None,
+        efield_au: Optional[np.ndarray] = None,
     ) -> Dict[int, dict]:
         """
         Dispatch all requested fields group-by-group and collect grouped replies.
@@ -1561,6 +1819,12 @@ class AggregatedSocketHub(SocketHub):
         timeout : float, optional
             Maximum time (seconds) to wait for every group to reply. Defaults
             to the hub's ``timeout`` setting.
+        efield_au : numpy.ndarray of float, shape (n_grid, 3), optional
+            Fields of every molecule, indexed by molecule ID. Batch bridges
+            take them as one packed frame, which skips the request dictionary
+            per molecule on both sides of the socket; ``requests`` is then not
+            used. Only groups already bound with a record table are served, so
+            this form is for a caller that has seen a block reply already.
 
         Returns
         -------
@@ -1585,25 +1849,44 @@ class AggregatedSocketHub(SocketHub):
         if self.paused:
             return {}
 
+        self.last_columnar.clear()
         deadline = self._deadline(timeout)
 
-        with self._lock:
-            grouped_requests = self._plan_step_locked(requests)
-        if not grouped_requests:
-            return {}
-
-        for group_id, group_request in grouped_requests.items():
-            if not self._send_step_to_group(group_id, group_request):
+        if efield_au is None:
+            with self._lock:
+                grouped_requests = self._plan_step_locked(requests)
+            if not grouped_requests:
                 return {}
+            expected_ids = {
+                group_id: set(group_request)
+                for group_id, group_request in grouped_requests.items()
+            }
+            for group_id, group_request in grouped_requests.items():
+                if not self._send_step_to_group(group_id, group_request):
+                    return {}
+        else:
+            fields = np.ascontiguousarray(efield_au, dtype=float)
+            with self._lock:
+                expected_ids = {
+                    group_id: set(group.molecule_ids)
+                    for group_id, group in self._groups.items()
+                    if group.step_records
+                }
+            if not expected_ids:
+                return {}
+            for group_id in expected_ids:
+                if not self._send_step_to_group(group_id, fields=fields):
+                    return {}
 
         responses: Dict[int, dict] = {}
-        pending_groups = set(grouped_requests.keys())
+        pending_groups = set(expected_ids)
 
         # Fast path: a single group needs only a blocking recv, no selector.
         if len(pending_groups) == 1:
             group_id = next(iter(pending_groups))
-            expected = set(grouped_requests[group_id].keys())
-            group_responses = self._collect_group_result(group_id, expected, deadline)
+            group_responses = self._collect_group_result(
+                group_id, expected_ids[group_id], deadline
+            )
             if group_responses is None:
                 return {}
             responses.update(group_responses)
@@ -1628,9 +1911,8 @@ class AggregatedSocketHub(SocketHub):
                 group_id = key.data
                 if group_id not in pending_groups:
                     continue
-                expected = set(grouped_requests[group_id].keys())
                 group_responses = self._collect_group_result(
-                    group_id, expected, deadline
+                    group_id, expected_ids[group_id], deadline
                 )
                 if group_responses is None:
                     return {}
@@ -1839,6 +2121,10 @@ class LocalSocketHubBridge:
         If ``group_id`` is empty.
     """
 
+    #: whether one batch driver serves the whole group, announced at HELLO so
+    #: the hub knows which bridges can answer with the columnar result frame
+    serves_batch = False
+
     def __init__(
         self,
         *,
@@ -2019,7 +2305,7 @@ class LocalSocketHubBridge:
             requests[molid] = cached
         return requests
 
-    def _run_local_step(self, efields: Mapping[int, np.ndarray]) -> Dict[int, dict]:
+    def _run_step(self, efields: Mapping[int, np.ndarray]) -> Dict[int, dict]:
         """
         Fan out one grouped step to the downstream local hub.
 
@@ -2069,7 +2355,7 @@ class LocalSocketHubBridge:
             label="aggregated hub",
         )
         self._upstream_sock = sock
-        _send_aggregate_hello(sock, group_id=self.group_id)
+        _send_aggregate_hello(sock, group_id=self.group_id, batch=self.serves_batch)
 
         try:
             while not self._stop_event.is_set():
@@ -2085,9 +2371,9 @@ class LocalSocketHubBridge:
                     _send_msg(sock, AGGREADY)
 
                 elif msg == AGGSTEP:
-                    efields = self._step_codec.recv(sock, header_already_read=True)
-                    responses = self._run_local_step(efields)
-                    self._result_codec.send(sock, responses)
+                    efields = self._recv_step(sock)
+                    responses = self._run_step(efields)
+                    self._send_result(sock, responses)
 
                 elif msg == STOP:
                     try:
@@ -2104,7 +2390,7 @@ class LocalSocketHubBridge:
         finally:
             _close_socket(sock)
             self._upstream_sock = None
-            self.local_hub.stop()
+            self._teardown()
 
     def start(self) -> threading.Thread:
         """
@@ -2148,12 +2434,422 @@ class LocalSocketHubBridge:
         if self._thread is not None:
             self._thread.join(timeout=float(wait))
 
+        self._teardown()
+
+    def _recv_step(self, sock: socket.socket):
+        """
+        Receive one AGGSTEP frame from the hub.
+
+        Notes
+        -----
+        This method can be *optionally* overridden by subclasses that take the
+        field block whole instead of one record per molecule.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Upstream connection to the hub.
+
+        Returns
+        -------
+        dict of int to numpy.ndarray
+            Mapping from molecule ID to its ``(3,)`` field vector.
+        """
+
+        return self._step_codec.recv(sock, header_already_read=True)
+
+    def _send_result(self, sock: socket.socket, responses: Mapping[int, dict]) -> None:
+        """
+        Send one AGGRESULT reply upstream.
+
+        Notes
+        -----
+        This method can be *optionally* overridden by subclasses that reply with
+        a block frame instead of one record per molecule.
+
+        Parameters
+        ----------
+        sock : socket.socket
+            Upstream connection to the hub.
+        responses : Mapping[int, dict]
+            Per-molecule responses as produced by :meth:`_run_step`.
+        """
+
+        self._result_codec.send(sock, responses)
+
+    def _teardown(self) -> None:
+        """Stop the downstream local hub; overridden by in-process backends."""
+
         self.local_hub.stop()
+
+
+# ---------------------------------------------------------------------------
+# In-process CPU batch bridge
+# ---------------------------------------------------------------------------
+
+
+class CPUBatchBridge(LocalSocketHubBridge):
+    """Aggregate bridge that holds existing Python drivers in-process.
+
+    Instead of fanning out to a downstream :class:`SocketHub` (one socket per
+    molecule) like :class:`LocalSocketHubBridge`, this bridge builds one Python
+    driver object per molecule id and steps them directly.
+
+    Parameters
+    ----------
+    group_id : str
+        Non-empty aggregate group identifier this bridge serves.
+    upstream_host : str
+        Host of the upstream :class:`AggregatedSocketHub`.
+    upstream_port : int
+        TCP port of the upstream hub.
+    driver : str
+        Name of an existing Python driver in MaxwellLink's driver registry.
+    driver_kwargs : mapping or None, optional
+        Keyword arguments used to construct every driver instance.
+    timeout : float, default: 60.0
+        Operation timeout (seconds) for the upstream link.
+    latency : float, default: 0.01
+        Polling interval (seconds); used by the caller's stop grace period.
+    """
+
+    serves_batch = True
+
+    def __init__(
+        self,
+        *,
+        group_id: str,
+        upstream_host: str,
+        upstream_port: int,
+        driver: str,
+        driver_args=None,
+        driver_kwargs: Optional[Mapping] = None,
+        timeout: float = 60.0,
+        latency: float = 0.01,
+    ):
+        # Intentionally skips super().__init__(): the base constructor builds a
+        # downstream SocketHub, which the in-process backend never uses.
+        from maxwelllink.mxl_drivers.python.models import __drivers__
+
+        normalized_group = str(group_id).strip()
+        normalized_driver = str(driver).strip().lower()
+        if not normalized_group:
+            raise ValueError("group_id must be a non-empty string")
+        if normalized_driver not in __drivers__:
+            raise ValueError(
+                f"Unsupported driver {driver!r}; available Python drivers are "
+                f"{list(__drivers__.keys())}."
+            )
+        if driver_kwargs is not None and not isinstance(driver_kwargs, Mapping):
+            raise TypeError("driver_kwargs must be a mapping or None.")
+
+        self.group_id = normalized_group
+        self.upstream_host = str(upstream_host)
+        self.upstream_port = int(upstream_port)
+        self.driver = normalized_driver
+        self.driver_args = tuple(driver_args or ())
+        self.driver_kwargs = dict(driver_kwargs or {})
+        self.timeout = float(timeout)
+        self.latency = float(latency)
+
+        self._drivers: Dict[int, object] = {}
+        self._amps_only = False
+        self._columnar_keys: tuple[str, ...] = ()
+        self._upstream_sock: Optional[socket.socket] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._step_codec = _StepCodec()
+        self._result_codec = _ResultCodec()
+
+    def _handle_group_init(self, payload: Mapping) -> None:
+        """Construct and initialize one Python driver per molecule id."""
+
+        from copy import deepcopy
+
+        from maxwelllink.mxl_drivers.python.models import __drivers__
+
+        incoming_group = str(payload.get("group_id", "")).strip()
+        if incoming_group != self.group_id:
+            raise RuntimeError(
+                f"Bridge {self.group_id!r} received AGGINIT for group "
+                f"{incoming_group!r}."
+            )
+
+        result_format = str(payload.get("result_format", "full")).strip().lower()
+        self._amps_only = result_format == "amps_only"
+        self._columnar_keys = (
+            tuple(payload.get("extra_keys") or ())
+            if result_format == "columnar"
+            else ()
+        )
+        raw_payloads = payload.get("init_payloads", {})
+        if not isinstance(raw_payloads, Mapping) or not raw_payloads:
+            raise RuntimeError("CPU batch AGGINIT requires molecule init payloads.")
+
+        drivers: Dict[int, object] = {}
+        for raw_mid, raw_init in sorted(
+            raw_payloads.items(), key=lambda item: int(item[0])
+        ):
+            mid = int(raw_mid)
+            init_data = dict(raw_init)
+            model = __drivers__[self.driver](
+                *self.driver_args, **deepcopy(self.driver_kwargs)
+            )
+            model.initialize(float(init_data["dt_au"]), mid)
+            drivers[mid] = model
+        self._drivers = drivers
+        self._mids = np.fromiter(drivers, dtype="<i4", count=len(drivers))
+
+    def _run_step(self, efields: Mapping[int, np.ndarray]) -> Dict[int, dict]:
+        """Advance every batched driver by one step and encode the responses."""
+
+        expected = set(self._drivers)
+        actual = {int(mid) for mid in efields}
+        if actual != expected:
+            raise RuntimeError(
+                f"CPU batch group {self.group_id!r} received molecule ids "
+                f"{sorted(actual)}, expected {sorted(expected)}."
+            )
+
+        columnar = bool(self._columnar_keys)
+        if columnar:
+            self._amps = np.empty((len(self._drivers), 3))
+            self._columns = np.empty((len(self._drivers), len(self._columnar_keys)))
+
+        responses: Dict[int, dict] = {}
+        for row, (mid, model) in enumerate(self._drivers.items()):
+            model.stage_step(np.asarray(efields[mid], dtype=float).reshape(3))
+            amplitude = np.asarray(model.commit_step(), dtype=float).reshape(3)
+            if columnar:
+                data = model.append_additional_data()
+                self._amps[row] = amplitude
+                self._columns[row] = [data[key] for key in self._columnar_keys]
+                continue
+            if self._amps_only:
+                responses[mid] = {"amp": amplitude, "extra": b""}
+                continue
+            extra = _json_dumps_bytes(model.append_additional_data())
+            responses[mid] = {"amp": amplitude, "extra": extra}
+        return responses
+
+    def _send_result(self, sock: socket.socket, responses: Mapping[int, dict]) -> None:
+        """Reply with one block frame when the hub asked for columns."""
+
+        if self._columnar_keys:
+            self._result_codec.send_block(sock, self._mids, self._amps, self._columns)
+            return
+        self._result_codec.send(sock, responses)
+
+    def _teardown(self) -> None:
+        """Close every batched driver, flushing any output files they hold."""
+
+        for model in self._drivers.values():
+            model.close()
+        self._drivers = {}
+
+
+# ---------------------------------------------------------------------------
+# In-process GPU batch bridge
+# ---------------------------------------------------------------------------
+
+
+class GPUBatchBridge(LocalSocketHubBridge):
+    """Aggregate bridge that steps one vectorized GPU ``DummyBatchModel``.
+
+    Unlike :class:`CPUBatchBridge`, which loops over ``num`` scalar driver
+    objects, this bridge holds a single batch model whose sub-system state lives
+    in contiguous arrays.  It reuses the base class's upstream
+    ``run``/``start``/``stop`` loop and overrides only the three behavioral
+    hooks (:meth:`_handle_group_init`, :meth:`_run_step`, :meth:`_teardown`).
+
+    The correctness (milestone-1) path below reuses the existing aggregate
+    result frame: it repackages the model's columnar output into the scalar
+    ``{"amp", "extra"}`` per-molecule format, reproducing the scalar driver's
+    JSON exactly.  A contiguous columnar result frame is a later, additive
+    performance milestone.
+
+    Parameters
+    ----------
+    group_id : str
+        Non-empty aggregate group identifier this bridge serves.
+    upstream_host : str
+        Host of the upstream :class:`AggregatedSocketHub`.
+    upstream_port : int
+        TCP port of the upstream hub.
+    driver : str
+        GPU batch-model name (currently only ``"sho"``).
+    driver_kwargs : mapping or None, optional
+        Kwargs forwarded to the batch model's template driver.
+    timeout : float, default: 60.0
+        Operation timeout (seconds) for the upstream link.
+    latency : float, default: 0.01
+        Polling interval (seconds); used by the caller's stop grace period.
+    model_backend : {'cpu', 'gpu', None}, optional
+        Backend the batch model runs on.  ``None`` (production) means ``'gpu'``
+        -- CuPy is required in the bridge process; ``'cpu'`` runs the same
+        vectorized model on the host (tests, CUDA-less machines).
+    """
+
+    serves_batch = True
+
+    def __init__(
+        self,
+        *,
+        group_id: str,
+        upstream_host: str,
+        upstream_port: int,
+        driver: str,
+        driver_args=None,
+        driver_kwargs: Optional[Mapping] = None,
+        timeout: float = 60.0,
+        latency: float = 0.01,
+        model_backend: Optional[str] = None,
+    ):
+        # Intentionally skips super().__init__(): the base constructor builds a
+        # downstream SocketHub, which the in-process GPU backend never uses.
+        from maxwelllink.matter.helpers import resolve_backend
+        from maxwelllink.mxl_drivers.python.batch import get_batch_model
+
+        normalized_group = str(group_id).strip()
+        if not normalized_group:
+            raise ValueError("group_id must be a non-empty string")
+        if driver_kwargs is not None and not isinstance(driver_kwargs, Mapping):
+            raise TypeError("driver_kwargs must be a mapping or None.")
+
+        self.group_id = normalized_group
+        self.upstream_host = str(upstream_host)
+        self.upstream_port = int(upstream_port)
+        self.driver = str(driver).strip().lower()
+        self.driver_args = tuple(driver_args or ())
+        self.driver_kwargs = dict(driver_kwargs or {})
+        self.timeout = float(timeout)
+        self.latency = float(latency)
+
+        self._model_cls = get_batch_model("gpu", self.driver)  # validates the combo
+        # 'gpu' by default: production requires CuPy, and resolving it here fails
+        # fast on a CUDA-less host instead of at the first AGGINIT
+        self._model_backend = (
+            "gpu" if model_backend is None else str(model_backend).strip().lower()
+        )
+        resolve_backend(self._model_backend)
+        self._model = None
+        self._ids: tuple[int, ...] = ()
+        self._amps_only = False
+        self._columnar_keys: tuple[str, ...] = ()
+        self._step_records = b""
+
+        self._upstream_sock: Optional[socket.socket] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._step_codec = _StepCodec()
+        self._result_codec = _ResultCodec()
+
+    def _handle_group_init(self, payload: Mapping) -> None:
+        """Build and initialize the batch model for this group's molecule ids."""
+
+        incoming_group = str(payload.get("group_id", "")).strip()
+        if incoming_group != self.group_id:
+            raise RuntimeError(
+                f"Bridge {self.group_id!r} received AGGINIT for group "
+                f"{incoming_group!r}."
+            )
+        result_format = str(payload.get("result_format", "full")).strip().lower()
+        self._amps_only = result_format == "amps_only"
+        self._columnar_keys = (
+            tuple(payload.get("extra_keys") or ())
+            if result_format == "columnar"
+            else ()
+        )
+        raw_payloads = payload.get("init_payloads", {})
+        if not isinstance(raw_payloads, Mapping) or not raw_payloads:
+            raise RuntimeError("GPU batch AGGINIT requires molecule init payloads.")
+
+        ids = sorted(int(mid) for mid in raw_payloads)
+        dts = {float(dict(raw_payloads[mid])["dt_au"]) for mid in raw_payloads}
+        if len(dts) != 1:
+            raise RuntimeError("GPU batch requires one shared dt_au for the group.")
+
+        self._model = self._model_cls(
+            num=len(ids),
+            driver_args=self.driver_args,
+            driver_kwargs=self.driver_kwargs,
+            backend=self._model_backend,
+        )
+        self._model.initialize(dts.pop(), ids)
+        self._ids = tuple(ids)
+        self._mids = np.asarray(ids, dtype="<i4")
+        # the record table a block step frame must carry to be taken whole
+        self._step_records = np.column_stack(
+            (self._mids, np.arange(self._mids.size, dtype="<i4"))
+        ).tobytes()
+
+    def _recv_step(self, sock: socket.socket):
+        """Take the field block whole when the hub packs one, as (num, 3)."""
+
+        nreq, records, fields = self._step_codec.recv_block(
+            sock, header_already_read=True
+        )
+        if fields.shape[0] != nreq or records != self._step_records:
+            return _resolve_step_records(records, fields)  # a per-molecule frame
+        return fields
+
+    def _run_step(self, efields) -> Dict[int, dict]:
+        """Milestone-1 path: step the model, repackage into the scalar frame."""
+
+        if isinstance(efields, np.ndarray):
+            block = efields  # a block frame, already in this group's id order
+        else:
+            expected = set(self._ids)
+            actual = {int(mid) for mid in efields}
+            if actual != expected:
+                raise RuntimeError(
+                    f"GPU batch group {self.group_id!r} received molecule ids "
+                    f"{sorted(actual)}, expected {sorted(expected)}."
+                )
+            block = np.stack(
+                [np.asarray(efields[m], dtype=float).reshape(3) for m in self._ids]
+            )
+        result = self._model.step(block)
+
+        if self._columnar_keys:
+            self._amps = result.amplitude_au
+            self._columns = self._model.append_additional_data_columns(self._columnar_keys)
+            return {}  # the block frame carries the whole group
+
+        if self._amps_only:
+            return {
+                mid: {"amp": result.amplitude_au[i], "extra": b""}
+                for i, mid in enumerate(self._ids)
+            }
+
+        extras = self._model.append_additional_data()
+        responses: Dict[int, dict] = {}
+        for i, mid in enumerate(self._ids):
+            extra = _json_dumps_bytes(extras[i])
+            responses[mid] = {"amp": result.amplitude_au[i], "extra": extra}
+        return responses
+
+    def _send_result(self, sock: socket.socket, responses: Mapping[int, dict]) -> None:
+        """Reply with one block frame when the hub asked for columns."""
+
+        if self._columnar_keys:
+            self._result_codec.send_block(sock, self._mids, self._amps, self._columns)
+            return
+        self._result_codec.send(sock, responses)
+
+    def _teardown(self) -> None:
+        """Release the batch model and any device arrays it holds."""
+
+        if self._model is not None:
+            self._model.close()
+            self._model = None
 
 
 __all__ = [
     "AggregatedBridge",
     "AggregatedSocketHub",
+    "CPUBatchBridge",
+    "GPUBatchBridge",
     "LocalSocketHubBridge",
     "RemoteBridgeSpec",
     "mxl_bridge_main",

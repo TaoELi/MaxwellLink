@@ -271,12 +271,19 @@ class PlasmonicRod(DummyCavity):
         z_substrate = film_bottom - 0.5 * substrate
         z_mirror = film_bottom - substrate - 0.5 * mirror
 
-        def transverse_block(block_material, height, center_z):
+        def transverse_block(block_material, height, center_z, trim_radial=False):
             if self.dimensions == CYLINDRICAL:
+                block_radius = self.cell_size.x
+                if trim_radial:
+                    # Keep dispersive layers 32 nm inside the grid-rounded PML to avoid reflections from dPML
+                    grid_radius = round(self.cell_size.x * self.resolution) / self.resolution
+                    block_radius = grid_radius - self.radial_pml - self.nm_to_meep(32.0)
+                    if block_radius <= 0.0:
+                        raise ValueError("Radial cell is too small for the 32 nm PML clearance.")
                 return mp.Block(
                     material=block_material,
-                    size=mp.Vector3(self.cell_size.x, 0.0, height),
-                    center=mp.Vector3(0.5 * self.cell_size.x, 0.0, center_z),
+                    size=mp.Vector3(block_radius, 0.0, height),
+                    center=mp.Vector3(0.5 * block_radius, 0.0, center_z),
                 )
             return mp.Block(
                 material=block_material,
@@ -369,8 +376,8 @@ class PlasmonicRod(DummyCavity):
                 axial_cylinder(self.adhesion_material, radius, adhesion, z_adhesion)
             )
         self._foreground_geometry += [
-            transverse_block(self.substrate_material, substrate, z_substrate),
-            transverse_block(self.material, mirror, z_mirror),
+            transverse_block(self.substrate_material, substrate, z_substrate, trim_radial=True),
+            transverse_block(self.material, mirror, z_mirror, trim_radial=True),
         ]
         self.geometry = self._background_geometry + self._foreground_geometry
 

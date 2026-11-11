@@ -15,7 +15,7 @@ in atomic units at time ``t_au``.
 from __future__ import annotations
 
 import math
-from typing import Callable, Sequence, Union
+from typing import Optional, Callable, Sequence, Union
 
 import numpy as np
 
@@ -23,6 +23,7 @@ __all__ = [
     "gaussian_pulse",
     "gaussian_enveloped_cosine",
     "cosine_drive",
+    "ramped_cosine_drive",
     "k_parallel_pulse",
     "k_parallel_pulse_with_seed",
 ]
@@ -179,6 +180,66 @@ def cosine_drive(
     return _drive
 
 
+def ramped_cosine_drive(
+    amplitude_au: float = 1.0,
+    omega_au: float = 0.1,
+    t_start_au: float = 0.0,
+    ramp_au: float = 0.0,
+    phase_rad: float = 0.0,
+    t_end_au: float = 1e10,
+    mode: Optional[int] = None,
+) -> Callable[[float], float]:
+    r"""
+    Return a continuous-wave cosine drive, ``A s(t - t0) cos[omega (t - t0) + phi]``,
+    whose envelope ``s`` rises as ``sin^2`` over ``ramp_au`` and is 1 after.
+
+    Parameters
+    ----------
+    amplitude_au : float, default: 1.0
+        Amplitude ``A`` in atomic units.
+    omega_au : float, default: 0.1
+        Angular frequency ``omega`` in atomic units.
+    t_start_au : float, default: 0.0
+        Time ``t0`` of the turn-on, before which the drive is zero (atomic units).
+    ramp_au : float, default: 0.0
+        Length of the turn-on (atomic units); ``0`` switches on abruptly.
+    phase_rad : float, default: 0.0
+        Phase offset ``phi`` in radians.
+    t_end_au : float, default: 1e10
+        Time after which the drive is zero (atomic units).
+    mode : int, optional
+        Cavity mode the drive acts on; the callable then carries
+        ``excited_mode_list = [mode]``, which the multimode solver reads when
+        ``excited_mode_list`` is not passed.
+
+    Returns
+    -------
+    callable
+        ``drive(t_au) -> float``.
+    """
+
+    amplitude = float(amplitude_au)
+    omega = float(omega_au)
+    phase = float(phase_rad)
+    t_start = float(t_start_au)
+    t_end = float(t_end_au)
+    ramp = max(float(ramp_au), 0.0)
+
+    def _drive(t_au: float) -> float:
+        tau = float(t_au) - t_start
+        if tau < 0.0 or t_au > t_end:
+            return 0.0
+        if ramp == 0.0 or tau >= ramp:
+            envelope = 1.0
+        else:
+            envelope = math.sin(0.5 * math.pi * tau / ramp) ** 2
+        return amplitude * envelope * math.cos(omega * tau + phase)
+
+    if mode is not None:
+        _drive.excited_mode_list = [int(mode)]
+    return _drive
+
+
 def _get_k_order(
     cavity, k_parallel_au: Union[float, Sequence[float]], direction: str
 ) -> np.ndarray:
@@ -194,7 +255,8 @@ def _get_k_order(
     ----------
     cavity
         A ``FabryPerotCavity`` instance exposing ``delta_omega_x_au``,
-        ``delta_omega_y_au``, ``n_mode_x``, and ``n_mode_y``.
+        ``delta_omega_y_au``, ``n_mode_x``, ``n_mode_y`` and, optionally,
+        ``mode_start_index_x``/``mode_start_index_y`` (assumed 1 when absent).
     k_parallel_au
         Physical in-plane wave vector in atomic units; a scalar for
         ``direction="x"``/``"y"``, a length-2 sequence for ``"xy"``.
@@ -234,7 +296,19 @@ def _get_k_order(
         raise ValueError("k_parallel_au must be finite.")
 
     delta_omega = np.array([cavity.delta_omega_x_au, cavity.delta_omega_y_au])
-    n_mode_max = np.array([cavity.n_mode_x, cavity.n_mode_y])
+    # the largest mode index along each axis: the cavity indexes its modes
+    # mode_start_index ... mode_start_index + n_mode - 1 (default 1 ... n_mode)
+    # index_max = (
+    #    getattr(cavity, "mode_start_index", 1)
+    #    + np.array([cavity.n_mode_x, cavity.n_mode_y])
+    #    - 1
+    # )
+    index_max = np.array(
+        [
+            getattr(cavity, "mode_start_index_x", 1) + cavity.n_mode_x - 1,
+            getattr(cavity, "mode_start_index_y", 1) + cavity.n_mode_y - 1,
+        ]
+    )
     if np.any((delta_omega == 0.0) & (k_parallel != 0.0)):
         raise ValueError(
             "k_parallel_au must be zero along any axis whose delta_omega_x_au "
@@ -243,13 +317,49 @@ def _get_k_order(
     k_order = np.divide(
         k_parallel, delta_omega, out=np.zeros(2), where=delta_omega != 0.0
     )
-    if np.any(np.abs(k_order) > n_mode_max):
+    if np.any(np.abs(k_order) > index_max):
         raise ValueError(
             "Absolute k_parallel_au is too large for the cavity mode spacing. "
-            f"Maximum allowed is ({delta_omega[0] * n_mode_max[0]:.3e}, "
-            f"{delta_omega[1] * n_mode_max[1]:.3e})."
+            f"Maximum allowed is ({delta_omega[0] * index_max[0]:.3e}, "
+            f"{delta_omega[1] * index_max[1]:.3e})."
         )
     return k_order
+
+
+def _project_onto_modes(
+    cavity, selected: np.ndarray, source_complex: np.ndarray, axis_index: int
+) -> np.ndarray:
+    """
+    Return ``ftilde_k[:, selected, axis_index] @ source_complex`` for a cavity.
+
+    ``FabryPerotCavity`` keeps its mode functions factorized along x and y
+    (``Cx``, ``Sy``, ``Sx``, ``Cy`` times ``mode_prefactor``), so the overlap
+    with every mode is one small matrix product over the selected grid points
+    and the full ``(n_mode, n_grid, 3)`` array is never needed. Cavities that
+    expose only ``ftilde_k`` fall back to it.
+    """
+    factors = ("Cx", "Sy", "Sx", "Cy", "mode_prefactor", "n_grid_x")
+    if all(hasattr(cavity, name) for name in factors):
+        grid_x = selected % cavity.n_grid_x
+        grid_y = selected // cavity.n_grid_x
+        if axis_index == 0:
+            along_x, along_y = cavity.Cx[:, grid_x], cavity.Sy[:, grid_y]
+        else:
+            along_x, along_y = cavity.Sx[:, grid_x], cavity.Cy[:, grid_y]
+        # (n_mode_y, n_mode_x), which flattens in the cavity's mode order
+        overlap = (along_y * source_complex[None, :]) @ along_x.T
+        return cavity.mode_prefactor * overlap.reshape(-1)
+
+    ftilde_k = getattr(cavity, "ftilde_k", None)
+    if ftilde_k is None:
+        raise ValueError(
+            "target='photon' requires the cavity mode functions; construct "
+            "the cavity with save_mode_functions=True."
+        )
+    ftilde_k = np.asarray(ftilde_k, dtype=float)
+    if ftilde_k.ndim != 3 or ftilde_k.shape[2] != 3:
+        raise ValueError("cavity must expose ftilde_k with shape (n_mode, n_grid, 3).")
+    return ftilde_k[:, selected, axis_index] @ source_complex
 
 
 def k_parallel_pulse(
@@ -296,7 +406,8 @@ def k_parallel_pulse(
     ----------
     cavity
         A ``FabryPerotCavity`` instance. It must expose ``grid_xy`` and the
-        relevant ``delta_omega_*_au`` value.
+        relevant ``delta_omega_*_au`` value; ``target="photon"`` also uses its
+        factorized mode functions, so ``save_mode_functions=False`` is fine.
     envelope
         Time-domain envelope callable ``envelope(t_au)`` or constant scalar
         multiplier. Use helpers such as :func:`gaussian_pulse`; the carrier
@@ -407,19 +518,10 @@ def k_parallel_pulse(
         projection_axis_clean = str(projection_axis).strip().lower()
         if projection_axis_clean not in {"x", "y"}:
             raise ValueError("projection_axis must be 'x' or 'y'.")
-        ftilde_k = getattr(cavity, "ftilde_k", None)
-        if ftilde_k is None:
-            raise ValueError(
-                "target='photon' requires the cavity mode functions; construct "
-                "the cavity with save_mode_functions=True."
-            )
-        ftilde_k = np.asarray(ftilde_k, dtype=float)
-        if ftilde_k.ndim != 3 or ftilde_k.shape[2] != 3:
-            raise ValueError(
-                "cavity must expose ftilde_k with shape (n_mode, n_grid, 3)."
-            )
         projection_axis_index = 0 if projection_axis_clean == "x" else 1
-        raw_projection = ftilde_k[:, selected, projection_axis_index] @ source_complex
+        raw_projection = _project_onto_modes(
+            cavity, selected, source_complex, projection_axis_index
+        )
         projection_norm = float(np.max(np.abs(raw_projection)))
         if projection_norm <= 0.0:
             raise ValueError(
@@ -553,9 +655,10 @@ class KParallelPulseWithSeed:
         else:
             # Project the real-space vortex pattern directly onto the cavity
             # modes, using the same calculation as k_parallel_pulse.
-            ftilde_k = np.asarray(self.cavity.ftilde_k, dtype=float)
             axis_index = 0 if self.projection_axis == "x" else 1
-            raw_projection = ftilde_k[:, selected, axis_index] @ source_complex
+            raw_projection = _project_onto_modes(
+                self.cavity, selected, source_complex, axis_index
+            )
             projection_norm = float(np.max(np.abs(raw_projection)))
             if not np.isfinite(projection_norm) or projection_norm <= 0.0:
                 raise ValueError(

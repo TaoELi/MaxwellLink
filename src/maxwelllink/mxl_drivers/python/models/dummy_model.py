@@ -313,3 +313,14 @@ class DummyModel:
         self._pending_amp = None
         self._have = False
         return amp
+
+    def close(self):
+        """
+        Release what the model holds at the end of a run.
+        
+        Notes
+        -----
+        This method *may be* overridden by subclasses.
+        """
+
+        return None

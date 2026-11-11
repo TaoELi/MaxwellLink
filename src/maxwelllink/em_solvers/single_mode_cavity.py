@@ -16,7 +16,6 @@ embedded (non-socket) molecular drivers.
 
 from __future__ import annotations
 
-import json
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Union
 import time
 
@@ -25,6 +24,7 @@ import numpy as np
 from ..molecule import Molecule
 from ..sockets import SocketHub, am_master
 from ..units import FS_TO_AU, AU_TO_K
+from ..tools.fast_json import json_loads
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
 
 
@@ -527,6 +527,17 @@ class SingleModeSimulation(DummyEMSimulation):
         # print("In Function, Effective E-field vector:", efield_vec)
         return efield_vec
 
+    def local_dipole_self_energy(self) -> np.ndarray:
+        r"""
+        Per-molecule coefficient ``varepsilon^2 / omega_c^2`` on the coupled axes.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (3,)
+        """
+
+        return (self.coupling_strength**2 / self.frequency**2) * self.axis.astype(float)
+
     def _calc_energy(self, pc, qc, mu) -> float:
         """
         Calculate the total energy of the cavity + molecular system.
@@ -628,7 +639,7 @@ class SingleModeSimulation(DummyEMSimulation):
                 extra_blob = payload.get("extra", b"")
                 if extra_blob:
                     try:
-                        data = json.loads(extra_blob.decode("utf-8"))
+                        data = json_loads(extra_blob)
                         if isinstance(data, dict):
                             data.setdefault("time_au", self.time)
                             wrapper.additional_data_history.append(data)

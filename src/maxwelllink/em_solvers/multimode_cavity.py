@@ -16,7 +16,6 @@ embedded (non-socket) molecular drivers.
 
 from __future__ import annotations
 
-import json
 import os, shutil
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Union
 import time
@@ -26,6 +25,7 @@ import numpy as np
 from ..molecule import Molecule
 from ..sockets import SocketHub, am_master
 from ..units import FS_TO_AU, AU_TO_CM_INV
+from ..tools.fast_json import json_loads
 from .dummy_em import DummyEMUnits, MoleculeDummyWrapper, DummyEMSimulation
 from ..tools.harmonic_oscillator_helper import DummyInitializer, DummyThermostat
 
@@ -145,7 +145,9 @@ class FabryPerotCavity:
         n_mode_x: int = 1,
         n_mode_y: int = 1,
         abc_cutoff: Optional[list] | float = [0.0, 0.0],
-        save_mode_functions: bool = True,
+        save_mode_functions: bool = False,
+        mode_start_index: int = 1,
+        density_profile: Optional[np.ndarray] = None,
     ):
         r"""
         Parameters
@@ -173,13 +175,15 @@ class FabryPerotCavity:
         delta_omega_y_au : float, default: 0.0
             Frequency spacing along y-axis for cavity modes, in atomic units.
         n_mode_x : int, default: 1
-            Number of cavity modes along x-axis.
+            Number of in-plane mode indices along x.
         n_mode_y : int, default: 1
-            Number of cavity modes along y-axis.
+            Number of in-plane mode indices along y.
         abc_cutoff : list or float, optional
             Absorbing boundary condition cutoff for the molecular bath grid, in units of cavity length.  The cutoff is applied to both x and y axes. If None, no absorbing boundary condition is applied. If a list is provided, it should contain two values representing the cutoff distances for x and y axes respectively. If a single float value is provided, it will be applied to both axes.
-        save_mode_functions : bool, default: True
+        save_mode_functions : bool, default: False
             Whether to save the cavity mode functions evaluated at the molecular grid points. Setting this to True can consume more memory but may speed up the simulation if the mode functions are needed multiple times.
+        mode_start_index : int, default: 1
+            The starting index for the cavity modes. If 1 (previous behavior), the modes are indexed from 1 to n_mode_x/y. If 0 (excluding 2D artifacts), the modes are indexed from 0 to n_mode_x/y - 1.
         """
         if frequency_au is None:
             raise ValueError("frequency_au must be provided.")
@@ -244,6 +248,35 @@ class FabryPerotCavity:
         self.n_grid_y = len(y_grid_1d)
         self.n_grid = self.n_grid_x * self.n_grid_y
 
+        self.density_profile = None
+
+        if density_profile is not None:
+
+            if not isinstance(density_profile, np.ndarray):
+                raise TypeError("density_profile must be a numpy.ndarray.")
+
+            expected_shape = (self.n_grid_y, self.n_grid_x)
+            if density_profile.ndim != 2 or density_profile.shape != expected_shape:
+                raise ValueError(
+                    f"density_profile must have shape {expected_shape}, "
+                    f"got {density_profile.shape}."
+                )
+
+            if not np.isrealobj(density_profile):
+                raise ValueError("density_profile must be real-valued.")
+
+            density = np.array(density_profile, dtype=float, copy=True)
+
+            if not np.all(np.isfinite(density)) or np.any(density < 0.0):
+                raise ValueError(
+                    "density_profile must contain finite, non-negative values."
+                )
+
+            self.coupling_weights = density**0.5
+
+        else:
+            self.coupling_weights = np.ones((self.n_grid_y, self.n_grid_x))
+
         # generate 2D grid points of molecular bath coords in units of Lx, Ly
         x_grid_2d, y_grid_2d = np.meshgrid(x_grid_1d, y_grid_1d)
         x_grid_2d = np.reshape(x_grid_2d, -1)
@@ -253,8 +286,13 @@ class FabryPerotCavity:
         # generate 2D grid points of kx, ky in units of 1/Lx, 1/Ly
         self.n_mode_x = n_mode_x
         self.n_mode_y = n_mode_y
-        kx_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_x)])
-        ky_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_y)])
+        self.mode_start_index = mode_start_index
+        # the original code indeces the modes from 1 to n_mode_x/y
+        # kx_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_x)])
+        # ky_grid_1d = np.pi * np.array([i + 1.0 for i in range(n_mode_y)])
+        # let's update the index from 0 to n_mode_x/y [fix the 2D gaussian pulse issue]
+        kx_grid_1d = np.pi * np.array([i + mode_start_index for i in range(n_mode_x)])
+        ky_grid_1d = np.pi * np.array([i + mode_start_index for i in range(n_mode_y)])
         kx_grid_2d, ky_grid_2d = np.meshgrid(kx_grid_1d, ky_grid_1d)
         kx_grid_2d = np.reshape(kx_grid_2d, -1)
         ky_grid_2d = np.reshape(ky_grid_2d, -1)
@@ -272,25 +310,44 @@ class FabryPerotCavity:
         self.omega_k = (self.frequency_au**2 + omega_parallel**2) ** 0.5
         print("[MultiModeCavity] omega_k in cm-1", self.omega_k * AU_TO_CM_INV)
 
-        # construct renormalized cavity mode function for each molecular grid point
+        # construct renormalized cavity mode function for each molecular grid point;
+        # a cos(0) = 1 factor carries sqrt(2) rather than 2 to keep the mode normalised
         self.n_mode = n_mode_x * n_mode_y
+        # set the two lines below to 1.0 if switched back to the original indexing from 1 to n_mode_x/y
+        if self.mode_start_index_x == 0:
+            cx_norm = np.where(kx_grid_2d == 0.0, np.sqrt(0.5), 1.0)
+        else:
+            cx_norm = 1.0
+
+        if self.mode_start_index_y == 0:
+            cy_norm = np.where(ky_grid_2d == 0.0, np.sqrt(0.5), 1.0)
+        else:
+            cy_norm = 1.0
 
         if save_mode_functions:
             ftilde_k = np.zeros((self.n_mode, self.n_grid, 3), dtype=float)
             for i in range(self.n_grid):
                 x, y = x_grid_2d[i], y_grid_2d[i]
                 ftilde_k[:, i, 0] = (
-                    2.0 * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y)
+                    2.0 * cx_norm * np.cos(kx_grid_2d * x) * np.sin(ky_grid_2d * y)
                 )
                 ftilde_k[:, i, 1] = (
-                    2.0 * np.sin(kx_grid_2d * x) * np.cos(ky_grid_2d * y)
+                    2.0 * cy_norm * np.sin(kx_grid_2d * x) * np.cos(ky_grid_2d * y)
                 )
             self.ftilde_k = ftilde_k
 
-        self.Cx = np.cos(np.outer(kx_grid_1d, x_grid_1d))  # (n_mode_x, n_grid_x)
-        self.Sy = np.sin(np.outer(ky_grid_1d, y_grid_1d))  # (n_mode_y, n_grid_y)
-        self.Sx = np.sin(np.outer(kx_grid_1d, x_grid_1d))  # (n_mode_x, n_grid_x)
-        self.Cy = np.cos(np.outer(ky_grid_1d, y_grid_1d))  # (n_mode_y, n_grid_y)
+        # the factorised mode functions, (n_mode_x, n_grid_x) and (n_mode_y, n_grid_y);
+        # the sine rows of l = 0 vanish, the cosine rows carry the sqrt(2)
+        self.Cx = np.cos(np.outer(kx_grid_1d, x_grid_1d))
+        # comment out the line below if switched back to the original indexing from 1 to n_mode_x/y
+        if self.mode_start_index == 0:
+            self.Cx[0] *= np.sqrt(0.5)
+        self.Sy = np.sin(np.outer(ky_grid_1d, y_grid_1d))
+        self.Sx = np.sin(np.outer(kx_grid_1d, x_grid_1d))
+        self.Cy = np.cos(np.outer(ky_grid_1d, y_grid_1d))
+        # comment out the line below if switched back to the original indexing from 1 to n_mode_x/y
+        if self.mode_start_index == 0:
+            self.Cy[0] *= np.sqrt(0.5)
         self.mode_prefactor = 2.0
 
         self.varepsilon_k = self.coupling_strength * self.omega_k / np.min(self.omega_k)
@@ -392,6 +449,51 @@ class FabryPerotCavity:
         print(
             f"[MultiModeCavity] Applying Absorbing Boundary Condition: {self.apply_abc}, cutoff: {self.abc_cutoff}"
         )
+
+    def local_dipole_self_energy(self, tolerance: float = 1.0e-10) -> np.ndarray:
+        r"""
+        Per-site coefficients of the dipole self-energy for a complete mode basis.
+
+        Parameters
+        ----------
+        tolerance : float, default: 1e-10
+            Largest relative off-diagonal element that still counts as diagonal.
+
+        Returns
+        -------
+        numpy.ndarray of float, shape (n_grid, 3)
+            ``K_ii`` on the coupled polarisation components, zero on the others.
+
+        Raises
+        ------
+        ValueError
+            If the self-energy is not local on this grid or ``density_profile`` is set.
+        """
+
+        if getattr(self, "density_profile", None) is not None:
+            raise ValueError(
+                "the local dipole self-energy assumes a uniform density profile."
+            )
+        coefficient = np.zeros((self.n_grid, 3))
+        coeff = np.asarray(self.dse_coeff).reshape(self.n_mode_y, self.n_mode_x)
+        # the x component carries cos(kx x) sin(ky y), the y component sin(kx x) cos(ky y)
+        for axis, (fy, fx) in enumerate(((self.Sy, self.Cx), (self.Cy, self.Sx))):
+            if not self.axis[axis]:
+                continue
+            for name, f in (("x", fx), ("y", fy)):
+                gram = f.T @ f
+                diagonal = np.diag(gram)
+                off = np.abs(gram - np.diag(diagonal)).max()
+                if off > tolerance * np.abs(diagonal).max():
+                    raise ValueError(
+                        "the dipole self-energy is not local on this grid: the mode "
+                        f"basis is not complete along {name} (as many modes as grid "
+                        "points, counted from mode_start_index 1, make it so)."
+                    )
+            coefficient[:, axis] = (
+                self.mode_prefactor**2 * ((fy**2).T @ coeff @ (fx**2))
+            ).reshape(-1)
+        return coefficient
 
 
 class MultiModeSimulation(DummyEMSimulation):
@@ -527,6 +629,36 @@ class MultiModeSimulation(DummyEMSimulation):
 
         self.time = 0.0
         self.cavity_geometry = cavity_geometry
+
+        # A batch bridge (mxl_bridge --backend cpu/gpu) can return a whole group's
+        # dipoles and energies as one packed float64 block instead of one JSON
+        # document per molecule.
+        # The following parameters are used to handle this "columnar" (not JSON) data format.
+        self.columnar_extras = not self.non_socket_wrappers and hasattr(
+            self.hub, "request_columnar_extras"
+        )
+        self._columnar_bound = False  # set once a block reply has arrived
+        self._columnar_energy = None  # molecular energy of the current step
+        self._columnar_dipole_next = None  # drifted force-time dipole
+        self._columnar_rescaling_factor = None  # per-molecule, as a column
+        if self.columnar_extras:
+            self.hub.request_columnar_extras(
+                (
+                    "mux_au",
+                    "muy_au",
+                    "muz_au",
+                    "mux_m_au",
+                    "muy_m_au",
+                    "muz_m_au",
+                    "energy_au",
+                )
+            )
+            self._columnar_rescaling_factor = np.ones((self.n_grid, 1), dtype=float)
+            for wrapper in self.socket_wrappers:
+                if wrapper.rescaling_factor is not None:
+                    self._columnar_rescaling_factor[wrapper.molecule_id] = float(
+                        wrapper.rescaling_factor
+                    )
 
         if mu_initial is None:
             mu_initial = np.zeros((self.n_grid, 3), dtype=float)
@@ -668,19 +800,28 @@ class MultiModeSimulation(DummyEMSimulation):
         dict of int to dict
             Mapping from molecule IDs to their response payloads.
         """
-        requests = {
-            w.molecule_id: {
-                "efield_au": efield_vec[w.molecule_id, :],
-                "meta": {"time_au": self.time},
-                "init": {**w.init_payload, "molecule_id": w.molecule_id},
+        # Original path
+        requests = None
+        if not self._columnar_bound:
+            requests = {
+                w.molecule_id: {
+                    "efield_au": efield_vec[w.molecule_id, :],
+                    "meta": {"time_au": self.time},
+                    "init": {**w.init_payload, "molecule_id": w.molecule_id},
+                }
+                for w in self.socket_wrappers
             }
-            for w in self.socket_wrappers
-        }
-        responses = self.hub.step_barrier(requests)
-        while not responses:
+
+        # A block reply leaves the group in hub.last_columnar and returns nothing
+        # per molecule, so there an empty mapping means success instead of a lost bridge.
+        while True:
+            if requests is None:
+                responses = self.hub.step_barrier(requests, efield_au=efield_vec)
+            else:
+                responses = self.hub.step_barrier(requests)
+            if responses or (self.columnar_extras and self.hub.last_columnar):
+                return responses
             self._ensure_socket_connections()
-            responses = self.hub.step_barrier(requests)
-        return responses
 
     def _calc_mu_dot_f_subspace(self, mu: np.ndarray) -> np.ndarray:
         r"""
@@ -870,10 +1011,12 @@ class MultiModeSimulation(DummyEMSimulation):
         if self.include_dse:
             potential_energy += 0.5 * self.dse_coeff[:, None] * mu_dot_f**2
 
-        e_molecule = sum(
-            wrapper.additional_data_history[-1]["energy_au"]
-            for wrapper in self.wrappers
-        )
+        e_molecule = self._columnar_energy
+        if e_molecule is None:
+            e_molecule = sum(
+                wrapper.additional_data_history[-1]["energy_au"]
+                for wrapper in self.wrappers
+            )
         total_energy = (
             np.sum((kinetic_energy + potential_energy) * self.axis) + e_molecule
         )
@@ -955,6 +1098,42 @@ class MultiModeSimulation(DummyEMSimulation):
 
         return dipole_vec * self.axis, has_half_step_shift
 
+    def _calc_dipole_vec_columnar(self):
+        """
+        Read one step's dipoles, dmu/dt (amplitudes) and energies out of the block reply.
+
+        Returns
+        -------
+        dipole : numpy.ndarray of float, shape (n_grid, 3)
+            Half-step dipole of every grid point along the coupling axis.
+        dmudt : numpy.ndarray of float, shape (n_grid, 3)
+            Dipole velocity of every grid point along the coupling axis.
+        """
+
+        dipole = np.zeros((self.n_grid, 3), dtype=float)
+        dmudt = np.zeros((self.n_grid, 3), dtype=float)
+        self._columnar_dipole_next = np.zeros((self.n_grid, 3), dtype=float)
+        self._columnar_energy = 0.0
+
+        # block columns are the fields requested in __init__, in that order: mu
+        # half a step after the force time, mu at the force time, then the energy
+        for mids, amps, block in self.hub.last_columnar.values():
+            rescaling_factor = self._columnar_rescaling_factor[mids]
+            mu_half = block[:, 0:3]
+            mu_force = block[:, 3:6]
+            dmudt[mids] = amps * rescaling_factor
+            dipole[mids] = mu_half * rescaling_factor
+            self._columnar_dipole_next[mids] = (
+                2.0 * mu_half - mu_force
+            ) * rescaling_factor
+            self._columnar_energy += float(block[:, 6].sum())
+
+        if self.shift_dipole_baseline:
+            dipole -= self.dipole_baseline
+            self._columnar_dipole_next -= self.dipole_baseline
+        self._columnar_dipole_next *= self.axis
+        return dipole * self.axis, dmudt * self.axis
+
     def _eval_pulse_field(
         self,
         pulse,
@@ -1005,6 +1184,8 @@ class MultiModeSimulation(DummyEMSimulation):
         float
             Sum of molecular dipole moment along the coupling axis.
         """
+        self._columnar_energy = None  # refilled below only on the columnar path
+
         # modify local e-field for molecules under excitation
         if self.excited_grid_list:
             efield_vec[self.excited_grid_list, :] += self._eval_pulse_field(
@@ -1023,9 +1204,15 @@ class MultiModeSimulation(DummyEMSimulation):
 
         # Socket molecules
         if self.socket_wrappers:
-            self._ensure_socket_connections()
+            if not self._columnar_bound:
+                # Re-checking the binding costs a payload copy per molecule, and the
+                # retry loop below still rebinds if a bridge is ever lost.
+                self._ensure_socket_connections()
 
             responses = self._collect_socket_responses(efield_vec)
+            if self.columnar_extras and self.hub.last_columnar:
+                self._columnar_bound = True
+                return self._calc_dipole_vec_columnar()
             for wrapper in self.socket_wrappers:
                 payload = responses.get(wrapper.molecule_id)
                 if not payload:
@@ -1038,7 +1225,7 @@ class MultiModeSimulation(DummyEMSimulation):
                 extra_blob = payload.get("extra", b"")
                 if extra_blob:
                     try:
-                        data = json.loads(extra_blob.decode("utf-8"))
+                        data = json_loads(extra_blob)
                         if isinstance(data, dict):
                             data.setdefault("time_au", self.time)
                             wrapper.additional_data_history.append(data)
@@ -1091,7 +1278,10 @@ class MultiModeSimulation(DummyEMSimulation):
 
         # the value for n+1/2 time step
         self.dipole, self.dmudt = self._step_molecules(efield_vec)
-        self.dipole_next, self.has_dipole_next = self._calc_dipole_vec_next()
+        if self._columnar_energy is None:
+            self.dipole_next, self.has_dipole_next = self._calc_dipole_vec_next()
+        else:
+            self.dipole_next, self.has_dipole_next = self._columnar_dipole_next, True
 
         # extrapolate to n+1 time step (ONLY NEEDED FOR VELOCITY VERLET MOLECULE PROPAGATION)
         if self.molecule_half_step:
@@ -1156,12 +1346,18 @@ class MultiModeSimulation(DummyEMSimulation):
                             pulse_record_value(self.molecule_pulse)
                         )
                     if "energy" in self.record_list:
-                        self.memmaps["energy"][record_idx, 0] = self._calc_energy(
+                        self.memmaps["energy"][record_idx, 0] = self._calc_total_energy(
                             self.pc, self.qc, self.dipole
                         )
-                    if "photonic_energy" in self.record_list:
-                        self.memmaps["photonic_energy"][record_idx, :] = (
-                            self._calc_photonic_energy(self.pc, self.qc)
+                    if "bare_photonic_energy" in self.record_list:
+                        self.memmaps["bare_photonic_energy"][record_idx, :] = (
+                            self._calc_bare_photonic_energy(self.pc, self.qc)
+                        )
+                    if "photonic_energy_with_dse" in self.record_list:
+                        self.memmaps["photonic_energy_with_dse"][record_idx, :] = (
+                            self._calc_photonic_energy_with_dse(
+                                self.pc, self.qc, self.dipole
+                            )
                         )
                     if "effective_efield" in self.record_list:
                         self.memmaps["effective_efield"][record_idx, :, :] = (
@@ -1200,12 +1396,18 @@ class MultiModeSimulation(DummyEMSimulation):
                             pulse_record_value(self.molecule_pulse)
                         )
                     if "energy" in self.record_list:
-                        self.h5_file["energy"][record_idx, 0] = self._calc_energy(
+                        self.h5_file["energy"][record_idx, 0] = self._calc_total_energy(
                             self.pc, self.qc, self.dipole
                         )
-                    if "photonic_energy" in self.record_list:
-                        self.h5_file["photonic_energy"][record_idx, :] = (
-                            self._calc_photonic_energy(self.pc, self.qc)
+                    if "bare_photonic_energy" in self.record_list:
+                        self.h5_file["bare_photonic_energy"][record_idx, :] = (
+                            self._calc_bare_photonic_energy(self.pc, self.qc)
+                        )
+                    if "photonic_energy_with_dse" in self.record_list:
+                        self.h5_file["photonic_energy_with_dse"][record_idx, :] = (
+                            self._calc_photonic_energy_with_dse(
+                                self.pc, self.qc, self.dipole
+                            )
                         )
                     if "effective_efield" in self.record_list:
                         self.h5_file["effective_efield"][record_idx, :, :] = (
@@ -1239,11 +1441,17 @@ class MultiModeSimulation(DummyEMSimulation):
                     self.molecule_pulse_history.append(self.molecule_pulse(self.time))
                 if "energy" in self.record_list:
                     self.energy_history.append(
-                        self._calc_energy(self.pc, self.qc, self.dipole)
+                        self._calc_total_energy(self.pc, self.qc, self.dipole)
                     )
-                if "photonic_energy" in self.record_list:
-                    self.photonic_energy_history.append(
-                        self._calc_photonic_energy(self.pc, self.qc)
+                if "bare_photonic_energy" in self.record_list:
+                    self.bare_photonic_energy_history.append(
+                        self._calc_bare_photonic_energy(self.pc, self.qc)
+                    )
+                if "photonic_energy_with_dse" in self.record_list:
+                    self.photonic_energy_with_dse_history.append(
+                        self._calc_photonic_energy_with_dse(
+                            self.pc, self.qc, self.dipole
+                        )
                     )
                 if "molecule_response" in self.record_list:
                     self.molecule_response_history.append(self.dmudt.copy())
@@ -1283,23 +1491,37 @@ class MultiModeSimulation(DummyEMSimulation):
         """
 
         self.record_history = bool(record_history)
-        self.record_to_disk = bool(record_to_disk)
-        self.disk_folder_address = disk_folder_address
 
-        if npz_filename is not None and h5_filename is not None:
-            raise ValueError(
-                "Only one of npz_filename and h5_filename can be provided."
-            )
-        elif npz_filename is None and h5_filename is None and record_to_disk:
-            raise ValueError(
-                "Either npz_filename or h5_filename must be provided when record_to_disk is True."
-            )
-        elif npz_filename is not None:
-            self.filename = npz_filename
-            self.file_format = "npz"
-        elif h5_filename is not None:
-            self.filename = h5_filename
-            self.file_format = "h5"
+        if record_filename == "":
+            raise ValueError("record_filename cannot be empty.")
+
+        self.record_filename = record_filename
+        self.record_to_disk = record_filename is not None
+        self.filename = None
+        self.file_format = None
+        self.disk_folder_address = None
+
+        if self.record_to_disk:
+            record_path = os.path.expanduser(os.fspath(record_filename))
+
+            if not os.path.isabs(record_path):
+                record_path = os.path.abspath(record_path)
+
+            suffix = os.path.splitext(record_path)[1].lower()
+            if suffix == ".npz":
+                self.file_format = "npz"
+            elif suffix == ".h5":
+                self.file_format = "h5"
+            else:
+                raise ValueError(
+                    "record_filename must end with '.npz' or '.h5', "
+                    f"got: {record_filename!r}"
+                )
+
+            self.disk_folder_address = os.path.dirname(record_path)
+            self.filename = os.path.basename(record_path)
+
+            os.makedirs(self.disk_folder_address, exist_ok=True)
 
         if record_every_steps < 1 or isinstance(record_every_steps, int) == False:
             raise ValueError("record_every_steps must be a positive integer.")

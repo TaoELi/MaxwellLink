@@ -11,6 +11,7 @@ from .pulses import (
     gaussian_pulse,
     gaussian_enveloped_cosine,
     cosine_drive,
+    ramped_cosine_drive,
     k_parallel_pulse,
     k_parallel_pulse_with_seed,
 )
@@ -18,14 +19,25 @@ from .transverse_components import (
     calc_transverse_components_3d,
     project_transverse_field_3d,
 )
+from .fast_json import json_loads
+from .recorders import PropertyRecorder, XYZTrajectoryWriter, output_filename
+from .xyz_helper import read_xyz, read_xyz_frames, read_xyz_trajectory
 
 __all__ = [
+    "json_loads",
+    "read_xyz",
+    "read_xyz_frames",
+    "read_xyz_trajectory",
+    "output_filename",
+    "PropertyRecorder",
+    "XYZTrajectoryWriter",
     "ir_spectrum",
     "rt_tddft_spectrum",
     "lr_tddft_spectrum",
     "gaussian_pulse",
     "gaussian_enveloped_cosine",
     "cosine_drive",
+    "ramped_cosine_drive",
     "k_parallel_pulse",
     "k_parallel_pulse_with_seed",
     "calc_transverse_components_3d",

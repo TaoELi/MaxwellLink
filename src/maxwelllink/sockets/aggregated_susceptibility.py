@@ -262,6 +262,10 @@ class _AggregatedSusceptibilitySocketHubServer(
         self.host, self.port = _resolve_bound_endpoint(self.serversock, host, port)
         self.timeout = float(timeout)
 
+        # The Meep susceptibility hub consumes only dmu/dt, so batch bridges skip
+        # building the per-molecule JSON additional data they would discard.
+        self._bridge_result_format = "amps_only"
+
     # -------------- remote-bridge policy and manifest --------------
 
     @property
