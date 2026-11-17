@@ -22,6 +22,7 @@ The sections below group tutorials by the employed electromagnetic solver.
 ## Multimode Cavity
 
 - [Dispersion relation for vibrational strong coupling in Fabry-Perot cavity](./11_multimode_sho.ipynb)
+- [Vibrational polariton transport and condensation in Fabry-Perot cavity](./12_multimode_gpu_md_transport_condensation.ipynb)
 
 ## MEEP FDTD
 

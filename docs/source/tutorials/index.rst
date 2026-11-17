@@ -42,6 +42,7 @@ Multimode Cavity
    :maxdepth: 1
 
    notebook/11_multimode_sho.ipynb
+   notebook/12_multimode_gpu_md_transport_condensation.ipynb
 
 MEEP FDTD
 ~~~~~~~~~~~~~~~~~~~~~~~~

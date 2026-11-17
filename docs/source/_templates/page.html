@@ -1,5 +1,12 @@
 {% extends "!page.html" %}
 
+{% block extrahead %}
+  {{ super() }}
+  {% if pagename == "index" %}
+    <meta http-equiv="refresh" content="0; url={{ pathto('overview') }}" />
+  {% endif %}
+{% endblock %}
+
 {% block footer %}
 <div class="related-pages">
   {% if next -%}
@@ -64,63 +71,8 @@
 
 {% block content %}
   {% if pagename == "index" %}
-    <script>
-      document.body.classList.add("mxl-landing");
-    </script>
-    <a class="mxl-skip-link" href="#mxl-main">Skip to content</a>
-
-    <header class="mxl-topbar">
-      <div class="mxl-topbar__inner">
-        <a class="mxl-brand" href="{{ pathto('index') }}" aria-label="MaxwellLink home">
-          <span class="mxl-brand__mark" aria-hidden="true">
-            <img src="{{ pathto('_static/img/mark.svg', 1) }}" alt="" loading="eager" decoding="async" />
-          </span>
-          <span class="mxl-brand__name">MaxwellLink</span>
-        </a>
-
-        <nav class="mxl-topbar__nav" aria-label="Site navigation">
-          <a class="mxl-topbar__link" href="{{ pathto('introduction') }}">Introduction</a>
-          <a class="mxl-topbar__link" href="{{ pathto('tutorials/index') }}">Tutorials</a>
-          <a class="mxl-topbar__link" href="{{ pathto('em_solvers/index') }}">EM Solvers</a>
-          <a class="mxl-topbar__link" href="{{ pathto('drivers/index') }}">Molecular Drivers</a>
-          <a class="mxl-topbar__link" href="{{ pathto('agent_skills') }}">Agent Skills</a>
-        </nav>
-
-        <div class="mxl-topbar__actions">
-          <a class="mxl-topbar__cta" href="{{ pathto('overview') }}">Docs</a>
-          <a class="mxl-topbar__cta" href="https://github.com/TaoELi/MaxwellLink" target="_blank" rel="noopener noreferrer">GitHub</a>
-          <a class="mxl-button mxl-button--primary mxl-button--sm" href="{{ pathto('installation') }}">
-            Get started
-          </a>
-        </div>
-      </div>
-    </header>
-
-    <main id="mxl-main">
-
-      <!-- Hero -->
-      <section class="mxl-hero" id="top">
-        <div class="mxl-hero__copy">
-          <h1 class="mxl-hero__title">
-            Self-consistent light&ndash;matter simulations
-          </h1>
-          <p class="mxl-hero__lead">
-            MaxwellLink couples electromagnetic solvers with quantum and classical
-            molecular drivers through a unified Python interface and a socket-based
-            communication layer.
-          </p>
-          <div class="mxl-hero__actions">
-            <a class="mxl-button mxl-button--primary" href="{{ pathto('installation') }}">Get started</a>
-            <a class="mxl-button mxl-button--outline" href="{{ pathto('overview') }}">Read the docs</a>
-          </div>
-        </div>
-      </section>
-
-    </main>
+    <p><a href="{{ pathto('overview') }}">Continue to the overview.</a></p>
   {% else %}
-    <script>
-      document.body.classList.remove("mxl-landing");
-    </script>
     {{ super() }}
   {% endif %}
 {% endblock %}

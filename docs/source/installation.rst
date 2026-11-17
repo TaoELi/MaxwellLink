@@ -39,7 +39,13 @@ Choose one of the following options to install **MaxwellLink** in the conda envi
 
    conda install -c tel-research maxwelllink
 
-This installs the **MaxwellLink** package with the necessary dependencies.
+This installs the **MaxwellLink** package with the necessary dependencies. 
+
+Note that **for running the built-in GPU MD drivers**, we expect a NVIDIA GPU and `cupy` also installed as follows:
+
+.. code-block:: bash
+
+   pip install cupy-cuda12x  # or the appropriate version (such as cuda13x) for your CUDA toolkit
 
 Optional EM solvers
 ~~~~~~~~~~~~~~~~~~~~~
@@ -59,8 +65,7 @@ suitable for production simulations. One can install `Meep <https://meep.readthe
 Optional driver dependencies
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A two-level system (TLS) model ships with **MaxwellLink** and does not require extra packages.
-Beyond this lightweight driver, **MaxwellLink** supports several molecular drivers that depend on
+Beyond the built-in molecular drivers, **MaxwellLink** supports several molecular drivers that depend on
 third-party packages. Install any molecular drivers below that you want to use. Each molecular driver can
 be pulled into the same conda environment.
 

@@ -65,6 +65,10 @@ Included molecular drivers
   - Direct socket connection to `LAMMPS <https://www.lammps.org/>`_ using ``fix mxl``.
   - Direct socket connection to **Born-Oppenheimer Molecular Dynamics** using a modified `DFTB+ <https://github.com/TEL-Research/dftbplus>`__ code.
 
+- **Built-in GPU drivers** 
+
+  - GPU-accelerated classical MD using `CuPy <https://cupy.dev/>`_ at the same accuracy as LAMMPS for simple liquids.
+
 Learning path
 ~~~~~~~~~~~~~~~
 

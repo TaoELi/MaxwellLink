@@ -20,7 +20,7 @@ The light-weight two-level system (TLS) driver and the simple harmonic oscillato
    tls
    sho
 
-Python-based Drivers for Productive Runs
+Python-based CPU Drivers for Productive Runs
 ------------------------------------------------
 
 .. toctree::
@@ -35,7 +35,7 @@ Python-based Drivers for Productive Runs
 Socket Connection to Third-Party Drivers
 ------------------------------------------------
 
-Additionally, **MaxwellLink** provides direct connections to third-party C++ or Fortran molecular packages, such as LAMMPS, DFTB+, and CP2K.
+Additionally, **MaxwellLink** provides direct connections to third-party C++ or Fortran molecular packages.
 
 .. toctree::
    :maxdepth: 1
@@ -43,3 +43,14 @@ Additionally, **MaxwellLink** provides direct connections to third-party C++ or 
    lammps
    dftbplus
    cp2k
+
+
+Built-in GPU molecular Drivers
+------------------------------------------------
+
+For extremely large-scale calculations, **MaxwellLink** provides a built-in GPU driver for classical molecular dynamics.
+
+.. toctree::
+   :maxdepth: 1
+
+   md_gpu

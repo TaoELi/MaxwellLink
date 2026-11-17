@@ -20,7 +20,7 @@ MaxwellLink is a modular, open-source Python framework for self-consistent light
 
 ## Performing simulations: HPC systems
 
-- In HPC slurm settings (if `sbatch` is available), add a SLRUM bash script to submit this simulation within the local subfolder of the input files, according to the HPC setting given at `HPC_PROFILE.json` at repo root (overridable by the user prompt). Then, submit the SLURM jobs.
+- In HPC slurm settings (if `sbatch` is available), add a SLRUM bash script to submit this simulation within the local subfolder of the input files, according to the HPC setting in this machine. Then, submit the SLURM jobs.
 
 ## Postprocessing 
 

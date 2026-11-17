@@ -23,7 +23,6 @@ This code supports both exploratory demonstrations and production-scale calculat
 - **EM dynamics** from simple to complex systems.
 - **Heterogeneous molecular theories** in one simulation.
 - **Extensible code structure** to add custom EM solvers or molecular drivers with minimal effort.
-- **Embedded AI Agent Skills** to allow users to chat within, e.g., [Visual Code IDE + Codex](https://taoeli.github.io/MaxwellLink/agent_skills.html), to directly generate desired input files and even run jobs on both local machines and HPC systems.
 
 ## Supported light-matter simulation schemes
 
@@ -49,9 +48,10 @@ As of today, the following [EM solvers](https://maxwelllink.org/em_solvers/index
 - In-house RT-TDDFT/Ehrenfest dynamics using [Psi4](https://psicode.org/) integrals, 
 - [ASE](https://wiki.fysik.dtu.dk/ase/) classical dynamics, 
 - Direct socket connection to modified [LAMMPS](https://github.com/TEL-Research/lammps) for classical MD via `fix mxl`, 
-- (beta version) Lorentz-Bath model for studying energy transfer between polaritons and dark modes,
-- (beta version) Direct socket connection to modified [DFTB+](https://github.com/TEL-Research/dftbplus) for tight-binding BOMD/real-time Ehrenfest dynamics.
-- (beta version) Direct socket connection to modified [CP2K](https://github.com/TEL-Research/cp2k) for real-time TDDFT/Ehrenfest dynamcis in both non-periodic and periodic systems.
+- Lorentz-Bath model for studying energy transfer between polaritons and dark modes,
+- Direct socket connection to modified [DFTB+](https://github.com/TEL-Research/dftbplus) for tight-binding BOMD/real-time Ehrenfest dynamics.
+- Direct socket connection to modified [CP2K](https://github.com/TEL-Research/cp2k) for real-time TDDFT/Ehrenfest dynamcis in both non-periodic and periodic systems.
+- Embedded GPU MD drivers for fast, large-scale simulations.
 
 ## Quick Start
 
@@ -71,26 +71,6 @@ Visit the [documentation](https://taoeli.github.io/MaxwellLink/overview.html) fo
 
 The jupyter notebook tutorials are located at [tutorials/](./tutorials/). Users may also view the tutorials rendered at the [documentation website](https://taoeli.github.io/MaxwellLink/tutorials/index.html).
 
-## Running simulations with AI Agents
-
-Inspired by the recently developed [FermiLink agent framework](https://github.com/TaoELi/FermiLink), **MaxwellLink** now provides an elegant method for integrating with AI agents. All we need is to type in `mxl init` in a working directory:
-```bash
-mkdir myproject
-cd myproject/
-mxl init
-```
-Then we can interact with **any local AI agent** (Claude Code, OpenAI Codex, Gemini CLI, or their desktop apps, VS Code IDE extensions, etc) for autonomous light-matter simulations by simple natural language prompts.
-
-`mxl init` will set up the package knowledge base (source code tree + agent skills layer) in your working directory for agent reasoning. After the simulation, we can simply clean up the package knowledge base by:
-```bash
-mxl clean
-```
-
-If your machine supports SLURM job management (such as HPCs), run the following command to set up the HPC environment, so the agent can automatically use the correct SLURM environments for large-scale HPC simulations.
-```bash
-mxl hpc
-```
-
 ## Citation
 
 If you find **MaxwellLink** helpful for your research, please cite the following reference:
@@ -102,6 +82,8 @@ If you find **MaxwellLink** helpful for your research, please cite the following
 
 - X Ji, and TE Li. *Nonlinear Freezing of Vibrational Polariton Transport via Mesoscale Simulations*. [Nano Lett. acs.nanolett.6c03367](https://doi.org/10.1021/acs.nanolett.6c03367) (2026). [[data](https://github.com/TaoELi/maxwelllink_examples)]
 
-- Meng, G.; Li, T. E. *Molecular Electrodynamic Relaxation in Dielectric and Plasmonic Cavities* Submitted (2026).
+- G Meng, and TE Li. *Molecular Electrodynamic Relaxation in Dielectric and Plasmonic Cavities*. [arXiv:2610.38992](https://arxiv.org/abs/2610.38992).
+
+- X Ji, and TE Li. *Atomistic Emergence of Vibrational Polariton Condensation* [arXiv:2610.41133](https://arxiv.org/abs/2610.41133).
 
 
