@@ -19,7 +19,6 @@ from setuptools.command.build_py import build_py as _build_py
 _WORKSPACE_ITEMS: tuple[tuple[str, str], ...] = (
     ("AGENTS.md", "AGENTS.md"),
     ("README.md", "README.md"),
-    ("HPC_PROFILE.json", "HPC_PROFILE.json"),
     ("src", "src"),
     ("tests", "tests"),
     ("skills", "skills"),

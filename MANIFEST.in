@@ -1,7 +1,6 @@
 # Top-level docs and config
 include README.md
 include AGENTS.md
-include HPC_PROFILE.json
 include LICENSE
 include pyproject.toml
 

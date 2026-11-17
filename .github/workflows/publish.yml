@@ -12,7 +12,6 @@ on:
       - "MANIFEST.in"
       - "AGENTS.md"
       - "README.md"
-      - "HPC_PROFILE.json"
       - "src/**"
       - "tests/**"
       - "skills/**"
@@ -142,9 +141,8 @@ jobs:
           test -L README.md
           test -L CLAUDE.md
           test -L GEMINI.md
-          if command -v sbatch >/dev/null 2>&1; then
+          if command -v sbatch >/dev/null 2>&1 && test -f "${HOME}/.maxwelllink/HPC_PROFILE.json"; then
             test -L HPC_PROFILE.json
-            test -f "${HOME}/.maxwelllink/HPC_PROFILE.json"
           else
             test ! -e HPC_PROFILE.json
           fi
@@ -161,9 +159,6 @@ jobs:
           test ! -e CLAUDE.md
           test ! -e GEMINI.md
           test ! -e HPC_PROFILE.json
-          if command -v sbatch >/dev/null 2>&1; then
-            test -f "${HOME}/.maxwelllink/HPC_PROFILE.json"
-          fi
 
           # Backward-compatible aliases
           mxl-init
@@ -174,13 +169,15 @@ jobs:
           test ! -e src
 
           # Set user profile explicitly and verify persistence
-          cp "${GITHUB_WORKSPACE}/HPC_PROFILE.json" custom_hpc.json
           python - <<'PY'
           import json
           from pathlib import Path
           p = Path("custom_hpc.json")
-          data = json.loads(p.read_text(encoding="utf-8"))
-          data["slurm_default_partition"] = "debug"
+          data = {
+              "slurm_default_partition": "debug",
+              "slurm_defaults": "--nodes=1 --ntasks=1 --time=00:10:00",
+              "slurm_resource_policy": "serial-first",
+          }
           p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
           PY
           mxl hpc set custom_hpc.json

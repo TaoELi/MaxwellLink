@@ -201,6 +201,27 @@ def test_initialize_workspace_skips_hpc_profile_when_no_sbatch(
     assert not mxl_init._global_hpc_profile_path().exists()
 
 
+@pytest.mark.parametrize("slurm_available", [False, True])
+def test_initialize_and_clean_without_bundled_hpc_profile(
+    tmp_path: Path,
+    payload_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slurm_available: bool,
+) -> None:
+    (payload_root / "HPC_PROFILE.json").unlink()
+    monkeypatch.setattr(mxl_init, "_slurm_available", lambda: slurm_available)
+    workdir = tmp_path / "workspace"
+    workdir.mkdir()
+
+    mxl_init.initialize_workspace(workdir, payload_root)
+    _assert_points_to(workdir / "src", payload_root / "src")
+    assert not (workdir / "HPC_PROFILE.json").exists()
+    assert not mxl_init._global_hpc_profile_path().exists()
+
+    mxl_clean.clean_workspace(workdir, payload_root)
+    assert not (workdir / "src").exists()
+
+
 def test_initialize_workspace_conflict_and_force(
     tmp_path: Path, payload_root: Path
 ) -> None:
@@ -427,6 +448,7 @@ def test_init_reuses_existing_global_hpc_profile(
     tmp_path: Path,
     payload_root: Path,
 ) -> None:
+    (payload_root / "HPC_PROFILE.json").unlink()
     custom = tmp_path / "custom_profile.json"
     custom.write_text(
         json.dumps(

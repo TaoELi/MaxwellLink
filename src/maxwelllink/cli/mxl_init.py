@@ -26,7 +26,6 @@ _HPC_PROFILE_FILE = "HPC_PROFILE.json"
 _REQUIRED_PAYLOAD_ITEMS = (
     "AGENTS.md",
     "README.md",
-    _HPC_PROFILE_FILE,
     "src",
     "tests",
     "skills",
@@ -89,8 +88,15 @@ def _ensure_global_hpc_profile(payload_root: Path) -> Path:
     if global_profile.exists():
         return global_profile
 
+    default_profile = payload_root / _HPC_PROFILE_FILE
+    if not default_profile.exists():
+        raise FileNotFoundError(
+            "No default HPC profile is bundled. "
+            "Install your own with: mxl hpc set path/to/profile.json"
+        )
+
     global_profile.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(payload_root / _HPC_PROFILE_FILE, global_profile)
+    shutil.copy2(default_profile, global_profile)
     return global_profile
 
 
@@ -290,7 +296,10 @@ def initialize_workspace(
         dst = destination / name
         _ensure_symlink(agents_dst, dst, force=force)
 
-    if _slurm_available():
+    if _slurm_available() and (
+        _global_hpc_profile_path().exists()
+        or (payload_root / _HPC_PROFILE_FILE).exists()
+    ):
         global_hpc_profile = _ensure_global_hpc_profile(payload_root)
         _ensure_symlink(
             global_hpc_profile,
